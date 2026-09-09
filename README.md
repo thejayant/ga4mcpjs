@@ -51,13 +51,39 @@ It exposes these MCP tools:
 
 ## Routes
 
-- `GET /mcp` and `POST /mcp` for the public MCP endpoint
+- `GET /mcp` and `POST /mcp` for the MCP endpoint. Requires a bearer token; unauthenticated
+  requests get `401` with a `WWW-Authenticate` header pointing at the resource metadata, which
+  is what makes MCP clients start the OAuth flow.
+- `POST /register` (alias `POST /oauth/register`) for RFC 7591 dynamic client registration
 - `GET /auth/google/start` as the app authorization endpoint that redirects into Google OAuth
 - `GET /auth/google/callback` for the Google OAuth callback
 - `POST /oauth/token` as the app token endpoint that mints Vercel-issued MCP tokens
 - `GET /debug/integrations` for env, scope, auth, and tool readiness debugging
-- `GET /.well-known/oauth-authorization-server`
-- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-authorization-server` (also served at `/.well-known/openid-configuration`
+  and `/.well-known/oauth-authorization-server/mcp`)
+- `GET /.well-known/oauth-protected-resource` (also served at `/.well-known/oauth-protected-resource/mcp`)
+
+## Connecting a client
+
+Both Claude and ChatGPT discover the server automatically. Point them at `<APP_BASE_URL>/mcp`:
+
+- **Claude Code**: `claude mcp add --transport http -s user ga4mcp <APP_BASE_URL>/mcp`, then
+  `/mcp` -> Authenticate.
+- **Claude Desktop / claude.ai**: Settings -> Connectors -> Add custom connector -> `<APP_BASE_URL>/mcp`.
+- **ChatGPT**: add it as a custom connector using the same URL.
+
+The client registers itself at `/register`, receives a `client_id`, and runs authorization code +
+PKCE (S256). Google is asked with `prompt=select_account consent`, so the account chooser always
+appears and Google always returns a refresh token.
+
+Client redirect URIs are enforced: a `redirect_uri` is only accepted if it was registered under the
+`client_id` presented, or if it is a loopback address (`localhost` / `127.0.0.1` / `[::1]`) for
+native clients.
+
+Issued MCP access tokens carry the Google refresh token sealed inside the encrypted token, so a
+serverless cold start does not invalidate an existing connection. Sessions in memory are only a
+warm cache; when a request lands on an instance that has never seen the session, it is rebuilt from
+the token instead of forcing the user to sign in again.
 
 ## Required environment variables
 

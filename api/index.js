@@ -15,6 +15,7 @@ const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const CLIENT_REGISTRATION_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const EXPERT_VERSION = "2026.03.14";
 const TOOL_SCOPE_MAP = {
   list_search_console_sites: [SEARCH_CONSOLE_SCOPE],
@@ -339,6 +340,85 @@ function sha256Base64Url(value) {
   return base64UrlEncode(crypto.createHash("sha256").update(value).digest());
 }
 
+function isLoopbackRedirectUri(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function registerOauthClient(req, body = {}) {
+  const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris.map(String).filter(Boolean) : [];
+  if (!redirectUris.length) throw new Error("redirect_uris is required.");
+  for (const uri of redirectUris) {
+    try {
+      new URL(uri);
+    } catch {
+      throw new Error(`Invalid redirect_uri: ${uri}`);
+    }
+  }
+  const issuedAt = Date.now();
+  const clientName = body.client_name ? String(body.client_name).slice(0, 200) : undefined;
+  const clientId = encryptJson({
+    typ: "mcp_client_registration",
+    iss: getBaseUrl(req),
+    redirectUris,
+    clientName,
+    iat: issuedAt,
+    exp: issuedAt + CLIENT_REGISTRATION_TTL_MS
+  });
+  return {
+    client_id: clientId,
+    client_id_issued_at: Math.floor(issuedAt / 1000),
+    redirect_uris: redirectUris,
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+    scope: GOOGLE_SCOPES.join(" "),
+    ...(clientName ? { client_name: clientName } : {})
+  };
+}
+
+function readClientRegistration(req, clientId) {
+  if (!clientId) return null;
+  let payload;
+  try {
+    payload = decryptJson(String(clientId));
+  } catch {
+    return null;
+  }
+  if (payload.typ !== "mcp_client_registration") return null;
+  if (payload.iss !== getBaseUrl(req)) return null;
+  if (payload.exp && Number(payload.exp) <= Date.now()) return null;
+  return payload;
+}
+
+function buildInvalidRedirectUriError(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  error.oauthError = "invalid_request";
+  return error;
+}
+
+function resolveClientRedirectUri(req) {
+  const requested = req.query.redirect_uri ? String(req.query.redirect_uri) : null;
+  if (!requested) return null;
+  const registration = readClientRegistration(req, req.query.client_id);
+  if (registration) {
+    if (!registration.redirectUris.includes(requested)) {
+      throw buildInvalidRedirectUriError("redirect_uri does not match the redirect URIs registered for this client_id.");
+    }
+    return requested;
+  }
+  if (isLoopbackRedirectUri(requested)) return requested;
+  throw buildInvalidRedirectUriError(
+    "Unregistered redirect_uri. Register the client at /register first, or use a loopback redirect URI."
+  );
+}
+
 function createOauthClient(req) {
   return new google.auth.OAuth2(
     requireEnv("GOOGLE_CLIENT_ID"),
@@ -583,7 +663,12 @@ function mintAccessToken(req, payload) {
     sessionId: payload.sessionId,
     scope: payload.scope,
     iat: Date.now(),
-    exp: Date.now() + ACCESS_TOKEN_TTL_MS
+    exp: Date.now() + ACCESS_TOKEN_TTL_MS,
+    google: {
+      refreshToken: payload.google?.refreshToken,
+      scope: payload.google?.scope,
+      tokenType: payload.google?.tokenType || "Bearer"
+    }
   });
 }
 
@@ -697,7 +782,20 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
     });
   }
   const sessionId = payload.sessionId;
-  const session = sessionId ? getSession(sessionId) : null;
+  let session = sessionId ? getSession(sessionId) : null;
+  // Serverless instances do not share the in-memory session cache, so rebuild the
+  // session from the credentials sealed inside the access token when it is missing.
+  if (!session && sessionId && payload.google?.refreshToken) {
+    session = saveSession(sessionId, {
+      sessionId,
+      refreshToken: payload.google.refreshToken,
+      accessToken: null,
+      expiryDate: 0,
+      scope: payload.google.scope || payload.scope,
+      tokenType: payload.google.tokenType || "Bearer",
+      sessionExpiresAt: Date.now() + SESSION_TTL_MS
+    });
+  }
   if (!session) {
     throw buildAuthError({
       httpStatus: 401,
@@ -2356,9 +2454,10 @@ app.get("/auth/google/start", (req, res) => {
     const oauthClient = createOauthClient(req);
     const requestedScopes = normalizeScopes(req.query.scope);
     const resource = getRequestedResource(req, getResourceUrl(req));
+    const clientRedirectUri = resolveClientRedirectUri(req);
     const appState = {
       returnTo: req.query.return_to || "/",
-      clientRedirectUri: req.query.redirect_uri || null,
+      clientRedirectUri,
       clientState: req.query.state || null,
       codeChallenge: req.query.code_challenge || null,
       codeChallengeMethod: req.query.code_challenge_method || "S256",
@@ -2372,7 +2471,9 @@ app.get("/auth/google/start", (req, res) => {
       access_type: "offline",
       scope: requestedScopes,
       include_granted_scopes: true,
-      prompt: "consent",
+      // select_account always shows the Google account chooser; consent is required
+      // for Google to return a refresh token on repeat authorizations.
+      prompt: "select_account consent",
       state: encryptJson(appState)
     });
 
@@ -2389,8 +2490,8 @@ app.get("/auth/google/start", (req, res) => {
       error_stack: error instanceof Error ? error.stack : String(error)
     });
 
-    return res.status(500).json({
-      error: "auth_start_failed",
+    return res.status(error?.statusCode || 500).json({
+      error: error?.oauthError || "auth_start_failed",
       error_description: error instanceof Error ? error.message : String(error)
     });
   }
@@ -2650,31 +2751,89 @@ app.post("/oauth/token", async (req, res) => {
   }
 });
 
-app.get("/.well-known/oauth-authorization-server", (req, res) => {
+function buildAuthorizationServerMetadata(req) {
   const baseUrl = getBaseUrl(req);
-  res.json({
+  return {
     issuer: baseUrl,
     authorization_endpoint: `${baseUrl}/auth/google/start`,
     token_endpoint: `${baseUrl}/oauth/token`,
+    registration_endpoint: `${baseUrl}/register`,
     scopes_supported: GOOGLE_SCOPES,
     response_types_supported: ["code"],
+    response_modes_supported: ["query"],
     grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256", "plain"],
+    code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"]
-  });
+  };
+}
+
+function buildProtectedResourceMetadata(req) {
+  return {
+    resource: getResourceUrl(req),
+    authorization_servers: [getBaseUrl(req)],
+    bearer_methods_supported: ["header"],
+    scopes_supported: GOOGLE_SCOPES
+  };
+}
+
+// RFC 7591 dynamic client registration. Claude and ChatGPT both require this to
+// obtain a client_id before they can start the authorization flow. Registration is
+// stateless: the sealed client_id carries the registered redirect URIs, which the
+// authorization endpoint then enforces.
+function handleClientRegistration(req, res) {
+  try {
+    return res.status(201).json(registerOauthClient(req, req.body || {}));
+  } catch (error) {
+    return res.status(400).json({
+      error: "invalid_client_metadata",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+app.post("/register", handleClientRegistration);
+app.post("/oauth/register", handleClientRegistration);
+
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  res.json(buildAuthorizationServerMetadata(req));
+});
+
+app.get("/.well-known/oauth-authorization-server/mcp", (req, res) => {
+  res.json(buildAuthorizationServerMetadata(req));
+});
+
+app.get("/.well-known/openid-configuration", (req, res) => {
+  res.json(buildAuthorizationServerMetadata(req));
 });
 
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
-  const baseUrl = getBaseUrl(req);
-  res.json({
-    resource: getResourceUrl(req),
-    authorization_servers: [baseUrl],
-    bearer_methods_supported: ["header"],
-    scopes_supported: GOOGLE_SCOPES
-  });
+  res.json(buildProtectedResourceMetadata(req));
 });
 
+app.get("/.well-known/oauth-protected-resource/mcp", (req, res) => {
+  res.json(buildProtectedResourceMetadata(req));
+});
+
+function sendUnauthorized(req, res, error) {
+  const parts = ['Bearer realm="mcp"', `resource_metadata="${getBaseUrl(req)}/.well-known/oauth-protected-resource"`];
+  if (error?.oauthError) parts.push(`error="${error.oauthError}"`);
+  if (error?.oauthErrorDescription) {
+    parts.push(`error_description="${String(error.oauthErrorDescription).replace(/"/g, "'")}"`);
+  }
+  if (error?.details?.required_scopes?.length) parts.push(`scope="${error.details.required_scopes.join(" ")}"`);
+  res.setHeader("WWW-Authenticate", parts.join(", "));
+  return res.status(error?.statusCode === 403 ? 403 : 401).json(formatAuthErrorResponse(error || {}));
+}
+
 app.all("/mcp", async (req, res) => {
+  // The MCP authorization spec expects a real 401 with WWW-Authenticate here so the
+  // client can discover the authorization server and start the OAuth flow.
+  try {
+    await verifyMcpAccessToken(req, []);
+  } catch (error) {
+    return sendUnauthorized(req, res, error);
+  }
+
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true
