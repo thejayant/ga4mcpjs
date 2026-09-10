@@ -30,6 +30,11 @@ It exposes these MCP tools:
 - `list_merchant_products`
 - `get_merchant_product`
 - `search_merchant_reports`
+- `list_merchant_subaccounts`
+- `get_merchant_account_issues`
+- `get_merchant_product_status_summary`
+- `list_merchant_data_sources`
+- `run_merchant_preset`
 - `list_google_ads_accessible_customers`
 - `query_google_ads`
 - `search_stream_google_ads`
@@ -152,6 +157,8 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
   `channels`, `landing_pages`, `source_medium`, `campaigns`, `key_events`, `ecommerce`, `attribution_breakdown`
 - `run_search_console_preset` supports:
   `queries`, `pages`, `countries`, `devices`, `date_trends`, `branded_vs_non_branded`
+- `run_merchant_preset` supports:
+  `product_performance`, `product_status`, `price_competitiveness`, `price_insights`, `best_sellers`, `competitive_visibility`
 - Every preset returns:
   raw API output, generated request/query metadata, normalized cross-platform rows, and platform guardrails
 - `get_marketing_schema` returns the normalized marketing record format and cross-source field mappings.
@@ -161,6 +168,10 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 ## Merchant Center notes
 
 - Merchant Center tools use the Google Merchant API v1.
+- Reports run against the GA `reports/v1` sub-API. Accounts, products and data sources use `accounts/v1`, `products/v1` and `datasources/v1`; product status aggregation uses `issueresolution/v1`.
+- `run_merchant_preset` with `product_performance` and `marketingMethod: "ORGANIC"` reports free listing traffic, so it works without a Google Ads account.
+- `product_status`, `price_competitiveness` and `price_insights` are current snapshots and ignore the date range. `best_sellers` needs `reportDate` plus `reportCountryCode`; `competitive_visibility` needs `reportCountryCode`.
+- Set `includeItemIssues: false` on `product_status` if selecting the repeated `itemIssues` field is rejected for the account.
 - Google may require the Cloud project to be registered for Merchant API access before Merchant Center requests succeed.
 - The Merchant Center OAuth scope is not read-only; this server exposes only read-only Merchant Center MCP tools.
 - `search_merchant_reports` is the reporting entry point for performance and diagnostic-style Merchant datasets that are available through the Merchant API.

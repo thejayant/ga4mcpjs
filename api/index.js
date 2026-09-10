@@ -32,6 +32,11 @@ const TOOL_SCOPE_MAP = {
   list_merchant_products: [MERCHANT_CENTER_SCOPE],
   get_merchant_product: [MERCHANT_CENTER_SCOPE],
   search_merchant_reports: [MERCHANT_CENTER_SCOPE],
+  list_merchant_subaccounts: [MERCHANT_CENTER_SCOPE],
+  get_merchant_account_issues: [MERCHANT_CENTER_SCOPE],
+  get_merchant_product_status_summary: [MERCHANT_CENTER_SCOPE],
+  list_merchant_data_sources: [MERCHANT_CENTER_SCOPE],
+  run_merchant_preset: [MERCHANT_CENTER_SCOPE],
   list_search_console_sitemaps: [SEARCH_CONSOLE_SCOPE],
   get_search_console_sitemap: [SEARCH_CONSOLE_SCOPE],
   inspect_search_console_url: [SEARCH_CONSOLE_SCOPE],
@@ -142,6 +147,38 @@ const SEARCH_CONSOLE_PRESET_DEFINITIONS = {
     description: "Branded or non-branded query performance using provided brand terms."
   }
 };
+const MERCHANT_PRESET_DEFINITIONS = {
+  product_performance: {
+    entityType: "product",
+    view: "ProductPerformanceView",
+    description: "Product clicks, impressions, CTR, conversions and conversion value. Set marketingMethod to ORGANIC for free listings or ADS for Shopping ads."
+  },
+  product_status: {
+    entityType: "product",
+    view: "ProductView",
+    description: "Current feed snapshot: availability, condition, approval status per reporting context, click potential and item issues. Not a time series."
+  },
+  price_competitiveness: {
+    entityType: "product",
+    view: "PriceCompetitivenessProductView",
+    description: "Your price against the benchmark price other merchants charge for the same product. Requires reportCountryCode."
+  },
+  price_insights: {
+    entityType: "product",
+    view: "PriceInsightsProductView",
+    description: "Google suggested price per product plus predicted clicks, impressions and conversions change at that price."
+  },
+  best_sellers: {
+    entityType: "product",
+    view: "BestSellersProductClusterView",
+    description: "Best selling product clusters with rank, relative demand and inventory status. Requires reportDate and reportCountryCode."
+  },
+  competitive_visibility: {
+    entityType: "domain",
+    view: "CompetitiveVisibilityCompetitorView",
+    description: "Competing domains in Shopping surfaces with relative visibility, page overlap and higher-position rate. Requires reportCountryCode."
+  }
+};
 const PLATFORM_GUARDRAILS = {
   google_ads: {
     strengths: [
@@ -180,7 +217,10 @@ const PLATFORM_GUARDRAILS = {
     ],
     limitations: [
       "Merchant API access may require GCP registration beyond enabling the API.",
-      "Not every Merchant Center UI panel is exposed with equivalent API fidelity."
+      "Not every Merchant Center UI panel is exposed with equivalent API fidelity.",
+      "ProductView, PriceCompetitivenessProductView and PriceInsightsProductView are current snapshots, not time series, so they ignore any date range.",
+      "BestSellersProductClusterView needs a valid reportDate plus reportCountryCode, and CompetitiveVisibilityCompetitorView needs reportCountryCode.",
+      "Price insights, price competitiveness and best sellers datasets are only populated once Google has enough data for the account."
     ]
   },
   callrail: {
@@ -1111,6 +1151,128 @@ function buildSearchConsolePresetRequest(params) {
   };
 }
 
+function quoteMerchantLiteral(value) {
+  return `'${String(value).replace(/'/g, "\\'")}'`;
+}
+
+function buildMerchantPresetQuery(params) {
+  const dateRange = resolveDateWindow(params);
+  const limit = Number(params.limit || 100);
+  const limitSql = limit > 0 ? ` LIMIT ${limit}` : "";
+  const extra = Array.isArray(params.extraWhereClauses) ? params.extraWhereClauses.filter(Boolean) : [];
+  const country = params.reportCountryCode ? String(params.reportCountryCode).toUpperCase() : null;
+  const dailyField = params.includeDailyBreakdown === true ? ", date" : "";
+
+  function compose(select, view, where, orderBy) {
+    const clauses = [...where.filter(Boolean), ...extra];
+    const whereSql = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const orderSql = params.orderBy ? ` ORDER BY ${params.orderBy}` : (orderBy ? ` ORDER BY ${orderBy}` : "");
+    return `SELECT ${select} FROM ${view}${whereSql}${orderSql}${limitSql}`;
+  }
+
+  const presets = {
+    product_performance: () => compose(
+      `offerId, title, brand, categoryL1, customerCountryCode, marketingMethod${dailyField}, clicks, impressions, clickThroughRate, conversions, conversionValue, conversionRate`,
+      "ProductPerformanceView",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        params.marketingMethod ? `marketingMethod = ${quoteMerchantLiteral(String(params.marketingMethod).toUpperCase())}` : null,
+        country ? `customerCountryCode = ${quoteMerchantLiteral(country)}` : null
+      ],
+      "clicks DESC"
+    ),
+    product_status: () => compose(
+      `offerId, id, title, brand, condition, availability, channel, feedLabel, languageCode, aggregatedReportingContextStatus, clickPotential, clickPotentialRank${params.includeItemIssues === false ? "" : ", itemIssues"}`,
+      "ProductView",
+      [params.aggregatedStatus ? `aggregatedReportingContextStatus = ${quoteMerchantLiteral(String(params.aggregatedStatus).toUpperCase())}` : null],
+      null
+    ),
+    price_competitiveness: () => compose(
+      "offerId, id, title, brand, price, benchmarkPrice, reportCountryCode, categoryL1",
+      "PriceCompetitivenessProductView",
+      [country ? `reportCountryCode = ${quoteMerchantLiteral(country)}` : null],
+      null
+    ),
+    price_insights: () => compose(
+      "offerId, id, title, brand, price, suggestedPrice, effectiveness, predictedClicksChangeFraction, predictedImpressionsChangeFraction, predictedConversionsChangeFraction",
+      "PriceInsightsProductView",
+      [],
+      null
+    ),
+    best_sellers: () => compose(
+      "title, brand, rank, previousRank, relativeDemand, previousRelativeDemand, relativeDemandChange, inventoryStatus, brandInventoryStatus, reportDate, reportCountryCode, reportCategoryId, reportGranularity",
+      "BestSellersProductClusterView",
+      [
+        `reportDate = '${params.reportDate || dateRange.endDate}'`,
+        `reportGranularity = ${quoteMerchantLiteral(String(params.reportGranularity || "WEEKLY").toUpperCase())}`,
+        country ? `reportCountryCode = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `reportCategoryId = ${quoteMerchantLiteral(params.reportCategoryId)}` : null
+      ],
+      "rank ASC"
+    ),
+    competitive_visibility: () => compose(
+      "domain, rank, relativeVisibility, adsOrganicRatio, pageOverlapRate, higherPositionRate, isYourDomain, trafficSource, date, reportCountryCode",
+      "CompetitiveVisibilityCompetitorView",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        country ? `reportCountryCode = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `reportCategoryId = ${quoteMerchantLiteral(params.reportCategoryId)}` : null
+      ],
+      "relativeVisibility DESC"
+    )
+  };
+
+  const build = presets[params.preset];
+  if (!build) throw new Error(`Unsupported Merchant Center preset: ${params.preset}`);
+  const definition = MERCHANT_PRESET_DEFINITIONS[params.preset];
+  return {
+    entityType: definition.entityType,
+    view: definition.view,
+    query: build(),
+    dateRange,
+    limit,
+    timeSeries: ["product_performance", "competitive_visibility"].includes(params.preset)
+  };
+}
+
+function normalizeMerchantPresetRows(preset, responseBody) {
+  const definition = MERCHANT_PRESET_DEFINITIONS[preset];
+  const viewKey = definition ? definition.view.charAt(0).toLowerCase() + definition.view.slice(1) : null;
+  const rows = responseBody?.results || [];
+  return rows.map((result) => {
+    const row = (viewKey && result[viewKey]) || Object.values(result)[0] || {};
+    return buildNormalizedRecord({
+      platform: "merchant_center",
+      preset,
+      entityType: definition?.entityType || "custom",
+      sourcePrimaryKey: row.offerId || row.id || row.domain || row.title || null,
+      dimensions: {
+        date: row.date || row.reportDate,
+        product_id: row.offerId || row.id,
+        product_title: row.title,
+        brand: row.brand,
+        channel: row.marketingMethod || row.trafficSource,
+        country: row.customerCountryCode || row.reportCountryCode,
+        domain: row.domain
+      },
+      metrics: {
+        clicks: toNumber(row.clicks),
+        impressions: toNumber(row.impressions),
+        ctr: toNumber(row.clickThroughRate),
+        conversions: toNumber(row.conversions),
+        // Merchant Price fields carry amountMicros, so scale them to normal currency.
+        conversion_value: microsToStandardCurrency(row.conversionValue?.amountMicros),
+        price: microsToStandardCurrency(row.price?.amountMicros),
+        benchmark_price: microsToStandardCurrency(row.benchmarkPrice?.amountMicros),
+        suggested_price: microsToStandardCurrency(row.suggestedPrice?.amountMicros),
+        rank: toNumber(row.rank),
+        relative_visibility: toNumber(row.relativeVisibility)
+      },
+      sourceContext: row
+    });
+  });
+}
+
 function normalizeGoogleAdsPresetRows(preset, responseBody) {
   const rows = responseBody?.results || [];
   return rows.map((row) => {
@@ -1229,7 +1391,8 @@ function buildMarketingPresetCatalog() {
     expertVersion: EXPERT_VERSION,
     google_ads: GOOGLE_ADS_PRESET_DEFINITIONS,
     ga4: GA4_PRESET_DEFINITIONS,
-    search_console: SEARCH_CONSOLE_PRESET_DEFINITIONS
+    search_console: SEARCH_CONSOLE_PRESET_DEFINITIONS,
+    merchant_center: MERCHANT_PRESET_DEFINITIONS
   };
 }
 
@@ -1467,7 +1630,7 @@ async function getMerchantProduct(accessToken, name) {
 
 async function searchMerchantReports(accessToken, params) {
   const parent = normalizeMerchantAccountName(params.accountId);
-  return callGoogleApi(`https://merchantapi.googleapis.com/reports/v1beta/${parent}/reports:search`, accessToken, {
+  return callGoogleApi(`https://merchantapi.googleapis.com/reports/v1/${parent}/reports:search`, accessToken, {
     method: "POST",
     body: JSON.stringify({
       query: params.query,
@@ -1475,6 +1638,43 @@ async function searchMerchantReports(accessToken, params) {
       pageToken: params.pageToken
     })
   });
+}
+
+async function listMerchantSubaccounts(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  const url = new URL(`https://merchantapi.googleapis.com/accounts/v1/${parent}:listSubaccounts`);
+  appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+async function getMerchantAccountIssues(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  const url = new URL(`https://merchantapi.googleapis.com/accounts/v1/${parent}/issues`);
+  appendQueryParams(url, {
+    pageSize: params.pageSize,
+    pageToken: params.pageToken,
+    languageCode: params.languageCode,
+    timeZone: params.timeZone
+  });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+async function getMerchantProductStatusSummary(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  const url = new URL(`https://merchantapi.googleapis.com/issueresolution/v1/${parent}/aggregateProductStatuses`);
+  appendQueryParams(url, {
+    pageSize: params.pageSize,
+    pageToken: params.pageToken,
+    filter: params.filter
+  });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+async function listMerchantDataSources(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  const url = new URL(`https://merchantapi.googleapis.com/datasources/v1/${parent}/dataSources`);
+  appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
 }
 
 async function listGoogleAdsAccessibleCustomers(accessToken) {
@@ -2097,6 +2297,157 @@ function createServer(req) {
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.search_merchant_reports, async ({ googleCredentials }) => {
       const response = await searchMerchantReports(googleCredentials.accessToken, parsed);
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("list_merchant_subaccounts", {
+    title: "List Merchant Center Subaccounts",
+    description: "List subaccounts under a Merchant Center advanced (multi-client) account.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_merchant_subaccounts, async ({ googleCredentials }) => {
+      const response = await listMerchantSubaccounts(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("get_merchant_account_issues", {
+    title: "Get Merchant Center Account Issues",
+    description: "List account-level Merchant Center issues such as website claim problems, policy warnings, and suspensions.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      languageCode: z.string().optional(),
+      timeZone: z.string().optional(),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      languageCode: z.string().optional(),
+      timeZone: z.string().optional(),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_merchant_account_issues, async ({ googleCredentials }) => {
+      const response = await getMerchantAccountIssues(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("get_merchant_product_status_summary", {
+    title: "Get Merchant Center Product Status Summary",
+    description: "Aggregate product status counts and the issues affecting them, grouped by reporting context. Use this to diagnose why products are disapproved or limited.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      filter: z.string().optional(),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      filter: z.string().optional(),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_merchant_product_status_summary, async ({ googleCredentials }) => {
+      const response = await getMerchantProductStatusSummary(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("list_merchant_data_sources", {
+    title: "List Merchant Center Data Sources",
+    description: "List product feeds and other data sources configured for a Merchant Center account, including their input type and update schedule.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(500).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_merchant_data_sources, async ({ googleCredentials }) => {
+      const response = await listMerchantDataSources(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("run_merchant_preset", {
+    title: "Run Merchant Center Preset",
+    description: "Run expert Merchant Center report presets for product performance, feed status, price competitiveness, price insights, best sellers, and competitive visibility. Product performance with marketingMethod ORGANIC covers free listings and needs no Google Ads account.",
+    inputSchema: {
+      preset: z.enum(["product_performance", "product_status", "price_competitiveness", "price_insights", "best_sellers", "competitive_visibility"]),
+      accountId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      limit: z.number().int().min(1).max(5000).optional(),
+      marketingMethod: z.enum(["ORGANIC", "ADS"]).optional(),
+      reportCountryCode: z.string().optional(),
+      reportCategoryId: z.string().optional(),
+      reportDate: z.string().optional(),
+      reportGranularity: z.enum(["WEEKLY", "MONTHLY"]).optional(),
+      aggregatedStatus: z.string().optional(),
+      includeItemIssues: z.boolean().optional(),
+      includeDailyBreakdown: z.boolean().optional(),
+      orderBy: z.string().optional(),
+      extraWhereClauses: z.array(z.string()).optional(),
+      pageSize: z.number().int().min(1).max(1000).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      preset: z.enum(["product_performance", "product_status", "price_competitiveness", "price_insights", "best_sellers", "competitive_visibility"]),
+      accountId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      limit: z.number().int().min(1).max(5000).optional(),
+      marketingMethod: z.enum(["ORGANIC", "ADS"]).optional(),
+      reportCountryCode: z.string().optional(),
+      reportCategoryId: z.string().optional(),
+      reportDate: z.string().optional(),
+      reportGranularity: z.enum(["WEEKLY", "MONTHLY"]).optional(),
+      aggregatedStatus: z.string().optional(),
+      includeItemIssues: z.boolean().optional(),
+      includeDailyBreakdown: z.boolean().optional(),
+      orderBy: z.string().optional(),
+      extraWhereClauses: z.array(z.string()).optional(),
+      pageSize: z.number().int().min(1).max(1000).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_merchant_preset, async ({ googleCredentials }) => {
+      const presetConfig = buildMerchantPresetQuery(parsed);
+      const response = await searchMerchantReports(googleCredentials.accessToken, {
+        accountId: parsed.accountId,
+        query: presetConfig.query,
+        pageSize: parsed.pageSize || parsed.limit,
+        pageToken: parsed.pageToken
+      });
+      return buildToolResult({
+        preset: parsed.preset,
+        entityType: presetConfig.entityType,
+        view: presetConfig.view,
+        dateRange: presetConfig.timeSeries ? presetConfig.dateRange : null,
+        isSnapshot: !presetConfig.timeSeries,
+        guardrails: PLATFORM_GUARDRAILS.merchant_center,
+        query: presetConfig.query,
+        normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
+        normalizedRows: response.ok ? normalizeMerchantPresetRows(parsed.preset, response.body) : [],
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
     });
   });
   server.registerTool("list_google_ads_accessible_customers", {
