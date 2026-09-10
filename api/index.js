@@ -1108,6 +1108,16 @@ function normalizeScopes(scopeValue) {
   return allowed.length ? Array.from(new Set(allowed)) : [...GOOGLE_SCOPES];
 }
 
+// normalizeScopes is deliberately permissive because session and token scope strings
+// can hold a Google + Meta union. Anything that builds a Google authorization URL must
+// use this instead, or a Meta scope would reach Google and be rejected as invalid_scope.
+function normalizeGoogleAuthScopes(scopeValue) {
+  if (!scopeValue) return [...GOOGLE_SCOPES];
+  const requested = String(scopeValue).split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  const allowed = requested.filter((scope) => GOOGLE_SCOPES.includes(scope));
+  return allowed.length ? Array.from(new Set(allowed)) : [...GOOGLE_SCOPES];
+}
+
 function normalizeMetaScopes(scopeValue) {
   if (!scopeValue) return [...META_SCOPES];
   const requested = String(scopeValue).split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
@@ -5449,7 +5459,7 @@ app.get("/auth/google/start", (req, res) => {
     });
 
     const oauthClient = createOauthClient(req);
-    const requestedScopes = normalizeScopes(req.query.scope);
+    const requestedScopes = normalizeGoogleAuthScopes(req.query.scope);
     const resource = getRequestedResource(req, getResourceUrl(req));
     const clientRedirectUri = resolveClientRedirectUri(req);
     const appState = {
@@ -5514,7 +5524,7 @@ app.get("/auth/google/callback", async (req, res) => {
       });
     }
 
-    const grantedScopes = normalizeScopes(tokens.scope || appState.scope);
+    const grantedScopes = normalizeGoogleAuthScopes(tokens.scope || appState.scope);
     const sessionId = crypto.randomUUID();
     saveSession(sessionId, {
       sessionId,
@@ -5726,7 +5736,7 @@ app.get("/auth/meta/callback", async (req, res) => {
     });
 
     const metaCredentials = buildMetaCredentials(tokenResponse, grantedScopes, metaUserId);
-    const linkedGoogleScopes = appState.linkedGoogle ? normalizeScopes(appState.linkedGoogle.scope || appState.linkedScope) : [];
+    const linkedGoogleScopes = appState.linkedGoogle ? normalizeGoogleAuthScopes(appState.linkedGoogle.scope || appState.linkedScope) : [];
     const combinedScope = Array.from(new Set([...linkedGoogleScopes, ...grantedScopes])).join(" ");
 
     const sessionId = appState.linkedSessionId || crypto.randomUUID();
