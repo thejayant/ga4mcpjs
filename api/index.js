@@ -48,8 +48,15 @@ const TOOL_SCOPE_MAP = {
   get_google_ads_field: [GOOGLE_ADS_SCOPE],
   search_google_ads_fields: [GOOGLE_ADS_SCOPE],
   run_google_ads_preset: [GOOGLE_ADS_SCOPE],
+  list_google_ads_customer_clients: [GOOGLE_ADS_SCOPE],
   run_ga4_preset: [GA4_SCOPE],
-  run_search_console_preset: [SEARCH_CONSOLE_SCOPE]
+  run_ga4_funnel_report: [GA4_SCOPE],
+  run_ga4_cohort_report: [GA4_SCOPE],
+  list_ga4_custom_definitions: [GA4_SCOPE],
+  list_ga4_key_events: [GA4_SCOPE],
+  list_ga4_data_streams: [GA4_SCOPE],
+  run_search_console_preset: [SEARCH_CONSOLE_SCOPE],
+  compare_search_console_periods: [SEARCH_CONSOLE_SCOPE]
 };
 const CALLRAIL_TOOL_NAMES = [
   "list_callrail_accounts",
@@ -59,7 +66,8 @@ const CALLRAIL_TOOL_NAMES = [
   "get_callrail_call_summary",
   "get_callrail_call_timeseries",
   "list_callrail_trackers",
-  "get_callrail_resource"
+  "get_callrail_resource",
+  "run_callrail_preset"
 ];
 const EXPERT_TOOL_NAMES = [
   "list_marketing_presets",
@@ -67,88 +75,272 @@ const EXPERT_TOOL_NAMES = [
   "list_marketing_guardrails",
   "normalize_marketing_records"
 ];
+const GOOGLE_ADS_CORE_METRICS = "metrics.impressions, metrics.clicks, metrics.ctr, metrics.average_cpc, metrics.cost_micros, metrics.conversions, metrics.conversions_value";
+const GOOGLE_ADS_EXTENDED_METRICS = `${GOOGLE_ADS_CORE_METRICS}, metrics.average_cpm, metrics.interactions, metrics.interaction_rate, metrics.conversions_from_interactions_rate, metrics.cost_per_conversion, metrics.value_per_conversion, metrics.all_conversions, metrics.all_conversions_value`;
+const GOOGLE_ADS_IMPRESSION_SHARE_METRICS = "metrics.search_impression_share, metrics.search_budget_lost_impression_share, metrics.search_rank_lost_impression_share, metrics.search_top_impression_share, metrics.search_absolute_top_impression_share, metrics.absolute_top_impression_percentage, metrics.top_impression_percentage";
+const GOOGLE_ADS_QUALITY_SCORE_FIELDS = "ad_group_criterion.quality_info.quality_score, ad_group_criterion.quality_info.creative_quality_score, ad_group_criterion.quality_info.post_click_quality_score, ad_group_criterion.quality_info.search_predicted_ctr";
+const GOOGLE_ADS_CONVERSION_ONLY_METRICS = "metrics.conversions, metrics.conversions_value, metrics.all_conversions, metrics.all_conversions_value";
 const GOOGLE_ADS_PRESET_DEFINITIONS = {
   campaign_performance: {
     entityType: "campaign",
-    description: "Campaign performance with delivery, cost, click, conversion, and channel fields."
+    resource: "campaign",
+    timeSeries: true,
+    supportsImpressionShare: true,
+    description: "Campaign performance with delivery, cost, click, conversion, and channel fields. Set includeImpressionShare for search IS and lost-IS metrics."
   },
   ad_group_performance: {
     entityType: "ad_group",
+    resource: "ad_group",
+    timeSeries: true,
+    supportsImpressionShare: true,
     description: "Ad group performance with campaign context and spend/conversion metrics."
   },
   keyword_performance: {
     entityType: "keyword",
-    description: "Keyword performance with campaign, ad group, text, match type, and conversion metrics."
+    resource: "keyword_view",
+    timeSeries: true,
+    supportsImpressionShare: true,
+    supportsQualityScore: true,
+    description: "Keyword performance with campaign, ad group, text, match type, and conversion metrics. Set includeQualityScore for Quality Score components."
   },
   search_terms: {
     entityType: "search_term",
+    resource: "search_term_view",
+    timeSeries: true,
     description: "Search term performance with matched campaign and ad group context."
   },
   asset_performance: {
     entityType: "asset",
-    description: "Asset-level performance for ads with campaign and ad group context."
+    resource: "ad_group_ad_asset_view",
+    timeSeries: true,
+    description: "Asset-level performance for ads with campaign and ad group context, including performance labels."
   },
   conversions_by_campaign: {
     entityType: "campaign",
-    description: "Campaign conversion performance focused on conversion counts and value."
-  }
-};
-const GA4_PRESET_DEFINITIONS = {
-  channels: {
-    entityType: "channel",
-    description: "Channel performance by session default channel group."
+    resource: "campaign",
+    timeSeries: true,
+    description: "Campaign conversion performance focused on conversion counts, value, and cost per conversion."
   },
-  landing_pages: {
-    entityType: "landing_page",
-    description: "Landing page performance with channel and engagement context."
+  ad_performance: {
+    entityType: "ad",
+    resource: "ad_group_ad",
+    timeSeries: true,
+    description: "Ad/creative performance including ad type, ad strength, final URLs, and responsive search ad headlines and descriptions."
   },
-  source_medium: {
-    entityType: "source_medium",
-    description: "Source / medium performance with sessions, users, and revenue."
-  },
-  campaigns: {
+  impression_share: {
     entityType: "campaign",
-    description: "GA4 campaign performance by session campaign and source / medium."
+    resource: "campaign",
+    timeSeries: true,
+    description: "Competitive visibility: search impression share, budget-lost IS, rank-lost IS, top and absolute-top share. Auction Insights itself is not exposed by the Google Ads API."
   },
-  key_events: {
-    entityType: "event",
-    description: "Key event and conversion-oriented event performance."
+  quality_score: {
+    entityType: "keyword",
+    resource: "keyword_view",
+    timeSeries: false,
+    description: "Current Quality Score per keyword with expected CTR, ad relevance, and landing page experience components. Quality Score is a current attribute, not a historical time series."
   },
-  ecommerce: {
+  shopping_performance: {
     entityType: "product",
-    description: "Item and ecommerce performance."
+    resource: "shopping_performance_view",
+    timeSeries: true,
+    description: "Shopping ad performance segmented by product item id, title, brand, product type, condition, and channel."
   },
-  attribution_breakdown: {
-    entityType: "attribution",
-    description: "Acquisition-style breakdown with session and first-user channel dimensions."
-  }
-};
-const SEARCH_CONSOLE_PRESET_DEFINITIONS = {
-  queries: {
-    entityType: "query",
-    description: "Search queries with clicks, impressions, CTR, and average position."
+  product_group_performance: {
+    entityType: "product_group",
+    resource: "product_group_view",
+    timeSeries: true,
+    description: "Shopping product group (listing group) performance with bids and partition type."
   },
-  pages: {
-    entityType: "page",
-    description: "Landing pages or indexed URLs with search performance."
+  pmax_asset_groups: {
+    entityType: "asset_group",
+    resource: "asset_group",
+    timeSeries: true,
+    description: "Performance Max asset group performance with ad strength and status."
   },
-  countries: {
-    entityType: "country",
-    description: "Country-level organic search performance."
+  pmax_search_terms: {
+    entityType: "search_term",
+    resource: "campaign_search_term_insight",
+    timeSeries: true,
+    requiresCampaignId: true,
+    description: "Performance Max / Search search term insight categories. Requires campaignId. Cost is not exposed for this resource."
   },
-  devices: {
+  geo_performance: {
+    entityType: "geo",
+    resource: "geographic_view",
+    timeSeries: true,
+    description: "Geographic performance by country, region, and city criteria with location type."
+  },
+  device_performance: {
     entityType: "device",
-    description: "Device-level organic search performance."
+    resource: "campaign",
+    timeSeries: true,
+    description: "Campaign performance split by device for bid adjustment decisions."
   },
-  date_trends: {
-    entityType: "date",
-    description: "Date trend performance, optionally with a secondary breakdown."
+  ad_schedule_performance: {
+    entityType: "ad_schedule",
+    resource: "campaign",
+    timeSeries: true,
+    description: "Campaign performance split by day of week and hour of day for ad schedule decisions."
   },
-  branded_vs_non_branded: {
-    entityType: "query_segment",
-    description: "Branded or non-branded query performance using provided brand terms."
+  demographics_age: {
+    entityType: "age_range",
+    resource: "age_range_view",
+    timeSeries: true,
+    description: "Age range performance with campaign and ad group context."
+  },
+  demographics_gender: {
+    entityType: "gender",
+    resource: "gender_view",
+    timeSeries: true,
+    description: "Gender performance with campaign and ad group context."
+  },
+  audience_performance: {
+    entityType: "audience",
+    resource: "ad_group_audience_view",
+    timeSeries: true,
+    description: "Audience segment performance at ad group level with criterion display names."
+  },
+  placement_performance: {
+    entityType: "placement",
+    resource: "group_placement_view",
+    timeSeries: true,
+    description: "Display and video placement performance showing where ads actually served."
+  },
+  conversion_actions: {
+    entityType: "conversion_action",
+    resource: "campaign",
+    timeSeries: true,
+    description: "Conversions split by conversion action name and category. Cost, click, and impression metrics are intentionally omitted because they are not compatible with conversion action segmentation."
+  },
+  landing_page_performance: {
+    entityType: "landing_page",
+    resource: "landing_page_view",
+    timeSeries: true,
+    description: "Performance by unexpanded final URL."
+  },
+  expanded_landing_page_performance: {
+    entityType: "landing_page",
+    resource: "expanded_landing_page_view",
+    timeSeries: true,
+    description: "Performance by fully expanded final URL, including tracking-template expansion."
+  },
+  campaign_budgets: {
+    entityType: "budget",
+    resource: "campaign_budget",
+    timeSeries: true,
+    description: "Budget amounts, delivery method, sharing, and recommended budget with spend against each budget."
+  },
+  bidding_strategies: {
+    entityType: "bidding_strategy",
+    resource: "bidding_strategy",
+    timeSeries: true,
+    description: "Portfolio bidding strategy performance with type, status, and campaign count."
+  },
+  video_performance: {
+    entityType: "video",
+    resource: "video",
+    timeSeries: true,
+    description: "YouTube/video performance with views, view rate, CPV, and quartile completion rates."
+  },
+  call_performance: {
+    entityType: "call",
+    resource: "call_view",
+    timeSeries: true,
+    description: "Per-call records from Google Ads call reporting with duration, status, and caller area code. Pairs with the CallRail tools for full call attribution."
+  },
+  account_overview: {
+    entityType: "account",
+    resource: "customer",
+    timeSeries: true,
+    description: "Account-level totals with currency, time zone, optimization score, and auto-tagging status."
+  },
+  negative_keywords: {
+    entityType: "negative_keyword",
+    resource: "campaign_criterion",
+    timeSeries: false,
+    description: "Campaign-level negative keywords. Snapshot, not a time series."
+  },
+  shared_set_negative_keywords: {
+    entityType: "negative_keyword",
+    resource: "shared_criterion",
+    timeSeries: false,
+    description: "Negative keywords held in shared sets (negative keyword lists). Snapshot, not a time series."
+  },
+  change_history: {
+    entityType: "change_event",
+    resource: "change_event",
+    timeSeries: false,
+    dateField: "change_event.change_date_time",
+    maxLookbackDays: 30,
+    maxLimit: 10000,
+    description: "Account change history: who changed what, when, and the old/new values. Google limits this to the last 30 days, requires a LIMIT, and caps results at 10000 rows."
+  },
+  recommendations: {
+    entityType: "recommendation",
+    resource: "recommendation",
+    timeSeries: false,
+    description: "Pending Google Ads recommendations with base and potential impact metrics. Snapshot, not a time series."
+  },
+  experiments: {
+    entityType: "experiment",
+    resource: "experiment",
+    timeSeries: false,
+    description: "Campaign experiments and drafts with type, status, and date range. Snapshot, not a time series."
+  },
+  click_view: {
+    entityType: "click",
+    resource: "click_view",
+    timeSeries: true,
+    singleDay: true,
+    description: "GCLID-level click detail. Google requires a single-day filter and only retains the last 90 days. Uses endDate as the day."
   }
 };
+const GOOGLE_ADS_PRESET_NAMES = Object.keys(GOOGLE_ADS_PRESET_DEFINITIONS);
+const GA4_PRESET_DEFINITIONS = {
+  channels: { entityType: "channel", description: "Channel performance by session default channel group." },
+  traffic_acquisition: { entityType: "channel", description: "Traffic acquisition: how sessions arrived, by channel, source, and medium." },
+  user_acquisition: { entityType: "channel", description: "User acquisition: how users were first acquired, by first-user channel, source, and medium." },
+  source_medium: { entityType: "source_medium", description: "Source / medium performance with sessions, users, and revenue." },
+  campaigns: { entityType: "campaign", description: "GA4 campaign performance by session campaign and source / medium." },
+  google_ads_performance: { entityType: "campaign", description: "Google Ads campaigns as seen by GA4, with ad cost, ad clicks, and ROAS. Requires a linked Google Ads account." },
+  landing_pages: { entityType: "landing_page", description: "Landing page performance with channel and engagement context." },
+  pages_and_screens: { entityType: "page", description: "Page and screen performance with views, users, and engagement time." },
+  events: { entityType: "event", description: "All events with count, users, and count per user." },
+  key_events: { entityType: "event", description: "Key event (conversion) performance by event name." },
+  ecommerce: { entityType: "product", description: "Item and ecommerce performance by item name and category." },
+  item_performance: { entityType: "product", description: "Detailed item performance with brand, category, views, add-to-carts, purchases, and revenue." },
+  item_list_performance: { entityType: "product", description: "Item list and merchandising performance by list name." },
+  promotions: { entityType: "product", description: "Internal promotion performance by promotion name." },
+  ecommerce_funnel: { entityType: "funnel", description: "Ecommerce funnel by date: item views, add to carts, checkouts, and purchases with view-to-cart and view-to-purchase rates." },
+  demographics: { entityType: "country", description: "Geographic performance by country, region, and city." },
+  demographics_detail: { entityType: "demographic", description: "Age bracket, gender, and language. Requires Google signals; expect (not set) rows otherwise." },
+  technology: { entityType: "device", description: "Device category, operating system, browser, and platform." },
+  new_vs_returning: { entityType: "audience", description: "New versus returning user behaviour." },
+  audiences: { entityType: "audience", description: "Performance by GA4 audience membership." },
+  site_search: { entityType: "query", description: "Site search terms. Requires site search to be configured on the property." },
+  engagement_overview: { entityType: "date", description: "Daily engagement: engagement rate, bounce rate, average session duration, and views per session." },
+  daily_trends: { entityType: "date", description: "Daily sessions, users, new users, key events, and revenue." },
+  attribution_breakdown: { entityType: "attribution", description: "Acquisition-style breakdown with session and first-user channel dimensions." }
+};
+const GA4_PRESET_NAMES = Object.keys(GA4_PRESET_DEFINITIONS);
+const SEARCH_CONSOLE_PRESET_DEFINITIONS = {
+  queries: { entityType: "query", dimensions: ["query"], description: "Search queries with clicks, impressions, CTR, and average position." },
+  pages: { entityType: "page", dimensions: ["page"], description: "Landing pages or indexed URLs with search performance." },
+  query_page_pairs: { entityType: "query", dimensions: ["query", "page"], description: "Which query drove which page. The core report for mapping intent to URLs." },
+  striking_distance: { entityType: "query", dimensions: ["query", "page"], description: "Queries ranking just outside the top positions, where small gains move the needle. Filters client-side on average position and minimum impressions." },
+  countries: { entityType: "country", dimensions: ["country"], description: "Country-level organic search performance." },
+  devices: { entityType: "device", dimensions: ["device"], description: "Device-level organic search performance." },
+  country_device: { entityType: "country", dimensions: ["country", "device"], description: "Country and device combined, for market plus form-factor analysis." },
+  date_trends: { entityType: "date", dimensions: ["date"], description: "Date trend performance, optionally with a secondary breakdown." },
+  date_query: { entityType: "date", dimensions: ["date", "query"], description: "Per-day query performance for tracking movement on specific terms." },
+  date_page: { entityType: "date", dimensions: ["date", "page"], description: "Per-day page performance for tracking movement on specific URLs." },
+  search_appearance: { entityType: "search_appearance", dimensions: ["searchAppearance"], description: "Rich result and search appearance types. Google does not allow searchAppearance to be combined with other dimensions." },
+  branded_vs_non_branded: { entityType: "query_segment", dimensions: ["query"], description: "Branded or non-branded query performance using provided brand terms." },
+  discover_performance: { entityType: "page", dimensions: ["page"], type: "discover", description: "Google Discover performance by page. Discover supports only date, country, and page dimensions." },
+  news_performance: { entityType: "page", dimensions: ["page"], type: "googleNews", description: "Google News performance by page." }
+};
+const SEARCH_CONSOLE_PRESET_NAMES = Object.keys(SEARCH_CONSOLE_PRESET_DEFINITIONS);
+const SEARCH_CONSOLE_MAX_ROW_LIMIT = 25000;
 const MERCHANT_PRESET_DEFINITIONS = {
   product_performance: {
     entityType: "product",
@@ -180,6 +372,48 @@ const MERCHANT_PRESET_DEFINITIONS = {
     table: "best_sellers_product_cluster_view",
     description: "Best selling product clusters with rank, relative demand and inventory status. Requires reportDate and reportCountryCode."
   },
+  brand_performance: {
+    entityType: "brand",
+    view: "ProductPerformanceView",
+    table: "product_performance_view",
+    description: "Product performance rolled up by brand instead of individual offer."
+  },
+  category_performance: {
+    entityType: "category",
+    view: "ProductPerformanceView",
+    table: "product_performance_view",
+    description: "Product performance rolled up by top-level product category."
+  },
+  country_performance: {
+    entityType: "country",
+    view: "ProductPerformanceView",
+    table: "product_performance_view",
+    description: "Product performance rolled up by customer country and marketing method."
+  },
+  non_product_performance: {
+    entityType: "account",
+    view: "NonProductPerformanceView",
+    table: "non_product_performance_view",
+    description: "Traffic to non-product surfaces such as the store page, by date and country."
+  },
+  best_sellers_brands: {
+    entityType: "brand",
+    view: "BestSellersBrandView",
+    table: "best_sellers_brand_view",
+    description: "Best selling brands in a category with rank and relative demand. Requires reportDate and reportCountryCode."
+  },
+  competitive_visibility_benchmark: {
+    entityType: "benchmark",
+    view: "CompetitiveVisibilityBenchmarkView",
+    table: "competitive_visibility_benchmark_view",
+    description: "Category-level visibility benchmark trend you can compare your own visibility against. Requires reportCountryCode and reportCategoryId."
+  },
+  competitive_visibility_top_merchants: {
+    entityType: "competitor",
+    view: "CompetitiveVisibilityTopMerchantView",
+    table: "competitive_visibility_top_merchant_view",
+    description: "Top merchants competing in a category with rank and relative visibility. Requires reportCountryCode and reportCategoryId."
+  },
   competitive_visibility: {
     entityType: "domain",
     view: "CompetitiveVisibilityCompetitorView",
@@ -191,54 +425,83 @@ const PLATFORM_GUARDRAILS = {
   google_ads: {
     strengths: [
       "Best source for campaigns, ad groups, ads, keywords, search terms, assets, segments, and paid conversion reporting.",
-      "GAQL can express complex filters, joins, and segmentation."
+      "GAQL can express complex filters, joins, and segmentation.",
+      "Presets cover impression share, Quality Score, Shopping, Performance Max, geo, device, ad schedule, demographics, audiences, placements, conversion actions, landing pages, budgets, bidding strategies, video, calls, change history, recommendations, and experiments."
     ],
     limitations: [
       "Requires GOOGLE_ADS_DEVELOPER_TOKEN and often a login-customer-id for MCC access.",
-      "Accuracy depends on using valid GAQL fields for the selected resource."
-    ]
+      "Accuracy depends on using valid GAQL fields for the selected resource.",
+      "Auction Insights is not exposed by the Google Ads API at all; no tool here can return it.",
+      "Quality Score is a current attribute, not a historical series; it does not vary by date.",
+      "Conversion action segmentation is incompatible with cost, click, and impression metrics.",
+      "change_history is limited to the last 30 days and 10000 rows; click_view is single-day and limited to the last 90 days.",
+      "Basic Access developer tokens are capped at roughly 15000 operations and 1000 requests per day. Every tool call is one request, so prefer one wide query over several narrow ones and page deliberately with pageToken."
+    ],
+    quota: {
+      accessLevel: "Set GOOGLE_ADS_ACCESS_LEVEL to basic or standard to document which tier this token holds.",
+      basicAccessDailyOperations: 15000,
+      basicAccessDailyRequests: 1000,
+      guidance: "One tool call equals one API request. Auto-pagination is deliberately not implemented so a single call cannot silently drain the daily quota."
+    }
   },
   ga4: {
     strengths: [
       "Best source for web/app engagement, channels, landing pages, ecommerce, and event-driven conversion reporting.",
-      "Metadata and compatibility APIs reduce invalid report combinations."
+      "Metadata and compatibility APIs reduce invalid report combinations.",
+      "Presets cover traffic and user acquisition, pages, events, key events, ecommerce and item detail, the ecommerce funnel, demographics, technology, audiences, site search, engagement, and daily trends.",
+      "Funnel, cohort, custom definition, key event, and data stream tools cover the configuration and exploration surfaces that runReport alone cannot express."
     ],
     limitations: [
       "Not every GA4 UI exploration is mirrored exactly by a single Data API request.",
-      "Attribution views depend on the available GA4 dimensions and metrics, not arbitrary UI-only widgets."
+      "Attribution views depend on the available GA4 dimensions and metrics, not arbitrary UI-only widgets.",
+      "GA4 renamed the conversions metric to keyEvents. Presets default to keyEvents; pass conversionMetric: \"conversions\" only if a property rejects the new name.",
+      "GA4 applies data thresholding and sampling on some properties, so small segments can return suppressed or approximate rows.",
+      "userAgeBracket and userGender require Google signals and otherwise return (not set).",
+      "site_search requires site search to be configured; google_ads_performance requires a linked Google Ads account.",
+      "Funnel reporting is only available on the Data API v1alpha surface, so its response shape differs from runReport."
     ]
   },
   search_console: {
     strengths: [
-      "Best source for queries, pages, countries, devices, and organic search trend reporting.",
-      "URL Inspection gives URL-level Google indexing diagnostics."
+      "Authoritative for organic query, page, country, device, and search appearance performance.",
+      "Presets cover query-to-page pairs, striking-distance opportunities, per-day movement, Discover, and Google News.",
+      "compare_search_console_periods returns per-key deltas across two windows in one call."
     ],
     limitations: [
-      "The aggregate Index Coverage UI is not exposed as an equivalent public API dataset.",
-      "Search Analytics row sampling and aggregation limits still apply."
+      "Search Analytics returns at most 25000 rows per request; page with startRow for more.",
+      "Query data is anonymised, so the sum of query rows is lower than the site total.",
+      "searchAppearance cannot be combined with any other dimension.",
+      "Discover and Google News support only a subset of dimensions and have no query dimension.",
+      "The most recent two to three days are incomplete unless dataState is set to all.",
+      "Position is an average of averages, so it cannot be summed across rows."
     ]
   },
   merchant_center: {
     strengths: [
-      "Best source for product, account, and Merchant report datasets exposed by the Merchant API.",
-      "Good for product diagnostics and performance where Merchant report datasets are available."
+      "Authoritative for product feed status, item issues, free listing and Shopping ads performance, price competitiveness, price insights, best sellers, and competitive visibility.",
+      "Presets roll product performance up by brand, category, and country as well as by individual offer.",
+      "Organic marketing method reports free listings without any Google Ads account."
     ],
     limitations: [
-      "Merchant API access may require GCP registration beyond enabling the API.",
-      "Not every Merchant Center UI panel is exposed with equivalent API fidelity.",
-      "ProductView, PriceCompetitivenessProductView and PriceInsightsProductView are current snapshots, not time series, so they ignore any date range.",
-      "BestSellersProductClusterView needs a valid reportDate plus reportCountryCode, and CompetitiveVisibilityCompetitorView needs reportCountryCode.",
-      "Price insights, price competitiveness and best sellers datasets are only populated once Google has enough data for the account."
+      "Merchant API rejects calls with GCP_NOT_REGISTERED until the Cloud project is registered against the account.",
+      "product_status, price_competitiveness, and price_insights are current snapshots and ignore the date range.",
+      "best_sellers and best_sellers_brands require reportDate and reportCountryCode; the date is snapped to the start of the week or month.",
+      "competitive_visibility, its benchmark, and top merchants all require reportCountryCode and a numeric reportCategoryId.",
+      "Report queries use snake_case names while responses come back camelCase."
     ]
   },
   callrail: {
     strengths: [
       "Best source for call records, trackers, summaries, time series, and CallRail-native attribution fields.",
-      "Generic resource mode allows read-only expansion across supported CallRail endpoints."
+      "Generic resource mode allows read-only expansion across supported CallRail endpoints.",
+      "run_callrail_preset aggregates raw call records into grouped reports and emits normalized rows, so calls join to Google Ads, GA4, and Search Console."
     ],
     limitations: [
       "Transcripts, intent, recordings, and landing-page fields depend on account features and endpoint payloads.",
-      "Coverage is limited to what CallRail returns via the public v3 API."
+      "Coverage is limited to what CallRail returns via the public v3 API.",
+      "CallRail has no server-side aggregation endpoint for most groupings, so presets aggregate one fetched page of calls. Check callsFetched against totalRecords before trusting totals, and page if they differ.",
+      "A call carrying several tags is counted once per tag, so calls_by_tag totals can exceed the call total.",
+      "Qualified calls are counted from lead_status = good_lead, which depends on the account actually scoring leads."
     ]
   }
 };
@@ -247,7 +510,7 @@ const NORMALIZED_MARKETING_SCHEMA = {
   recordShape: {
     platform: "google_ads | ga4 | search_console | merchant_center | callrail",
     preset: "preset or custom normalization label",
-    entityType: "campaign | ad_group | keyword | search_term | asset | channel | landing_page | source_medium | event | attribution | query | page | country | device | date | product | call | tracker",
+    entityType: "campaign | ad_group | ad | keyword | search_term | asset | asset_group | product | product_group | geo | device | ad_schedule | age_range | gender | audience | placement | conversion_action | landing_page | budget | bidding_strategy | video | call | account | negative_keyword | change_event | recommendation | experiment | click | channel | source_medium | event | attribution | query | page | country | date | tracker",
     sourcePrimaryKey: "stable identifier from the source when available",
     dimensions: "normalized dimension dictionary",
     metrics: "normalized metric dictionary",
@@ -271,8 +534,45 @@ const NORMALIZED_MARKETING_SCHEMA = {
     "device",
     "product_id",
     "product_title",
+    "product_brand",
+    "product_type",
     "call_id",
-    "tracker_id"
+    "tracker_id",
+    "ad_id",
+    "ad_type",
+    "asset_group_id",
+    "asset_group_name",
+    "region",
+    "city",
+    "day_of_week",
+    "hour",
+    "age_range",
+    "gender",
+    "audience",
+    "placement",
+    "conversion_action_name",
+    "conversion_action_category",
+    "budget_id",
+    "budget_name",
+    "bidding_strategy_name",
+    "video_id",
+    "video_title",
+    "gclid",
+    "currency",
+    "source",
+    "medium",
+    "language",
+    "operating_system",
+    "browser",
+    "search_appearance",
+    "availability",
+    "condition",
+    "approval_status",
+    "domain",
+    "account_name",
+    "call_segment",
+    "event_name",
+    "brand"
   ],
   standardMetrics: [
     "impressions",
@@ -289,7 +589,56 @@ const NORMALIZED_MARKETING_SCHEMA = {
     "revenue",
     "calls",
     "qualified_calls",
-    "call_duration_seconds"
+    "call_duration_seconds",
+    "average_cpm",
+    "all_conversions",
+    "all_conversions_value",
+    "cost_per_conversion",
+    "value_per_conversion",
+    "conversion_rate",
+    "interactions",
+    "interaction_rate",
+    "search_impression_share",
+    "search_budget_lost_impression_share",
+    "search_rank_lost_impression_share",
+    "search_top_impression_share",
+    "search_absolute_top_impression_share",
+    "absolute_top_impression_percentage",
+    "top_impression_percentage",
+    "quality_score",
+    "video_views",
+    "video_view_rate",
+    "average_cpv",
+    "new_users",
+    "engagement_rate",
+    "bounce_rate",
+    "average_session_duration",
+    "page_views",
+    "event_value",
+    "transactions",
+    "items_viewed",
+    "items_added_to_cart",
+    "items_purchased",
+    "return_on_ad_spend",
+    "average_position",
+    "answered_calls",
+    "missed_calls",
+    "first_time_callers",
+    "average_call_duration_seconds",
+    "answer_rate",
+    "conversion_rate",
+    "price",
+    "benchmark_price",
+    "suggested_price",
+    "rank",
+    "previous_rank",
+    "relative_visibility",
+    "page_overlap_rate",
+    "higher_position_rate",
+    "ads_organic_ratio",
+    "click_potential_rank",
+    "predicted_clicks_change",
+    "predicted_conversions_change"
   ],
   crossSourceMappings: {
     campaign_name: {
@@ -315,6 +664,32 @@ const NORMALIZED_MARKETING_SCHEMA = {
     }
   }
 };
+const MERCHANT_PRESET_NAMES = Object.keys(MERCHANT_PRESET_DEFINITIONS);
+// CallRail returns raw call records rather than aggregated reports, so these presets
+// declare which field to group by and the aggregation happens server-side here.
+const CALLRAIL_PRESET_DEFINITIONS = {
+  call_details: { entityType: "call", groupBy: null, description: "Individual call records with attribution, duration, and lead status. Not aggregated." },
+  calls_overview: { entityType: "account", groupBy: null, aggregateAll: true, description: "Single-row summary: total, answered, missed, first-time callers, total and average duration, and lead value." },
+  calls_by_source: { entityType: "source_medium", groupBy: "source", description: "Call volume and outcomes grouped by CallRail source." },
+  calls_by_medium: { entityType: "source_medium", groupBy: "medium", description: "Call volume and outcomes grouped by medium." },
+  calls_by_campaign: { entityType: "campaign", groupBy: "campaign", description: "Call volume and outcomes grouped by campaign." },
+  calls_by_keyword: { entityType: "query", groupBy: "keywords", description: "Call volume grouped by the keyword CallRail captured." },
+  calls_by_landing_page: { entityType: "landing_page", groupBy: "landing_page_url", description: "Call volume grouped by the landing page the caller arrived on." },
+  calls_by_referrer: { entityType: "source_medium", groupBy: "referrer", description: "Call volume grouped by referring site." },
+  calls_by_tracker: { entityType: "tracker", groupBy: "tracking_phone_number", description: "Call volume grouped by tracking number." },
+  calls_by_company: { entityType: "account", groupBy: "company_name", description: "Call volume grouped by CallRail company." },
+  calls_by_device: { entityType: "device", groupBy: "device_type", description: "Call volume grouped by caller device type." },
+  calls_by_city: { entityType: "country", groupBy: "customer_city", description: "Call volume grouped by caller city." },
+  calls_by_lead_status: { entityType: "call_segment", groupBy: "lead_status", description: "Call volume grouped by lead status, for qualified versus unqualified analysis." },
+  calls_by_tag: { entityType: "call_segment", groupBy: "tags", description: "Call volume grouped by tag. Calls carrying several tags are counted once per tag." },
+  answered_vs_missed: { entityType: "call_segment", groupBy: "answered", description: "Answered versus missed call split." },
+  first_time_vs_repeat: { entityType: "call_segment", groupBy: "first_call", description: "First-time callers versus repeat callers." },
+  call_duration_buckets: { entityType: "call_segment", groupBy: "duration_bucket", description: "Calls bucketed by duration, for filtering out short non-conversations." },
+  daily_call_trends: { entityType: "date", groupBy: "call_date", description: "Calls per day over the window." }
+};
+const CALLRAIL_PRESET_NAMES = Object.keys(CALLRAIL_PRESET_DEFINITIONS);
+// Requested explicitly so attribution fields come back rather than CallRail's default subset.
+const CALLRAIL_PRESET_FIELDS = "answered,business_phone_number,campaign,company_id,company_name,customer_city,customer_country,customer_name,customer_phone_number,customer_state,device_type,direction,duration,first_call,gclid,keywords,landing_page_url,lead_status,medium,prior_calls,referrer,referring_url,source,source_name,start_time,tags,total_calls,tracking_phone_number,utm_campaign,utm_content,utm_medium,utm_source,utm_term,value,voicemail";
 const sessionStore = globalThis.__googleMcpSessionStore || new Map();
 globalThis.__googleMcpSessionStore = sessionStore;
 
@@ -612,6 +987,21 @@ function compactObject(value) {
 
 function getNestedValue(source, path) {
   return String(path || "").split(".").filter(Boolean).reduce((current, segment) => current?.[segment], source);
+}
+
+function toCamelCaseSegment(segment) {
+  return segment.replace(/_([a-z0-9])/g, (_match, character) => character.toUpperCase());
+}
+
+// The Google Ads REST API returns lowerCamelCase JSON keys (metrics.costMicros) while
+// GAQL field paths are snake_case (metrics.cost_micros). Resolve either spelling.
+function getGoogleAdsValue(source, path) {
+  return String(path || "").split(".").filter(Boolean).reduce((current, segment) => {
+    if (current === undefined || current === null) return undefined;
+    const direct = current[segment];
+    if (direct !== undefined) return direct;
+    return current[toCamelCaseSegment(segment)];
+  }, source);
 }
 
 function toNumber(value) {
@@ -985,145 +1375,405 @@ async function withCallRailTool(handler) {
   }
 }
 
+const GOOGLE_ADS_MAX_PAGE_SIZE = 10000;
+
+function shiftDays(dateString, days) {
+  const base = new Date(`${dateString}T00:00:00Z`);
+  return formatDateForApi(new Date(base.getTime() + days * 24 * 60 * 60 * 1000));
+}
+
+function daysBetween(startDate, endDate) {
+  const start = new Date(`${startDate}T00:00:00Z`).getTime();
+  const end = new Date(`${endDate}T00:00:00Z`).getTime();
+  return Math.round((end - start) / (24 * 60 * 60 * 1000));
+}
+
 function buildGoogleAdsPresetQuery(params) {
-  const { preset, startDate, endDate } = {
-    ...params,
-    ...resolveDateWindow(params)
-  };
-  const dateFilter = `segments.date BETWEEN '${startDate}' AND '${endDate}'`;
-  const limit = Number(params.limit || 100);
-  const extraWhere = Array.isArray(params.extraWhereClauses) ? params.extraWhereClauses.filter(Boolean) : [];
-  const whereClauses = [dateFilter, ...extraWhere];
-  const whereSql = whereClauses.length ? ` WHERE ${whereClauses.join(" AND ")}` : "";
-  const orderBySql = params.orderBy ? ` ORDER BY ${params.orderBy}` : "";
-  const limitSql = limit > 0 ? ` LIMIT ${limit}` : "";
+  const preset = params.preset;
+  const definition = GOOGLE_ADS_PRESET_DEFINITIONS[preset];
+  if (!definition) throw new Error(`Unsupported Google Ads preset: ${preset}`);
+
+  if (definition.requiresCampaignId && !params.campaignId) {
+    throw new Error(`Google Ads preset "${preset}" requires campaignId. Google rejects this report without a campaign filter.`);
+  }
+  if (params.includeImpressionShare && !definition.supportsImpressionShare && preset !== "impression_share") {
+    throw new Error(`Google Ads preset "${preset}" does not support impression share metrics. Use the impression_share preset, or one of: campaign_performance, ad_group_performance, keyword_performance.`);
+  }
+  if (params.includeQualityScore && !definition.supportsQualityScore && preset !== "quality_score") {
+    throw new Error(`Google Ads preset "${preset}" does not support Quality Score fields. Use the quality_score preset or keyword_performance.`);
+  }
+
+  let { startDate, endDate } = resolveDateWindow(params);
+  const notes = [];
+
+  if (definition.maxLookbackDays && daysBetween(startDate, endDate) > definition.maxLookbackDays) {
+    startDate = shiftDays(endDate, -definition.maxLookbackDays);
+    notes.push(`Google limits ${preset} to the last ${definition.maxLookbackDays} days; startDate was clamped to ${startDate}.`);
+  }
+  if (definition.singleDay) {
+    startDate = endDate;
+    notes.push(`${preset} requires a single-day filter; using ${endDate}.`);
+  }
+
+  const requestedLimit = Number(params.limit || 100);
+  const cappedLimit = definition.maxLimit ? Math.min(requestedLimit, definition.maxLimit) : requestedLimit;
+  if (cappedLimit !== requestedLimit) {
+    notes.push(`Google caps ${preset} at ${definition.maxLimit} rows; limit was reduced from ${requestedLimit}.`);
+  }
+  const limit = cappedLimit;
+  const pageSize = Math.min(limit, GOOGLE_ADS_MAX_PAGE_SIZE);
+  if (pageSize !== limit) {
+    notes.push(`Google caps pageSize at ${GOOGLE_ADS_MAX_PAGE_SIZE}; page through the rest with pageToken.`);
+  }
+
   const includeDailyBreakdown = params.includeDailyBreakdown !== false;
-  const dailyField = includeDailyBreakdown ? ", segments.date" : "";
+  const usesDateSegment = definition.timeSeries === true;
+  const dailyField = usesDateSegment && includeDailyBreakdown ? ", segments.date" : "";
+
+  const whereClauses = [];
+  if (definition.dateField) {
+    whereClauses.push(`${definition.dateField} >= '${startDate} 00:00:00'`);
+    whereClauses.push(`${definition.dateField} <= '${endDate} 23:59:59'`);
+  } else if (usesDateSegment) {
+    whereClauses.push(definition.singleDay
+      ? `segments.date = '${endDate}'`
+      : `segments.date BETWEEN '${startDate}' AND '${endDate}'`);
+  }
+  if (params.campaignId) {
+    const campaignField = preset === "pmax_search_terms" ? "campaign_search_term_insight.campaign_id" : "campaign.id";
+    whereClauses.push(`${campaignField} = ${String(params.campaignId).replace(/[^0-9]/g, "")}`);
+  }
+
+  const optionalImpressionShare = params.includeImpressionShare ? `, ${GOOGLE_ADS_IMPRESSION_SHARE_METRICS}` : "";
+  const optionalQualityScore = params.includeQualityScore ? `, ${GOOGLE_ADS_QUALITY_SCORE_FIELDS}` : "";
+
   const queries = {
     campaign_performance: {
-      entityType: "campaign",
-      query: `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type${dailyField}, metrics.impressions, metrics.clicks, metrics.ctr, metrics.average_cpc, metrics.cost_micros, metrics.conversions, metrics.conversions_value FROM campaign${whereSql}${orderBySql || " ORDER BY metrics.cost_micros DESC"}${limitSql}`
+      select: `campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign.advertising_channel_sub_type, campaign.bidding_strategy_type, customer.currency_code${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}${optionalImpressionShare}`,
+      defaultOrder: "metrics.cost_micros DESC"
     },
     ad_group_performance: {
-      entityType: "ad_group",
-      query: `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group.status${dailyField}, metrics.impressions, metrics.clicks, metrics.ctr, metrics.average_cpc, metrics.cost_micros, metrics.conversions, metrics.conversions_value FROM ad_group${whereSql}${orderBySql || " ORDER BY metrics.cost_micros DESC"}${limitSql}`
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group.status, ad_group.type, customer.currency_code${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}${optionalImpressionShare}`,
+      defaultOrder: "metrics.cost_micros DESC"
     },
     keyword_performance: {
-      entityType: "keyword",
-      query: `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group_criterion.status${dailyField}, metrics.impressions, metrics.clicks, metrics.ctr, metrics.average_cpc, metrics.cost_micros, metrics.conversions, metrics.conversions_value FROM keyword_view${whereSql}${orderBySql || " ORDER BY metrics.clicks DESC"}${limitSql}`
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group_criterion.status, ad_group_criterion.effective_cpc_bid_micros, customer.currency_code${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}${optionalImpressionShare}${optionalQualityScore}`,
+      defaultOrder: "metrics.clicks DESC"
     },
     search_terms: {
-      entityType: "search_term",
-      query: `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, search_term_view.search_term${dailyField}, metrics.impressions, metrics.clicks, metrics.ctr, metrics.cost_micros, metrics.conversions, metrics.conversions_value FROM search_term_view${whereSql}${orderBySql || " ORDER BY metrics.clicks DESC"}${limitSql}`
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, search_term_view.search_term, search_term_view.status, segments.search_term_match_type${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}`,
+      defaultOrder: "metrics.clicks DESC"
     },
     asset_performance: {
-      entityType: "asset",
-      query: `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, asset.id, asset.name, asset.type, ad_group_ad_asset_view.field_type, ad_group_ad_asset_view.performance_label${dailyField}, metrics.impressions, metrics.clicks, metrics.ctr, metrics.cost_micros, metrics.conversions FROM ad_group_ad_asset_view${whereSql}${orderBySql || " ORDER BY metrics.impressions DESC"}${limitSql}`
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, asset.id, asset.name, asset.type, asset.text_asset.text, ad_group_ad_asset_view.field_type, ad_group_ad_asset_view.performance_label${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.impressions DESC"
     },
     conversions_by_campaign: {
-      entityType: "campaign",
-      query: `SELECT campaign.id, campaign.name, campaign.status${dailyField}, metrics.conversions, metrics.conversions_value, metrics.cost_micros, metrics.cost_per_conversion, metrics.all_conversions, metrics.all_conversions_value FROM campaign${whereSql}${orderBySql || " ORDER BY metrics.conversions DESC"}${limitSql}`
+      select: `campaign.id, campaign.name, campaign.status, customer.currency_code${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}`,
+      defaultOrder: "metrics.conversions DESC"
+    },
+    ad_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group_ad.ad.name, ad_group_ad.status, ad_group_ad.ad_strength, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines, ad_group_ad.ad.responsive_search_ad.descriptions, ad_group_ad.policy_summary.approval_status${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}`,
+      defaultOrder: "metrics.impressions DESC"
+    },
+    impression_share: {
+      select: `campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type${dailyField}, metrics.impressions, metrics.clicks, metrics.cost_micros, ${GOOGLE_ADS_IMPRESSION_SHARE_METRICS}`,
+      defaultOrder: "metrics.impressions DESC"
+    },
+    quality_score: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group_criterion.status, ${GOOGLE_ADS_QUALITY_SCORE_FIELDS}`,
+      defaultOrder: "ad_group_criterion.quality_info.quality_score ASC"
+    },
+    shopping_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, segments.product_item_id, segments.product_title, segments.product_brand, segments.product_type_l1, segments.product_type_l2, segments.product_condition, segments.product_channel, segments.product_country${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    product_group_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.criterion_id, ad_group_criterion.listing_group.type, ad_group_criterion.status, ad_group_criterion.cpc_bid_micros${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    pmax_asset_groups: {
+      select: `campaign.id, campaign.name, asset_group.id, asset_group.name, asset_group.status, asset_group.ad_strength${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    pmax_search_terms: {
+      select: `campaign_search_term_insight.id, campaign_search_term_insight.category_label${dailyField}, metrics.impressions, metrics.clicks, metrics.conversions, metrics.conversions_value`,
+      defaultOrder: "metrics.impressions DESC"
+    },
+    geo_performance: {
+      select: `campaign.id, campaign.name, geographic_view.country_criterion_id, geographic_view.location_type, segments.geo_target_country, segments.geo_target_region, segments.geo_target_city${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    device_performance: {
+      select: `campaign.id, campaign.name, campaign.advertising_channel_type, segments.device${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    ad_schedule_performance: {
+      select: `campaign.id, campaign.name, segments.day_of_week, segments.hour${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    demographics_age: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.age_range.type, ad_group_criterion.status${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    demographics_gender: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.gender.type, ad_group_criterion.status${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    audience_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.criterion_id, ad_group_criterion.type, ad_group_criterion.display_name, ad_group_criterion.status${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    placement_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, group_placement_view.display_name, group_placement_view.placement, group_placement_view.placement_type, group_placement_view.target_url${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    conversion_actions: {
+      select: `campaign.id, campaign.name, segments.conversion_action_name, segments.conversion_action_category${dailyField}, ${GOOGLE_ADS_CONVERSION_ONLY_METRICS}`,
+      defaultOrder: "metrics.all_conversions DESC"
+    },
+    landing_page_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, landing_page_view.unexpanded_final_url${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    expanded_landing_page_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, expanded_landing_page_view.expanded_final_url${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    campaign_budgets: {
+      select: `campaign_budget.id, campaign_budget.name, campaign_budget.amount_micros, campaign_budget.total_amount_micros, campaign_budget.delivery_method, campaign_budget.explicitly_shared, campaign_budget.period, campaign_budget.status, campaign_budget.recommended_budget_amount_micros, customer.currency_code${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    bidding_strategies: {
+      select: `bidding_strategy.id, bidding_strategy.name, bidding_strategy.type, bidding_strategy.status, bidding_strategy.campaign_count, bidding_strategy.effective_currency_code${dailyField}, ${GOOGLE_ADS_CORE_METRICS}`,
+      defaultOrder: "metrics.cost_micros DESC"
+    },
+    video_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, video.id, video.title, video.duration_millis, video.channel_id${dailyField}, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.video_views, metrics.video_view_rate, metrics.average_cpv, metrics.video_quartile_p25_rate, metrics.video_quartile_p50_rate, metrics.video_quartile_p75_rate, metrics.video_quartile_p100_rate, metrics.conversions, metrics.conversions_value`,
+      defaultOrder: "metrics.impressions DESC"
+    },
+    call_performance: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, call_view.call_duration_seconds, call_view.call_status, call_view.call_tracking_display_location, call_view.caller_area_code, call_view.caller_country_code, call_view.start_call_date_time, call_view.end_call_date_time, call_view.type${dailyField}`,
+      defaultOrder: null
+    },
+    account_overview: {
+      select: `customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.optimization_score, customer.auto_tagging_enabled, customer.manager, customer.test_account, customer.status${dailyField}, ${GOOGLE_ADS_EXTENDED_METRICS}`,
+      defaultOrder: null
+    },
+    negative_keywords: {
+      select: "campaign.id, campaign.name, campaign.status, campaign_criterion.criterion_id, campaign_criterion.type, campaign_criterion.negative, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type",
+      defaultOrder: null,
+      extraWhere: ["campaign_criterion.negative = TRUE"]
+    },
+    shared_set_negative_keywords: {
+      select: "shared_set.id, shared_set.name, shared_set.type, shared_set.status, shared_criterion.criterion_id, shared_criterion.type, shared_criterion.keyword.text, shared_criterion.keyword.match_type",
+      defaultOrder: null
+    },
+    change_history: {
+      select: "change_event.change_date_time, change_event.change_resource_type, change_event.change_resource_name, change_event.changed_fields, change_event.client_type, change_event.user_email, change_event.resource_change_operation, change_event.campaign, change_event.ad_group, change_event.old_resource, change_event.new_resource",
+      defaultOrder: "change_event.change_date_time DESC"
+    },
+    recommendations: {
+      select: "recommendation.resource_name, recommendation.type, recommendation.campaign, recommendation.dismissed, recommendation.impact.base_metrics.impressions, recommendation.impact.base_metrics.clicks, recommendation.impact.base_metrics.cost_micros, recommendation.impact.base_metrics.conversions, recommendation.impact.potential_metrics.impressions, recommendation.impact.potential_metrics.clicks, recommendation.impact.potential_metrics.cost_micros, recommendation.impact.potential_metrics.conversions",
+      defaultOrder: null
+    },
+    experiments: {
+      select: "experiment.resource_name, experiment.experiment_id, experiment.name, experiment.description, experiment.type, experiment.status, experiment.start_date, experiment.end_date",
+      defaultOrder: null
+    },
+    click_view: {
+      select: `campaign.id, campaign.name, ad_group.id, ad_group.name, click_view.gclid, click_view.ad_group_ad, click_view.keyword_info.text, click_view.page_number, segments.click_type, segments.device, segments.ad_network_type${dailyField}, metrics.clicks`,
+      defaultOrder: null
     }
   };
-  const definition = queries[preset];
-  if (!definition) throw new Error(`Unsupported Google Ads preset: ${preset}`);
+
+  const shape = queries[preset];
+  if (!shape) throw new Error(`Unsupported Google Ads preset: ${preset}`);
+
+  const callerWhere = Array.isArray(params.extraWhereClauses) ? params.extraWhereClauses.filter(Boolean) : [];
+  const allWhere = [...whereClauses, ...(shape.extraWhere || []), ...callerWhere];
+  const whereSql = allWhere.length ? ` WHERE ${allWhere.join(" AND ")}` : "";
+  const orderTarget = params.orderBy || shape.defaultOrder;
+  const orderBySql = orderTarget ? ` ORDER BY ${orderTarget}` : "";
+  const limitSql = limit > 0 ? ` LIMIT ${limit}` : "";
+  const query = `SELECT ${shape.select} FROM ${definition.resource}${whereSql}${orderBySql}${limitSql}`;
+
   return {
-    ...definition,
-    query: definition.query,
-    dateRange: { startDate, endDate },
-    limit
+    entityType: definition.entityType,
+    resource: definition.resource,
+    timeSeries: definition.timeSeries === true,
+    query,
+    dateRange: definition.timeSeries || definition.dateField ? { startDate, endDate } : null,
+    limit,
+    pageSize,
+    notes
   };
 }
 
+// GA4 renamed "conversions" to "keyEvents". keyEvents is the current metric; the legacy
+// name still resolves on most properties, so it stays available as an explicit opt-in.
+const GA4_DEFAULT_CONVERSION_METRIC = "keyEvents";
+
+function ga4Dimensions(...names) {
+  return names.filter(Boolean).map((name) => ({ name }));
+}
+
+function ga4Metrics(...names) {
+  return names.filter(Boolean).map((name) => ({ name }));
+}
+
 function buildGa4PresetRequest(params) {
+  const definition = GA4_PRESET_DEFINITIONS[params.preset];
+  if (!definition) throw new Error(`Unsupported GA4 preset: ${params.preset}`);
+
   const dateRange = resolveDateWindow(params);
+  const conv = params.conversionMetric || GA4_DEFAULT_CONVERSION_METRIC;
+  const notes = [];
+  if (conv === "conversions") {
+    notes.push("Using the legacy 'conversions' metric. GA4 renamed it to 'keyEvents'; prefer keyEvents unless this property rejects it.");
+  }
+
+  const includeDate = params.includeDailyBreakdown === true;
+  const dateDimension = includeDate ? "date" : null;
+
   const common = {
     propertyId: params.propertyId,
     dateRanges: [{ startDate: dateRange.startDate, endDate: dateRange.endDate }],
     limit: params.limit ? String(params.limit) : undefined,
+    offset: params.offset ? String(params.offset) : undefined,
     dimensionFilter: params.dimensionFilter,
     metricFilter: params.metricFilter,
     keepEmptyRows: params.keepEmptyRows,
     orderBys: params.orderBys
   };
-  const presets = {
+
+  const shapes = {
     channels: {
-      entityType: "channel",
-      request: {
-        ...common,
-        dimensions: [{ name: "sessionDefaultChannelGroup" }],
-        metrics: [{ name: "sessions" }, { name: "totalUsers" }, { name: "engagedSessions" }, { name: "conversions" }, { name: "totalRevenue" }]
-      }
+      dimensions: ga4Dimensions("sessionDefaultChannelGroup", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", "engagedSessions", "engagementRate", conv, "totalRevenue")
     },
-    landing_pages: {
-      entityType: "landing_page",
-      request: {
-        ...common,
-        dimensions: [{ name: "landingPagePlusQueryString" }, { name: "sessionDefaultChannelGroup" }],
-        metrics: [{ name: "sessions" }, { name: "engagedSessions" }, { name: "conversions" }, { name: "totalRevenue" }]
-      }
+    traffic_acquisition: {
+      dimensions: ga4Dimensions("sessionDefaultChannelGroup", "sessionSource", "sessionMedium", dateDimension),
+      metrics: ga4Metrics("sessions", "engagedSessions", "engagementRate", "averageSessionDuration", conv, "totalRevenue")
+    },
+    user_acquisition: {
+      dimensions: ga4Dimensions("firstUserDefaultChannelGroup", "firstUserSource", "firstUserMedium", dateDimension),
+      metrics: ga4Metrics("totalUsers", "newUsers", "engagedSessions", conv, "totalRevenue")
     },
     source_medium: {
-      entityType: "source_medium",
-      request: {
-        ...common,
-        dimensions: [{ name: "sessionSourceMedium" }],
-        metrics: [{ name: "sessions" }, { name: "totalUsers" }, { name: "conversions" }, { name: "totalRevenue" }]
-      }
+      dimensions: ga4Dimensions("sessionSourceMedium", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", "engagedSessions", conv, "totalRevenue")
     },
     campaigns: {
-      entityType: "campaign",
-      request: {
-        ...common,
-        dimensions: [{ name: "sessionCampaignName" }, { name: "sessionSourceMedium" }],
-        metrics: [{ name: "sessions" }, { name: "engagedSessions" }, { name: "conversions" }, { name: "totalRevenue" }]
-      }
+      dimensions: ga4Dimensions("sessionCampaignName", "sessionSourceMedium", dateDimension),
+      metrics: ga4Metrics("sessions", "engagedSessions", conv, "totalRevenue")
+    },
+    google_ads_performance: {
+      dimensions: ga4Dimensions("sessionGoogleAdsCampaignName", "sessionSourceMedium", dateDimension),
+      metrics: ga4Metrics("sessions", "advertiserAdImpressions", "advertiserAdClicks", "advertiserAdCost", conv, "totalRevenue", "returnOnAdSpend")
+    },
+    landing_pages: {
+      dimensions: ga4Dimensions("landingPagePlusQueryString", "sessionDefaultChannelGroup", dateDimension),
+      metrics: ga4Metrics("sessions", "engagedSessions", "engagementRate", "bounceRate", conv, "totalRevenue")
+    },
+    pages_and_screens: {
+      dimensions: ga4Dimensions("pagePath", "pageTitle", dateDimension),
+      metrics: ga4Metrics("screenPageViews", "activeUsers", "userEngagementDuration", "eventCount", conv)
+    },
+    events: {
+      dimensions: ga4Dimensions("eventName", dateDimension),
+      metrics: ga4Metrics("eventCount", "totalUsers", "eventCountPerUser", "eventValue")
     },
     key_events: {
-      entityType: "event",
-      request: {
-        ...common,
-        dimensions: [{ name: "eventName" }],
-        metrics: [{ name: "eventCount" }, { name: "totalUsers" }, { name: "conversions" }, { name: "totalRevenue" }]
-      }
+      dimensions: ga4Dimensions("eventName", dateDimension),
+      metrics: ga4Metrics("eventCount", "totalUsers", conv, "totalRevenue")
     },
     ecommerce: {
-      entityType: "product",
-      request: {
-        ...common,
-        dimensions: [{ name: "itemName" }, { name: "itemCategory" }],
-        metrics: [{ name: "itemsViewed" }, { name: "itemsPurchased" }, { name: "itemRevenue" }]
-      }
+      dimensions: ga4Dimensions("itemName", "itemCategory", dateDimension),
+      metrics: ga4Metrics("itemsViewed", "itemsAddedToCart", "itemsPurchased", "itemRevenue")
+    },
+    item_performance: {
+      dimensions: ga4Dimensions("itemName", "itemId", "itemBrand", "itemCategory", dateDimension),
+      metrics: ga4Metrics("itemsViewed", "itemsAddedToCart", "itemsCheckedOut", "itemsPurchased", "itemRevenue")
+    },
+    item_list_performance: {
+      dimensions: ga4Dimensions("itemListName", dateDimension),
+      metrics: ga4Metrics("itemsViewed", "itemsAddedToCart", "itemsPurchased", "itemRevenue")
+    },
+    promotions: {
+      dimensions: ga4Dimensions("itemPromotionName", dateDimension),
+      metrics: ga4Metrics("itemsViewed", "itemsAddedToCart", "itemsPurchased", "itemRevenue")
+    },
+    ecommerce_funnel: {
+      dimensions: ga4Dimensions("date"),
+      metrics: ga4Metrics("itemsViewed", "addToCarts", "checkouts", "ecommercePurchases", "purchaseRevenue", "cartToViewRate", "purchaseToViewRate")
+    },
+    demographics: {
+      dimensions: ga4Dimensions("country", "region", "city", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", "newUsers", conv, "totalRevenue")
+    },
+    demographics_detail: {
+      dimensions: ga4Dimensions("userAgeBracket", "userGender", "language", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", conv, "totalRevenue")
+    },
+    technology: {
+      dimensions: ga4Dimensions("deviceCategory", "operatingSystem", "browser", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", "engagedSessions", "engagementRate", conv, "totalRevenue")
+    },
+    new_vs_returning: {
+      dimensions: ga4Dimensions("newVsReturning", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", "engagedSessions", "averageSessionDuration", conv, "totalRevenue")
+    },
+    audiences: {
+      dimensions: ga4Dimensions("audienceName", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", "engagedSessions", conv, "totalRevenue")
+    },
+    site_search: {
+      dimensions: ga4Dimensions("searchTerm", dateDimension),
+      metrics: ga4Metrics("eventCount", "totalUsers", conv)
+    },
+    engagement_overview: {
+      dimensions: ga4Dimensions("date"),
+      metrics: ga4Metrics("sessions", "engagedSessions", "engagementRate", "bounceRate", "averageSessionDuration", "screenPageViewsPerSession", "userEngagementDuration")
+    },
+    daily_trends: {
+      dimensions: ga4Dimensions("date"),
+      metrics: ga4Metrics("sessions", "totalUsers", "newUsers", "engagedSessions", conv, "totalRevenue")
     },
     attribution_breakdown: {
-      entityType: "attribution",
-      request: {
-        ...common,
-        dimensions: [{ name: "sessionDefaultChannelGroup" }, { name: "firstUserDefaultChannelGroup" }],
-        metrics: [{ name: "sessions" }, { name: "conversions" }, { name: "totalRevenue" }]
-      }
+      dimensions: ga4Dimensions("sessionDefaultChannelGroup", "firstUserDefaultChannelGroup", dateDimension),
+      metrics: ga4Metrics("sessions", "totalUsers", conv, "totalRevenue")
     }
   };
-  const definition = presets[params.preset];
-  if (!definition) throw new Error(`Unsupported GA4 preset: ${params.preset}`);
+
+  const shape = shapes[params.preset];
+  if (!shape) throw new Error(`Unsupported GA4 preset: ${params.preset}`);
+
   return {
-    ...definition,
+    entityType: definition.entityType,
+    conversionMetric: conv,
+    notes,
+    request: {
+      ...common,
+      dimensions: shape.dimensions,
+      metrics: shape.metrics
+    },
     dateRange
   };
 }
 
 function buildSearchConsolePresetRequest(params) {
-  const dateRange = resolveDateWindow(params);
-  const presets = {
-    queries: { entityType: "query", dimensions: ["query"] },
-    pages: { entityType: "page", dimensions: ["page"] },
-    countries: { entityType: "country", dimensions: ["country"] },
-    devices: { entityType: "device", dimensions: ["device"] },
-    date_trends: { entityType: "date", dimensions: ["date", ...(params.secondaryDimension ? [params.secondaryDimension] : [])] },
-    branded_vs_non_branded: { entityType: "query_segment", dimensions: ["query"] }
-  };
-  const definition = presets[params.preset];
+  const definition = SEARCH_CONSOLE_PRESET_DEFINITIONS[params.preset];
   if (!definition) throw new Error(`Unsupported Search Console preset: ${params.preset}`);
+
+  const dateRange = resolveDateWindow(params);
+  const notes = [];
+  let dimensions = [...definition.dimensions];
+
+  if (params.preset === "date_trends" && params.secondaryDimension) {
+    dimensions = ["date", params.secondaryDimension];
+  }
+
   const dimensionFilterGroups = [...(params.dimensionFilterGroups || [])];
   if (params.preset === "branded_vs_non_branded") {
     if (!params.brandTerms?.length) {
@@ -1140,23 +1790,63 @@ function buildSearchConsolePresetRequest(params) {
       }]
     });
   }
+
+  // Search Analytics caps a single response at 25000 rows; page with startRow beyond that.
+  let rowLimit = params.rowLimit;
+  if (rowLimit && rowLimit > SEARCH_CONSOLE_MAX_ROW_LIMIT) {
+    notes.push(`Search Console caps rowLimit at ${SEARCH_CONSOLE_MAX_ROW_LIMIT}; reduced from ${rowLimit}. Page with startRow for more.`);
+    rowLimit = SEARCH_CONSOLE_MAX_ROW_LIMIT;
+  }
+  if (params.preset === "striking_distance" && !rowLimit) {
+    // The position filter is applied client-side, so pull a wide page before filtering.
+    rowLimit = SEARCH_CONSOLE_MAX_ROW_LIMIT;
+    notes.push("striking_distance filters on position after fetching, so rowLimit defaults to the 25000 maximum.");
+  }
+
+  const type = params.type || definition.type || undefined;
+  if (definition.type && params.type && params.type !== definition.type) {
+    notes.push(`Preset ${params.preset} is scoped to type "${definition.type}"; the supplied type "${params.type}" was used instead.`);
+  }
+
+  const postFilter = params.preset === "striking_distance"
+    ? {
+        minPosition: params.minPosition ?? 5,
+        maxPosition: params.maxPosition ?? 20,
+        minImpressions: params.minImpressions ?? 10
+      }
+    : null;
+
   return {
     entityType: definition.entityType,
+    notes,
+    postFilter,
     request: {
       siteUrl: params.siteUrl,
       startDate: dateRange.startDate,
       endDate: dateRange.endDate,
-      dimensions: definition.dimensions,
-      rowLimit: params.rowLimit,
+      dimensions,
+      rowLimit,
       startRow: params.startRow,
       aggregationType: params.aggregationType,
       dataState: params.dataState,
       searchType: params.searchType,
-      type: params.type,
+      type,
       dimensionFilterGroups: dimensionFilterGroups.length ? dimensionFilterGroups : undefined
     },
     dateRange
   };
+}
+
+function applySearchConsolePostFilter(rows, postFilter) {
+  if (!postFilter) return rows;
+  return rows.filter((row) => {
+    const position = toNumber(row.position);
+    const impressions = toNumber(row.impressions) || 0;
+    if (position === undefined) return false;
+    return position >= postFilter.minPosition
+      && position <= postFilter.maxPosition
+      && impressions >= postFilter.minImpressions;
+  });
 }
 
 function quoteMerchantLiteral(value) {
@@ -1232,6 +1922,75 @@ function buildMerchantPresetQuery(params) {
       ],
       "rank ASC"
     ),
+    brand_performance: () => compose(
+      `brand, customer_country_code, marketing_method${dailyField}, clicks, impressions, click_through_rate, conversions, conversion_value`,
+      "product_performance_view",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        params.marketingMethod ? `marketing_method = ${quoteMerchantLiteral(String(params.marketingMethod).toUpperCase())}` : null,
+        country ? `customer_country_code = ${quoteMerchantLiteral(country)}` : null
+      ],
+      "clicks DESC"
+    ),
+    category_performance: () => compose(
+      `category_l1, category_l2, customer_country_code, marketing_method${dailyField}, clicks, impressions, click_through_rate, conversions, conversion_value`,
+      "product_performance_view",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        params.marketingMethod ? `marketing_method = ${quoteMerchantLiteral(String(params.marketingMethod).toUpperCase())}` : null,
+        country ? `customer_country_code = ${quoteMerchantLiteral(country)}` : null
+      ],
+      "clicks DESC"
+    ),
+    country_performance: () => compose(
+      `customer_country_code, marketing_method${dailyField}, clicks, impressions, click_through_rate, conversions, conversion_value`,
+      "product_performance_view",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        params.marketingMethod ? `marketing_method = ${quoteMerchantLiteral(String(params.marketingMethod).toUpperCase())}` : null
+      ],
+      "clicks DESC"
+    ),
+    non_product_performance: () => compose(
+      `date, customer_country_code, clicks, impressions, click_through_rate`,
+      "non_product_performance_view",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        country ? `customer_country_code = ${quoteMerchantLiteral(country)}` : null
+      ],
+      "clicks DESC"
+    ),
+    best_sellers_brands: () => compose(
+      "brand, rank, previous_rank, relative_demand, previous_relative_demand, relative_demand_change, report_date, report_country_code, report_category_id, report_granularity",
+      "best_sellers_brand_view",
+      [
+        `report_date = '${snapMerchantReportDate(params.reportDate || dateRange.endDate, params.reportGranularity || "WEEKLY")}'`,
+        `report_granularity = ${quoteMerchantLiteral(String(params.reportGranularity || "WEEKLY").toUpperCase())}`,
+        country ? `report_country_code = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `report_category_id = ${Number(params.reportCategoryId)}` : null
+      ],
+      "rank ASC"
+    ),
+    competitive_visibility_benchmark: () => compose(
+      "date, your_domain_visibility_trend, category_benchmark_visibility_trend, report_country_code, report_category_id, traffic_source",
+      "competitive_visibility_benchmark_view",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        country ? `report_country_code = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `report_category_id = ${Number(params.reportCategoryId)}` : null
+      ],
+      "date ASC"
+    ),
+    competitive_visibility_top_merchants: () => compose(
+      "domain, rank, relative_visibility, ads_organic_ratio, page_overlap_rate, higher_position_rate, is_your_domain, traffic_source, date, report_country_code, report_category_id",
+      "competitive_visibility_top_merchant_view",
+      [
+        `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
+        country ? `report_country_code = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `report_category_id = ${Number(params.reportCategoryId)}` : null
+      ],
+      "rank ASC"
+    ),
     competitive_visibility: () => compose(
       "domain, rank, relative_visibility, ads_organic_ratio, page_overlap_rate, higher_position_rate, is_your_domain, traffic_source, date, report_country_code, report_category_id",
       "competitive_visibility_competitor_view",
@@ -1244,11 +2003,23 @@ function buildMerchantPresetQuery(params) {
     )
   };
 
-  if (params.preset === "competitive_visibility" && !params.reportCategoryId) {
+  const CATEGORY_REQUIRED = ["competitive_visibility", "competitive_visibility_benchmark", "competitive_visibility_top_merchants"];
+  if (CATEGORY_REQUIRED.includes(params.preset) && !params.reportCategoryId) {
     throw new Error(
-      "competitive_visibility requires reportCategoryId (a numeric Google product category ID, for example 536 for Home & Garden). " +
+      `${params.preset} requires reportCategoryId (a numeric Google product category ID, for example 536 for Home & Garden). ` +
       "Run the product_performance preset first and use the category_l1 it reports to pick one."
     );
+  }
+  const COUNTRY_REQUIRED = [
+    "price_competitiveness",
+    "best_sellers",
+    "best_sellers_brands",
+    "competitive_visibility",
+    "competitive_visibility_benchmark",
+    "competitive_visibility_top_merchants"
+  ];
+  if (COUNTRY_REQUIRED.includes(params.preset) && !country) {
+    throw new Error(`${params.preset} requires reportCountryCode, for example "IN" or "US".`);
   }
   const build = presets[params.preset];
   if (!build) throw new Error(`Unsupported Merchant Center preset: ${params.preset}`);
@@ -1260,7 +2031,16 @@ function buildMerchantPresetQuery(params) {
     query: build(),
     dateRange,
     limit,
-    timeSeries: ["product_performance", "competitive_visibility"].includes(params.preset)
+    timeSeries: [
+      "product_performance",
+      "brand_performance",
+      "category_performance",
+      "country_performance",
+      "non_product_performance",
+      "competitive_visibility",
+      "competitive_visibility_benchmark",
+      "competitive_visibility_top_merchants"
+    ].includes(params.preset)
   };
 }
 
@@ -1274,15 +2054,29 @@ function normalizeMerchantPresetRows(preset, responseBody) {
       platform: "merchant_center",
       preset,
       entityType: definition?.entityType || "custom",
-      sourcePrimaryKey: row.offerId || row.id || row.domain || row.title || null,
+      sourcePrimaryKey: firstDefined(
+        row.offerId,
+        row.id,
+        row.domain,
+        row.brand,
+        row.categoryL1,
+        row.title,
+        row.customerCountryCode,
+        row.date
+      ) || null,
       dimensions: {
         date: row.date || row.reportDate,
         product_id: row.offerId || row.id,
         product_title: row.title,
+        product_brand: row.brand,
         brand: row.brand,
+        product_type: row.categoryL1 || row.categoryL2,
         channel: row.marketingMethod || row.trafficSource,
         country: row.customerCountryCode || row.reportCountryCode,
-        domain: row.domain
+        domain: row.domain,
+        availability: row.availability,
+        condition: row.condition,
+        approval_status: row.aggregatedReportingContextStatus
       },
       metrics: {
         clicks: toNumber(row.clicks),
@@ -1294,35 +2088,91 @@ function normalizeMerchantPresetRows(preset, responseBody) {
         price: microsToStandardCurrency(row.price?.amountMicros),
         benchmark_price: microsToStandardCurrency(row.benchmarkPrice?.amountMicros),
         suggested_price: microsToStandardCurrency(row.suggestedPrice?.amountMicros),
+        conversion_rate: toNumber(row.conversionRate),
         rank: toNumber(row.rank),
-        relative_visibility: toNumber(row.relativeVisibility)
+        previous_rank: toNumber(row.previousRank),
+        relative_visibility: toNumber(row.relativeVisibility),
+        page_overlap_rate: toNumber(row.pageOverlapRate),
+        higher_position_rate: toNumber(row.higherPositionRate),
+        ads_organic_ratio: toNumber(row.adsOrganicRatio),
+        click_potential_rank: toNumber(row.clickPotentialRank),
+        predicted_clicks_change: toNumber(row.predictedClicksChangeFraction),
+        predicted_conversions_change: toNumber(row.predictedConversionsChangeFraction)
       },
       sourceContext: row
     });
   });
 }
 
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
 function normalizeGoogleAdsPresetRows(preset, responseBody) {
   const rows = responseBody?.results || [];
   return rows.map((row) => {
     const dimensions = {
-      date: getNestedValue(row, "segments.date"),
-      campaign_id: getNestedValue(row, "campaign.id"),
-      campaign_name: getNestedValue(row, "campaign.name"),
-      ad_group_id: getNestedValue(row, "ad_group.id"),
-      ad_group_name: getNestedValue(row, "ad_group.name"),
-      keyword_text: getNestedValue(row, "ad_group_criterion.keyword.text"),
-      keyword_match_type: getNestedValue(row, "ad_group_criterion.keyword.match_type"),
-      search_term: getNestedValue(row, "search_term_view.search_term"),
-      channel: getNestedValue(row, "campaign.advertising_channel_type"),
-      asset_id: getNestedValue(row, "asset.id"),
-      asset_name: getNestedValue(row, "asset.name"),
-      asset_type: getNestedValue(row, "asset.type")
+      date: firstDefined(getGoogleAdsValue(row, "segments.date"), getGoogleAdsValue(row, "change_event.change_date_time")),
+      campaign_id: getGoogleAdsValue(row, "campaign.id"),
+      campaign_name: getGoogleAdsValue(row, "campaign.name"),
+      ad_group_id: getGoogleAdsValue(row, "ad_group.id"),
+      ad_group_name: getGoogleAdsValue(row, "ad_group.name"),
+      ad_id: getGoogleAdsValue(row, "ad_group_ad.ad.id"),
+      ad_type: getGoogleAdsValue(row, "ad_group_ad.ad.type"),
+      keyword_text: firstDefined(getGoogleAdsValue(row, "ad_group_criterion.keyword.text"), getGoogleAdsValue(row, "campaign_criterion.keyword.text"), getGoogleAdsValue(row, "shared_criterion.keyword.text"), getGoogleAdsValue(row, "click_view.keyword_info.text")),
+      keyword_match_type: firstDefined(getGoogleAdsValue(row, "ad_group_criterion.keyword.match_type"), getGoogleAdsValue(row, "campaign_criterion.keyword.match_type"), getGoogleAdsValue(row, "shared_criterion.keyword.match_type")),
+      search_term: firstDefined(getGoogleAdsValue(row, "search_term_view.search_term"), getGoogleAdsValue(row, "campaign_search_term_insight.category_label")),
+      channel: firstDefined(getGoogleAdsValue(row, "campaign.advertising_channel_type"), getGoogleAdsValue(row, "campaign.advertising_channel_sub_type")),
+      asset_id: getGoogleAdsValue(row, "asset.id"),
+      asset_name: getGoogleAdsValue(row, "asset.name"),
+      asset_type: getGoogleAdsValue(row, "asset.type"),
+      asset_group_id: getGoogleAdsValue(row, "asset_group.id"),
+      asset_group_name: getGoogleAdsValue(row, "asset_group.name"),
+      device: firstDefined(getGoogleAdsValue(row, "segments.device")),
+      day_of_week: getGoogleAdsValue(row, "segments.day_of_week"),
+      hour: getGoogleAdsValue(row, "segments.hour"),
+      country: firstDefined(getGoogleAdsValue(row, "segments.geo_target_country"), getGoogleAdsValue(row, "geographic_view.country_criterion_id"), getGoogleAdsValue(row, "segments.product_country")),
+      region: getGoogleAdsValue(row, "segments.geo_target_region"),
+      city: getGoogleAdsValue(row, "segments.geo_target_city"),
+      product_id: getGoogleAdsValue(row, "segments.product_item_id"),
+      product_title: getGoogleAdsValue(row, "segments.product_title"),
+      product_brand: getGoogleAdsValue(row, "segments.product_brand"),
+      product_type: firstDefined(getGoogleAdsValue(row, "segments.product_type_l1"), getGoogleAdsValue(row, "segments.product_type_l2")),
+      age_range: getGoogleAdsValue(row, "ad_group_criterion.age_range.type"),
+      gender: getGoogleAdsValue(row, "ad_group_criterion.gender.type"),
+      audience: getGoogleAdsValue(row, "ad_group_criterion.display_name"),
+      placement: firstDefined(getGoogleAdsValue(row, "group_placement_view.display_name"), getGoogleAdsValue(row, "group_placement_view.placement")),
+      conversion_action_name: getGoogleAdsValue(row, "segments.conversion_action_name"),
+      conversion_action_category: getGoogleAdsValue(row, "segments.conversion_action_category"),
+      landing_page: firstDefined(getGoogleAdsValue(row, "landing_page_view.unexpanded_final_url"), getGoogleAdsValue(row, "expanded_landing_page_view.expanded_final_url")),
+      budget_id: getGoogleAdsValue(row, "campaign_budget.id"),
+      budget_name: getGoogleAdsValue(row, "campaign_budget.name"),
+      bidding_strategy_name: firstDefined(getGoogleAdsValue(row, "bidding_strategy.name"), getGoogleAdsValue(row, "campaign.bidding_strategy_type")),
+      video_id: getGoogleAdsValue(row, "video.id"),
+      video_title: getGoogleAdsValue(row, "video.title"),
+      gclid: getGoogleAdsValue(row, "click_view.gclid"),
+      currency: firstDefined(getGoogleAdsValue(row, "customer.currency_code"), getGoogleAdsValue(row, "bidding_strategy.effective_currency_code"))
     };
-    const sourcePrimaryKey =
-      dimensions.keyword_text ? `${dimensions.ad_group_id || ""}:${dimensions.keyword_text}` :
-      dimensions.search_term ? `${dimensions.ad_group_id || ""}:${dimensions.search_term}` :
-      dimensions.asset_id || dimensions.ad_group_id || dimensions.campaign_id;
+
+    const sourcePrimaryKey = firstDefined(
+      dimensions.gclid,
+      dimensions.keyword_text ? `${dimensions.ad_group_id || ""}:${dimensions.keyword_text}` : undefined,
+      dimensions.search_term ? `${dimensions.campaign_id || ""}:${dimensions.search_term}` : undefined,
+      dimensions.product_id,
+      dimensions.asset_id,
+      dimensions.asset_group_id,
+      dimensions.video_id,
+      dimensions.ad_id,
+      dimensions.budget_id,
+      getGoogleAdsValue(row, "bidding_strategy.id"),
+      getGoogleAdsValue(row, "experiment.experiment_id"),
+      getGoogleAdsValue(row, "recommendation.resource_name"),
+      getGoogleAdsValue(row, "change_event.change_resource_name"),
+      dimensions.ad_group_id,
+      dimensions.campaign_id,
+      getGoogleAdsValue(row, "customer.id")
+    );
+
     return buildNormalizedRecord({
       platform: "google_ads",
       preset,
@@ -1330,17 +2180,55 @@ function normalizeGoogleAdsPresetRows(preset, responseBody) {
       sourcePrimaryKey,
       dimensions,
       metrics: {
-        impressions: toNumber(getNestedValue(row, "metrics.impressions")),
-        clicks: toNumber(getNestedValue(row, "metrics.clicks")),
-        ctr: toNumber(getNestedValue(row, "metrics.ctr")),
-        average_cpc: microsToStandardCurrency(getNestedValue(row, "metrics.average_cpc")),
-        cost: microsToStandardCurrency(getNestedValue(row, "metrics.cost_micros")),
-        conversions: toNumber(getNestedValue(row, "metrics.conversions")),
-        conversion_value: toNumber(getNestedValue(row, "metrics.conversions_value"))
+        impressions: toNumber(getGoogleAdsValue(row, "metrics.impressions")),
+        clicks: toNumber(getGoogleAdsValue(row, "metrics.clicks")),
+        ctr: toNumber(getGoogleAdsValue(row, "metrics.ctr")),
+        average_cpc: microsToStandardCurrency(getGoogleAdsValue(row, "metrics.average_cpc")),
+        average_cpm: microsToStandardCurrency(getGoogleAdsValue(row, "metrics.average_cpm")),
+        cost: microsToStandardCurrency(getGoogleAdsValue(row, "metrics.cost_micros")),
+        conversions: toNumber(getGoogleAdsValue(row, "metrics.conversions")),
+        conversion_value: toNumber(getGoogleAdsValue(row, "metrics.conversions_value")),
+        all_conversions: toNumber(getGoogleAdsValue(row, "metrics.all_conversions")),
+        all_conversions_value: toNumber(getGoogleAdsValue(row, "metrics.all_conversions_value")),
+        cost_per_conversion: microsToStandardCurrency(getGoogleAdsValue(row, "metrics.cost_per_conversion")),
+        value_per_conversion: toNumber(getGoogleAdsValue(row, "metrics.value_per_conversion")),
+        conversion_rate: toNumber(getGoogleAdsValue(row, "metrics.conversions_from_interactions_rate")),
+        interactions: toNumber(getGoogleAdsValue(row, "metrics.interactions")),
+        interaction_rate: toNumber(getGoogleAdsValue(row, "metrics.interaction_rate")),
+        search_impression_share: toNumber(getGoogleAdsValue(row, "metrics.search_impression_share")),
+        search_budget_lost_impression_share: toNumber(getGoogleAdsValue(row, "metrics.search_budget_lost_impression_share")),
+        search_rank_lost_impression_share: toNumber(getGoogleAdsValue(row, "metrics.search_rank_lost_impression_share")),
+        search_top_impression_share: toNumber(getGoogleAdsValue(row, "metrics.search_top_impression_share")),
+        search_absolute_top_impression_share: toNumber(getGoogleAdsValue(row, "metrics.search_absolute_top_impression_share")),
+        absolute_top_impression_percentage: toNumber(getGoogleAdsValue(row, "metrics.absolute_top_impression_percentage")),
+        top_impression_percentage: toNumber(getGoogleAdsValue(row, "metrics.top_impression_percentage")),
+        quality_score: toNumber(getGoogleAdsValue(row, "ad_group_criterion.quality_info.quality_score")),
+        video_views: toNumber(getGoogleAdsValue(row, "metrics.video_views")),
+        video_view_rate: toNumber(getGoogleAdsValue(row, "metrics.video_view_rate")),
+        average_cpv: microsToStandardCurrency(getGoogleAdsValue(row, "metrics.average_cpv")),
+        call_duration_seconds: toNumber(getGoogleAdsValue(row, "call_view.call_duration_seconds"))
       },
       sourceContext: {
-        status: getNestedValue(row, "campaign.status") || getNestedValue(row, "ad_group.status") || getNestedValue(row, "ad_group_criterion.status"),
-        performance_label: getNestedValue(row, "ad_group_ad_asset_view.performance_label")
+        status: firstDefined(
+          getGoogleAdsValue(row, "campaign.status"),
+          getGoogleAdsValue(row, "ad_group.status"),
+          getGoogleAdsValue(row, "ad_group_criterion.status"),
+          getGoogleAdsValue(row, "ad_group_ad.status"),
+          getGoogleAdsValue(row, "asset_group.status"),
+          getGoogleAdsValue(row, "experiment.status"),
+          getGoogleAdsValue(row, "call_view.call_status")
+        ),
+        performance_label: getGoogleAdsValue(row, "ad_group_ad_asset_view.performance_label"),
+        ad_strength: firstDefined(getGoogleAdsValue(row, "ad_group_ad.ad_strength"), getGoogleAdsValue(row, "asset_group.ad_strength")),
+        approval_status: getGoogleAdsValue(row, "ad_group_ad.policy_summary.approval_status"),
+        quality_creative: getGoogleAdsValue(row, "ad_group_criterion.quality_info.creative_quality_score"),
+        quality_landing_page: getGoogleAdsValue(row, "ad_group_criterion.quality_info.post_click_quality_score"),
+        quality_expected_ctr: getGoogleAdsValue(row, "ad_group_criterion.quality_info.search_predicted_ctr"),
+        recommendation_type: getGoogleAdsValue(row, "recommendation.type"),
+        change_user: getGoogleAdsValue(row, "change_event.user_email"),
+        changed_fields: getGoogleAdsValue(row, "change_event.changed_fields"),
+        change_operation: getGoogleAdsValue(row, "change_event.resource_change_operation"),
+        optimization_score: toNumber(getGoogleAdsValue(row, "customer.optimization_score"))
       }
     });
   });
@@ -1348,51 +2236,105 @@ function normalizeGoogleAdsPresetRows(preset, responseBody) {
 
 function normalizeGa4PresetRows(preset, responseBody) {
   const rows = mapGa4ReportRows(responseBody);
-  return rows.map((row) => buildNormalizedRecord({
-    platform: "ga4",
-    preset,
-    entityType: GA4_PRESET_DEFINITIONS[preset]?.entityType || "custom",
-    sourcePrimaryKey:
-      row.dimensions.sessionCampaignName ||
-      row.dimensions.landingPagePlusQueryString ||
-      row.dimensions.sessionSourceMedium ||
-      row.dimensions.itemName ||
-      row.dimensions.eventName ||
-      row.dimensions.sessionDefaultChannelGroup ||
-      null,
-    dimensions: {
-      campaign_name: row.dimensions.sessionCampaignName,
-      source_medium: row.dimensions.sessionSourceMedium,
-      landing_page: row.dimensions.landingPagePlusQueryString,
-      channel: row.dimensions.sessionDefaultChannelGroup || row.dimensions.firstUserDefaultChannelGroup,
-      product_title: row.dimensions.itemName,
-      query: row.dimensions.eventName
-    },
-    metrics: {
-      sessions: toNumber(row.metrics.sessions),
-      users: toNumber(row.metrics.totalUsers),
-      engaged_sessions: toNumber(row.metrics.engagedSessions),
-      conversions: toNumber(row.metrics.conversions),
-      event_count: toNumber(row.metrics.eventCount),
-      revenue: toNumber(row.metrics.totalRevenue || row.metrics.itemRevenue)
-    },
-    sourceContext: row.dimensions
-  }));
+  return rows.map((row) => {
+    const d = row.dimensions;
+    const m = row.metrics;
+    const dimensions = {
+      date: d.date,
+      campaign_name: firstDefined(d.sessionCampaignName, d.sessionGoogleAdsCampaignName, d.firstUserCampaignName),
+      source_medium: firstDefined(d.sessionSourceMedium, d.firstUserSourceMedium),
+      source: firstDefined(d.sessionSource, d.firstUserSource),
+      medium: firstDefined(d.sessionMedium, d.firstUserMedium),
+      channel: firstDefined(d.sessionDefaultChannelGroup, d.firstUserDefaultChannelGroup),
+      landing_page: d.landingPagePlusQueryString,
+      page: firstDefined(d.pagePath, d.pageTitle),
+      event_name: d.eventName,
+      query: d.searchTerm,
+      product_id: d.itemId,
+      product_title: firstDefined(d.itemName, d.itemListName, d.itemPromotionName),
+      product_brand: d.itemBrand,
+      product_type: d.itemCategory,
+      country: d.country,
+      region: d.region,
+      city: d.city,
+      language: d.language,
+      device: d.deviceCategory,
+      operating_system: d.operatingSystem,
+      browser: d.browser,
+      age_range: d.userAgeBracket,
+      gender: d.userGender,
+      audience: firstDefined(d.audienceName, d.newVsReturning)
+    };
+    return buildNormalizedRecord({
+      platform: "ga4",
+      preset,
+      entityType: GA4_PRESET_DEFINITIONS[preset]?.entityType || "custom",
+      sourcePrimaryKey: firstDefined(
+        dimensions.campaign_name,
+        dimensions.landing_page,
+        dimensions.page,
+        dimensions.source_medium,
+        dimensions.product_title,
+        dimensions.event_name,
+        dimensions.query,
+        dimensions.country,
+        dimensions.device,
+        dimensions.audience,
+        dimensions.channel,
+        dimensions.date
+      ) || null,
+      dimensions,
+      metrics: {
+        sessions: toNumber(m.sessions),
+        users: toNumber(firstDefined(m.totalUsers, m.activeUsers)),
+        new_users: toNumber(m.newUsers),
+        engaged_sessions: toNumber(m.engagedSessions),
+        engagement_rate: toNumber(m.engagementRate),
+        bounce_rate: toNumber(m.bounceRate),
+        average_session_duration: toNumber(m.averageSessionDuration),
+        page_views: toNumber(m.screenPageViews),
+        event_count: toNumber(m.eventCount),
+        event_value: toNumber(m.eventValue),
+        // GA4 exposes the outcome metric under either name depending on property migration.
+        conversions: toNumber(firstDefined(m.keyEvents, m.conversions)),
+        revenue: toNumber(firstDefined(m.totalRevenue, m.purchaseRevenue, m.itemRevenue)),
+        transactions: toNumber(m.ecommercePurchases),
+        items_viewed: toNumber(m.itemsViewed),
+        items_added_to_cart: toNumber(firstDefined(m.itemsAddedToCart, m.addToCarts)),
+        items_purchased: toNumber(m.itemsPurchased),
+        cost: toNumber(m.advertiserAdCost),
+        clicks: toNumber(m.advertiserAdClicks),
+        impressions: toNumber(m.advertiserAdImpressions),
+        return_on_ad_spend: toNumber(m.returnOnAdSpend)
+      },
+      sourceContext: { dimensions: d, metrics: m }
+    });
+  });
 }
 
-function normalizeSearchConsolePresetRows(preset, responseBody, dimensions = []) {
-  const rows = buildSearchConsoleRowObjects(responseBody, dimensions);
+function normalizeSearchConsolePresetRows(preset, responseBody, dimensions = [], postFilter = null) {
+  const allRows = buildSearchConsoleRowObjects(responseBody, dimensions);
+  const rows = applySearchConsolePostFilter(allRows, postFilter);
   return rows.map((row) => buildNormalizedRecord({
     platform: "search_console",
     preset,
     entityType: SEARCH_CONSOLE_PRESET_DEFINITIONS[preset]?.entityType || "custom",
-    sourcePrimaryKey: row.query || row.page || row.country || row.device || row.date || null,
+    sourcePrimaryKey: firstDefined(
+      row.query && row.page ? `${row.query} :: ${row.page}` : undefined,
+      row.query,
+      row.page,
+      row.searchAppearance,
+      row.country,
+      row.device,
+      row.date
+    ) || null,
     dimensions: {
       date: row.date,
       query: row.query,
       page: row.page,
       country: row.country,
       device: row.device,
+      search_appearance: row.searchAppearance,
       channel: responseBody?.responseAggregationType
     },
     metrics: {
@@ -1403,6 +2345,160 @@ function normalizeSearchConsolePresetRows(preset, responseBody, dimensions = [])
     },
     sourceContext: {
       keys: row.keys
+    }
+  }));
+}
+
+function callRailDurationBucket(seconds) {
+  const value = toNumber(seconds) || 0;
+  if (value < 30) return "0-30s";
+  if (value < 60) return "30-60s";
+  if (value < 120) return "1-2m";
+  if (value < 300) return "2-5m";
+  if (value < 600) return "5-10m";
+  return "10m+";
+}
+
+function callRailGroupKeys(call, groupBy) {
+  if (!groupBy) return [null];
+  if (groupBy === "duration_bucket") return [callRailDurationBucket(call.duration)];
+  if (groupBy === "call_date") return [String(call.start_time || "").slice(0, 10) || "(unknown)"];
+  if (groupBy === "answered") return [call.answered ? "answered" : "missed"];
+  if (groupBy === "first_call") return [call.first_call ? "first_time" : "repeat"];
+  if (groupBy === "tags") {
+    const tags = Array.isArray(call.tags) ? call.tags : [];
+    if (!tags.length) return ["(untagged)"];
+    // A call with several tags contributes one row per tag, so tag totals exceed call totals.
+    return tags.map((tag) => (typeof tag === "string" ? tag : tag?.name || "(untagged)"));
+  }
+  const raw = call[groupBy];
+  if (raw === undefined || raw === null || raw === "") return ["(not set)"];
+  return [String(raw)];
+}
+
+function aggregateCallRailCalls(calls, preset) {
+  const definition = CALLRAIL_PRESET_DEFINITIONS[preset];
+  const groupBy = definition?.groupBy || null;
+  const buckets = new Map();
+  for (const call of calls) {
+    for (const key of callRailGroupKeys(call, definition?.aggregateAll ? null : groupBy)) {
+      const bucketKey = key === null ? "__all__" : key;
+      if (!buckets.has(bucketKey)) {
+        buckets.set(bucketKey, {
+          key: key === null ? "all_calls" : key,
+          calls: 0,
+          answered_calls: 0,
+          missed_calls: 0,
+          voicemails: 0,
+          first_time_callers: 0,
+          qualified_calls: 0,
+          total_duration_seconds: 0,
+          lead_value: 0
+        });
+      }
+      const bucket = buckets.get(bucketKey);
+      bucket.calls += 1;
+      if (call.answered) bucket.answered_calls += 1;
+      else bucket.missed_calls += 1;
+      if (call.voicemail) bucket.voicemails += 1;
+      if (call.first_call) bucket.first_time_callers += 1;
+      if (String(call.lead_status || "").toLowerCase() === "good_lead") bucket.qualified_calls += 1;
+      bucket.total_duration_seconds += toNumber(call.duration) || 0;
+      bucket.lead_value += toNumber(call.value) || 0;
+    }
+  }
+  return [...buckets.values()]
+    .map((bucket) => ({
+      ...bucket,
+      average_duration_seconds: bucket.calls ? Math.round(bucket.total_duration_seconds / bucket.calls) : 0,
+      answer_rate: bucket.calls ? bucket.answered_calls / bucket.calls : 0
+    }))
+    .sort((a, b) => b.calls - a.calls);
+}
+
+function normalizeCallRailPresetRows(preset, aggregatedRows) {
+  const definition = CALLRAIL_PRESET_DEFINITIONS[preset];
+  const groupBy = definition?.groupBy;
+  const dimensionKeyFor = {
+    source: "source_medium",
+    medium: "source_medium",
+    referrer: "source_medium",
+    campaign: "campaign_name",
+    keywords: "query",
+    landing_page_url: "landing_page",
+    tracking_phone_number: "tracker_id",
+    company_name: "account_name",
+    device_type: "device",
+    customer_city: "city",
+    lead_status: "call_segment",
+    tags: "call_segment",
+    answered: "call_segment",
+    first_call: "call_segment",
+    duration_bucket: "call_segment",
+    call_date: "date"
+  }[groupBy] || "call_segment";
+  return aggregatedRows.map((row) => buildNormalizedRecord({
+    platform: "callrail",
+    preset,
+    entityType: definition?.entityType || "call",
+    sourcePrimaryKey: row.key,
+    dimensions: { [dimensionKeyFor]: row.key },
+    metrics: {
+      calls: row.calls,
+      answered_calls: row.answered_calls,
+      missed_calls: row.missed_calls,
+      qualified_calls: row.qualified_calls,
+      first_time_callers: row.first_time_callers,
+      call_duration_seconds: row.total_duration_seconds,
+      average_call_duration_seconds: row.average_duration_seconds,
+      answer_rate: row.answer_rate,
+      revenue: row.lead_value
+    },
+    sourceContext: { groupBy: groupBy || "none", voicemails: row.voicemails }
+  }));
+}
+
+function normalizeCallRailCallRecords(calls) {
+  return calls.map((call) => buildNormalizedRecord({
+    platform: "callrail",
+    preset: "call_details",
+    entityType: "call",
+    sourcePrimaryKey: call.id ? String(call.id) : null,
+    dimensions: {
+      date: String(call.start_time || "").slice(0, 10) || undefined,
+      call_id: call.id ? String(call.id) : undefined,
+      campaign_name: firstDefined(call.utm_campaign, call.campaign),
+      source_medium: firstDefined(
+        call.utm_source && call.utm_medium ? `${call.utm_source} / ${call.utm_medium}` : undefined,
+        call.source && call.medium ? `${call.source} / ${call.medium}` : undefined,
+        call.source_name,
+        call.source
+      ),
+      source: firstDefined(call.utm_source, call.source),
+      medium: firstDefined(call.utm_medium, call.medium),
+      query: firstDefined(call.utm_term, call.keywords),
+      landing_page: call.landing_page_url,
+      tracker_id: call.tracking_phone_number,
+      device: call.device_type,
+      city: call.customer_city,
+      country: call.customer_country
+    },
+    metrics: {
+      calls: 1,
+      answered_calls: call.answered ? 1 : 0,
+      missed_calls: call.answered ? 0 : 1,
+      qualified_calls: String(call.lead_status || "").toLowerCase() === "good_lead" ? 1 : 0,
+      first_time_callers: call.first_call ? 1 : 0,
+      call_duration_seconds: toNumber(call.duration),
+      revenue: toNumber(call.value)
+    },
+    sourceContext: {
+      lead_status: call.lead_status,
+      tags: call.tags,
+      gclid: call.gclid,
+      referrer: call.referrer,
+      voicemail: call.voicemail,
+      prior_calls: call.prior_calls
     }
   }));
 }
@@ -1421,7 +2517,8 @@ function buildMarketingPresetCatalog() {
     google_ads: GOOGLE_ADS_PRESET_DEFINITIONS,
     ga4: GA4_PRESET_DEFINITIONS,
     search_console: SEARCH_CONSOLE_PRESET_DEFINITIONS,
-    merchant_center: MERCHANT_PRESET_DEFINITIONS
+    merchant_center: MERCHANT_PRESET_DEFINITIONS,
+    callrail: CALLRAIL_PRESET_DEFINITIONS
   };
 }
 
@@ -1433,6 +2530,7 @@ function getEnvironmentPresence() {
     APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET),
     GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
     GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+    GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "basic"),
     CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
     CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
   };
@@ -1538,6 +2636,29 @@ async function runGa4Report(accessToken, params) {
       returnPropertyQuota: params.returnPropertyQuota
     })
   });
+}
+
+async function runGa4FunnelReport(accessToken, params) {
+  // runFunnelReport only exists on the v1alpha surface of the Data API.
+  return callGoogleApi(`https://analyticsdata.googleapis.com/v1alpha/${normalizePropertyName(params.propertyId)}:runFunnelReport`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      dateRanges: params.dateRanges,
+      funnelBreakdown: params.funnelBreakdown,
+      funnelNextAction: params.funnelNextAction,
+      funnelVisualizationType: params.funnelVisualizationType,
+      segments: params.segments,
+      limit: params.limit,
+      dimensionFilter: params.dimensionFilter,
+      funnel: params.funnel
+    })
+  });
+}
+
+async function listGa4AdminResource(accessToken, propertyId, resource, params = {}) {
+  const url = new URL(`https://analyticsadmin.googleapis.com/v1beta/${normalizePropertyName(propertyId)}/${resource}`);
+  appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
 }
 
 async function getGa4Metadata(accessToken, propertyId) {
@@ -1981,9 +3102,9 @@ function createServer(req) {
   });
   server.registerTool("run_search_console_preset", {
     title: "Run Search Console Preset",
-    description: "Run expert Search Console presets for queries, pages, countries, devices, date trends, or branded vs non-branded analysis.",
+    description: "Run expert Search Console reports: queries, pages, query-to-page pairs, striking-distance opportunities, countries, devices, country by device, date trends, per-day query and page movement, search appearance / rich results, branded versus non-branded, Discover, and Google News.",
     inputSchema: {
-      preset: z.enum(["queries", "pages", "countries", "devices", "date_trends", "branded_vs_non_branded"]),
+      preset: z.enum(SEARCH_CONSOLE_PRESET_NAMES),
       siteUrl: z.string().min(1),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
@@ -1996,12 +3117,15 @@ function createServer(req) {
       secondaryDimension: z.enum(["country", "device", "page", "query"]).optional(),
       brandTerms: z.array(z.string()).optional(),
       brandMode: z.enum(["branded", "non_branded"]).optional(),
+      minPosition: z.number().min(1).max(100).optional(),
+      maxPosition: z.number().min(1).max(100).optional(),
+      minImpressions: z.number().int().min(0).optional(),
       dimensionFilterGroups: z.array(z.record(z.any())).optional()
     },
     annotations: { readOnlyHint: true }
   }, async (params) => {
     const parsed = z.object({
-      preset: z.enum(["queries", "pages", "countries", "devices", "date_trends", "branded_vs_non_branded"]),
+      preset: z.enum(SEARCH_CONSOLE_PRESET_NAMES),
       siteUrl: z.string().min(1),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
@@ -2014,20 +3138,125 @@ function createServer(req) {
       secondaryDimension: z.enum(["country", "device", "page", "query"]).optional(),
       brandTerms: z.array(z.string()).optional(),
       brandMode: z.enum(["branded", "non_branded"]).optional(),
+      minPosition: z.number().min(1).max(100).optional(),
+      maxPosition: z.number().min(1).max(100).optional(),
+      minImpressions: z.number().int().min(0).optional(),
       dimensionFilterGroups: z.array(z.record(z.any())).optional()
     }).parse(params);
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_search_console_preset, async ({ googleCredentials }) => {
-      const presetConfig = buildSearchConsolePresetRequest(parsed);
+      let presetConfig;
+      try {
+        presetConfig = buildSearchConsolePresetRequest(parsed);
+      } catch (error) {
+        return buildToolResult({
+          error: "invalid_search_console_preset_request",
+          error_description: error instanceof Error ? error.message : String(error),
+          preset: parsed.preset,
+          presetCatalog: SEARCH_CONSOLE_PRESET_DEFINITIONS[parsed.preset] || null
+        }, true);
+      }
       const response = await querySearchConsole(googleCredentials.accessToken, presetConfig.request);
+      const normalizedRows = response.ok
+        ? normalizeSearchConsolePresetRows(parsed.preset, response.body, presetConfig.request.dimensions, presetConfig.postFilter)
+        : [];
       return buildToolResult({
         preset: parsed.preset,
         entityType: presetConfig.entityType,
+        dateRange: presetConfig.dateRange,
+        notes: presetConfig.notes,
+        postFilter: presetConfig.postFilter,
+        rowCount: normalizedRows.length,
         guardrails: PLATFORM_GUARDRAILS.search_console,
         request: presetConfig.request,
         normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
-        normalizedRows: response.ok ? normalizeSearchConsolePresetRows(parsed.preset, response.body, presetConfig.request.dimensions) : [],
+        normalizedRows,
         raw: toGoogleDebugPayload(response)
       }, !response.ok);
+    });
+  });
+  server.registerTool("compare_search_console_periods", {
+    title: "Compare Search Console Periods",
+    description: "Compare one Search Console dimension across two date ranges and return per-key deltas for clicks, impressions, CTR, and average position. Costs two Search Analytics requests.",
+    inputSchema: {
+      siteUrl: z.string().min(1),
+      dimension: z.enum(["query", "page", "country", "device", "searchAppearance"]).optional(),
+      currentStartDate: z.string(),
+      currentEndDate: z.string(),
+      previousStartDate: z.string(),
+      previousEndDate: z.string(),
+      rowLimit: z.number().int().min(1).max(25000).optional(),
+      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
+      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      siteUrl: z.string().min(1),
+      dimension: z.enum(["query", "page", "country", "device", "searchAppearance"]).optional(),
+      currentStartDate: z.string(),
+      currentEndDate: z.string(),
+      previousStartDate: z.string(),
+      previousEndDate: z.string(),
+      rowLimit: z.number().int().min(1).max(25000).optional(),
+      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
+      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.compare_search_console_periods, async ({ googleCredentials }) => {
+      const dimension = parsed.dimension || "query";
+      const baseRequest = {
+        siteUrl: parsed.siteUrl,
+        dimensions: [dimension],
+        rowLimit: parsed.rowLimit || 1000,
+        type: parsed.type,
+        dimensionFilterGroups: parsed.dimensionFilterGroups?.length ? parsed.dimensionFilterGroups : undefined
+      };
+      const [current, previous] = await Promise.all([
+        querySearchConsole(googleCredentials.accessToken, { ...baseRequest, startDate: parsed.currentStartDate, endDate: parsed.currentEndDate }),
+        querySearchConsole(googleCredentials.accessToken, { ...baseRequest, startDate: parsed.previousStartDate, endDate: parsed.previousEndDate })
+      ]);
+      if (!current.ok || !previous.ok) {
+        return buildToolResult({
+          error: "search_console_comparison_failed",
+          current: toGoogleDebugPayload(current),
+          previous: toGoogleDebugPayload(previous)
+        }, true);
+      }
+      const index = (body) => new Map(
+        buildSearchConsoleRowObjects(body, [dimension]).map((row) => [row[dimension], row])
+      );
+      const currentRows = index(current.body);
+      const previousRows = index(previous.body);
+      const keys = new Set([...currentRows.keys(), ...previousRows.keys()]);
+      const delta = (a, b) => (a === undefined && b === undefined ? undefined : (toNumber(a) || 0) - (toNumber(b) || 0));
+      const comparisons = [...keys].map((key) => {
+        const now = currentRows.get(key) || {};
+        const before = previousRows.get(key) || {};
+        return {
+          key,
+          dimension,
+          current: { clicks: toNumber(now.clicks) || 0, impressions: toNumber(now.impressions) || 0, ctr: toNumber(now.ctr) || 0, position: toNumber(now.position) ?? null },
+          previous: { clicks: toNumber(before.clicks) || 0, impressions: toNumber(before.impressions) || 0, ctr: toNumber(before.ctr) || 0, position: toNumber(before.position) ?? null },
+          change: {
+            clicks: delta(now.clicks, before.clicks),
+            impressions: delta(now.impressions, before.impressions),
+            ctr: delta(now.ctr, before.ctr),
+            // Position improves as it falls, so invert the sign: positive means moved up.
+            position: now.position !== undefined && before.position !== undefined
+              ? (toNumber(before.position) - toNumber(now.position))
+              : undefined
+          },
+          status: currentRows.has(key) && previousRows.has(key) ? "both" : currentRows.has(key) ? "new" : "lost"
+        };
+      }).sort((a, b) => (b.change.clicks || 0) - (a.change.clicks || 0));
+      return buildToolResult({
+        dimension,
+        currentRange: { startDate: parsed.currentStartDate, endDate: parsed.currentEndDate },
+        previousRange: { startDate: parsed.previousStartDate, endDate: parsed.previousEndDate },
+        rowCount: comparisons.length,
+        requestCount: 2,
+        guardrails: PLATFORM_GUARDRAILS.search_console,
+        comparisons
+      });
     });
   });
   server.registerTool("list_ga4_properties", {
@@ -2211,13 +3440,16 @@ function createServer(req) {
   });
   server.registerTool("run_ga4_preset", {
     title: "Run GA4 Preset",
-    description: "Run expert GA4 presets for channels, landing pages, source / medium, campaigns, key events, ecommerce, or attribution-style analysis.",
+    description: "Run expert GA4 reports: traffic and user acquisition, channels, campaigns, Google Ads with cost and ROAS, landing pages, pages and screens, events, key events, ecommerce and item performance, item lists, promotions, the ecommerce funnel, demographics, technology, new versus returning, audiences, site search, engagement, and daily trends. Call list_marketing_presets for the full catalogue.",
     inputSchema: {
-      preset: z.enum(["channels", "landing_pages", "source_medium", "campaigns", "key_events", "ecommerce", "attribution_breakdown"]),
+      preset: z.enum(GA4_PRESET_NAMES),
       propertyId: z.string().min(1),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
-      limit: z.number().int().min(1).max(100000).optional(),
+      limit: z.number().int().min(1).max(250000).optional(),
+      offset: z.number().int().min(0).optional(),
+      includeDailyBreakdown: z.boolean().optional(),
+      conversionMetric: z.enum(["keyEvents", "conversions"]).optional(),
       dimensionFilter: z.record(z.any()).optional(),
       metricFilter: z.record(z.any()).optional(),
       orderBys: z.array(z.record(z.any())).optional(),
@@ -2226,27 +3458,227 @@ function createServer(req) {
     annotations: { readOnlyHint: true }
   }, async (params) => {
     const parsed = z.object({
-      preset: z.enum(["channels", "landing_pages", "source_medium", "campaigns", "key_events", "ecommerce", "attribution_breakdown"]),
+      preset: z.enum(GA4_PRESET_NAMES),
       propertyId: z.string().min(1),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
-      limit: z.number().int().min(1).max(100000).optional(),
+      limit: z.number().int().min(1).max(250000).optional(),
+      offset: z.number().int().min(0).optional(),
+      includeDailyBreakdown: z.boolean().optional(),
+      conversionMetric: z.enum(["keyEvents", "conversions"]).optional(),
       dimensionFilter: z.record(z.any()).optional(),
       metricFilter: z.record(z.any()).optional(),
       orderBys: z.array(z.record(z.any())).optional(),
       keepEmptyRows: z.boolean().optional()
     }).parse(params);
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_ga4_preset, async ({ googleCredentials }) => {
-      const presetConfig = buildGa4PresetRequest(parsed);
+      let presetConfig;
+      try {
+        presetConfig = buildGa4PresetRequest(parsed);
+      } catch (error) {
+        return buildToolResult({
+          error: "invalid_ga4_preset_request",
+          error_description: error instanceof Error ? error.message : String(error),
+          preset: parsed.preset,
+          presetCatalog: GA4_PRESET_DEFINITIONS[parsed.preset] || null
+        }, true);
+      }
       const response = await runGa4Report(googleCredentials.accessToken, presetConfig.request);
       return buildToolResult({
         preset: parsed.preset,
         entityType: presetConfig.entityType,
         dateRange: presetConfig.dateRange,
+        conversionMetric: presetConfig.conversionMetric,
+        notes: presetConfig.notes,
+        rowCount: response.ok ? response.body?.rowCount ?? null : null,
         guardrails: PLATFORM_GUARDRAILS.ga4,
         request: presetConfig.request,
         normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
         normalizedRows: response.ok ? normalizeGa4PresetRows(parsed.preset, response.body) : [],
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("run_ga4_funnel_report", {
+    title: "Run GA4 Funnel Report",
+    description: "Run a GA4 funnel report with ordered or open funnel steps, optional breakdown dimension, and next-action analysis. Funnel reporting lives on the Data API v1alpha surface, so the response shape differs from runReport.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      funnel: z.record(z.any()),
+      funnelBreakdown: z.record(z.any()).optional(),
+      funnelNextAction: z.record(z.any()).optional(),
+      funnelVisualizationType: z.enum(["STANDARD_FUNNEL", "TRENDED_FUNNEL"]).optional(),
+      segments: z.array(z.record(z.any())).optional(),
+      dimensionFilter: z.record(z.any()).optional(),
+      limit: z.number().int().min(1).max(100000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      propertyId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      funnel: z.record(z.any()),
+      funnelBreakdown: z.record(z.any()).optional(),
+      funnelNextAction: z.record(z.any()).optional(),
+      funnelVisualizationType: z.enum(["STANDARD_FUNNEL", "TRENDED_FUNNEL"]).optional(),
+      segments: z.array(z.record(z.any())).optional(),
+      dimensionFilter: z.record(z.any()).optional(),
+      limit: z.number().int().min(1).max(100000).optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_ga4_funnel_report, async ({ googleCredentials }) => {
+      const dateRange = resolveDateWindow(parsed);
+      const response = await runGa4FunnelReport(googleCredentials.accessToken, {
+        propertyId: parsed.propertyId,
+        dateRanges: [{ startDate: dateRange.startDate, endDate: dateRange.endDate }],
+        funnel: parsed.funnel,
+        funnelBreakdown: parsed.funnelBreakdown,
+        funnelNextAction: parsed.funnelNextAction,
+        funnelVisualizationType: parsed.funnelVisualizationType,
+        segments: parsed.segments,
+        dimensionFilter: parsed.dimensionFilter,
+        limit: parsed.limit ? String(parsed.limit) : undefined
+      });
+      return buildToolResult({
+        dateRange,
+        apiSurface: "analyticsdata.googleapis.com/v1alpha:runFunnelReport",
+        guardrails: PLATFORM_GUARDRAILS.ga4,
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("run_ga4_cohort_report", {
+    title: "Run GA4 Cohort Report",
+    description: "Run a GA4 cohort retention report. Supply cohortSpec directly, or let the tool build a rolling weekly or daily cohort series from the date range.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      granularity: z.enum(["DAILY", "WEEKLY", "MONTHLY"]).optional(),
+      cohortCount: z.number().int().min(1).max(12).optional(),
+      metrics: z.array(z.string()).optional(),
+      cohortSpec: z.record(z.any()).optional(),
+      limit: z.number().int().min(1).max(100000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      propertyId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      granularity: z.enum(["DAILY", "WEEKLY", "MONTHLY"]).optional(),
+      cohortCount: z.number().int().min(1).max(12).optional(),
+      metrics: z.array(z.string()).optional(),
+      cohortSpec: z.record(z.any()).optional(),
+      limit: z.number().int().min(1).max(100000).optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_ga4_cohort_report, async ({ googleCredentials }) => {
+      const dateRange = resolveDateWindow(parsed);
+      const granularity = parsed.granularity || "WEEKLY";
+      const stepDays = granularity === "DAILY" ? 1 : granularity === "MONTHLY" ? 30 : 7;
+      const cohortCount = parsed.cohortCount || 4;
+      const cohortSpec = parsed.cohortSpec || {
+        cohorts: Array.from({ length: cohortCount }, (_unused, index) => {
+          const cohortStart = shiftDays(dateRange.startDate, index * stepDays);
+          const cohortEnd = shiftDays(cohortStart, stepDays - 1);
+          return {
+            name: `cohort_${index}`,
+            dimension: "firstSessionDate",
+            dateRange: { startDate: cohortStart, endDate: cohortEnd > dateRange.endDate ? dateRange.endDate : cohortEnd }
+          };
+        }),
+        cohortsRange: { granularity, startOffset: 0, endOffset: cohortCount - 1 }
+      };
+      const response = await runGa4Report(googleCredentials.accessToken, {
+        propertyId: parsed.propertyId,
+        dimensions: [{ name: "cohort" }, { name: "cohortNthDay" }],
+        metrics: (parsed.metrics || ["cohortActiveUsers", "cohortTotalUsers"]).map((name) => ({ name })),
+        cohortSpec,
+        limit: parsed.limit ? String(parsed.limit) : undefined
+      });
+      return buildToolResult({
+        dateRange,
+        granularity,
+        cohortSpec,
+        guardrails: PLATFORM_GUARDRAILS.ga4,
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("list_ga4_custom_definitions", {
+    title: "List GA4 Custom Definitions",
+    description: "List the custom dimensions or custom metrics configured on a GA4 property, so reports can reference the right customEvent: or customUser: field names.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      type: z.enum(["dimensions", "metrics"]).optional(),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      propertyId: z.string().min(1),
+      type: z.enum(["dimensions", "metrics"]).optional(),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_ga4_custom_definitions, async ({ googleCredentials }) => {
+      const resource = parsed.type === "metrics" ? "customMetrics" : "customDimensions";
+      const response = await listGa4AdminResource(googleCredentials.accessToken, parsed.propertyId, resource, parsed);
+      return buildToolResult({
+        propertyId: normalizePropertyName(parsed.propertyId),
+        resource,
+        guardrails: PLATFORM_GUARDRAILS.ga4,
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("list_ga4_key_events", {
+    title: "List GA4 Key Events",
+    description: "List the key events (formerly conversion events) configured on a GA4 property, including counting method and default value.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      propertyId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_ga4_key_events, async ({ googleCredentials }) => {
+      const response = await listGa4AdminResource(googleCredentials.accessToken, parsed.propertyId, "keyEvents", parsed);
+      return buildToolResult({
+        propertyId: normalizePropertyName(parsed.propertyId),
+        guardrails: PLATFORM_GUARDRAILS.ga4,
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("list_ga4_data_streams", {
+    title: "List GA4 Data Streams",
+    description: "List the web and app data streams on a GA4 property, including measurement IDs and stream URLs, for measurement health checks.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      propertyId: z.string().min(1),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_ga4_data_streams, async ({ googleCredentials }) => {
+      const response = await listGa4AdminResource(googleCredentials.accessToken, parsed.propertyId, "dataStreams", parsed);
+      return buildToolResult({
+        propertyId: normalizePropertyName(parsed.propertyId),
+        guardrails: PLATFORM_GUARDRAILS.ga4,
         raw: toGoogleDebugPayload(response)
       }, !response.ok);
     });
@@ -2475,9 +3907,9 @@ function createServer(req) {
   });
   server.registerTool("run_merchant_preset", {
     title: "Run Merchant Center Preset",
-    description: "Run expert Merchant Center report presets for product performance, feed status, price competitiveness, price insights, best sellers, and competitive visibility. Product performance with marketingMethod ORGANIC covers free listings and needs no Google Ads account.",
+    description: "Run expert Merchant Center reports: product, brand, category and country performance, feed status and item issues, price competitiveness, price insights, best-selling product clusters and brands, non-product traffic, and competitive visibility including the category benchmark and top merchants. Product performance with marketingMethod ORGANIC covers free listings and needs no Google Ads account.",
     inputSchema: {
-      preset: z.enum(["product_performance", "product_status", "price_competitiveness", "price_insights", "best_sellers", "competitive_visibility"]),
+      preset: z.enum(MERCHANT_PRESET_NAMES),
       accountId: z.string().min(1),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
@@ -2498,7 +3930,7 @@ function createServer(req) {
     annotations: { readOnlyHint: true }
   }, async (params) => {
     const parsed = z.object({
-      preset: z.enum(["product_performance", "product_status", "price_competitiveness", "price_insights", "best_sellers", "competitive_visibility"]),
+      preset: z.enum(MERCHANT_PRESET_NAMES),
       accountId: z.string().min(1),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
@@ -2631,15 +4063,18 @@ function createServer(req) {
   });
   server.registerTool("run_google_ads_preset", {
     title: "Run Google Ads Preset",
-    description: "Run expert Google Ads presets for campaign, ad group, keyword, search term, asset, and conversion performance using GAQL.",
+    description: "Run expert Google Ads reports via GAQL. Covers campaigns, ad groups, keywords, search terms, ads, assets, impression share, Quality Score, Shopping, Performance Max, geo, device, ad schedule, demographics, audiences, placements, conversion actions, landing pages, budgets, bidding strategies, video, calls, account overview, negative keywords, change history, recommendations, experiments, and GCLID click detail. Call list_marketing_presets for the full catalogue. Each call is exactly one Google Ads API request, which matters on a Basic Access developer token.",
     inputSchema: {
-      preset: z.enum(["campaign_performance", "ad_group_performance", "keyword_performance", "search_terms", "asset_performance", "conversions_by_campaign"]),
+      preset: z.enum(GOOGLE_ADS_PRESET_NAMES),
       customerId: z.string().min(1),
       loginCustomerId: z.string().optional(),
+      campaignId: z.string().optional(),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
       limit: z.number().int().min(1).max(100000).optional(),
       includeDailyBreakdown: z.boolean().optional(),
+      includeImpressionShare: z.boolean().optional(),
+      includeQualityScore: z.boolean().optional(),
       orderBy: z.string().optional(),
       extraWhereClauses: z.array(z.string()).optional(),
       pageToken: z.string().optional()
@@ -2647,34 +4082,108 @@ function createServer(req) {
     annotations: { readOnlyHint: true }
   }, async (params) => {
     const parsed = z.object({
-      preset: z.enum(["campaign_performance", "ad_group_performance", "keyword_performance", "search_terms", "asset_performance", "conversions_by_campaign"]),
+      preset: z.enum(GOOGLE_ADS_PRESET_NAMES),
       customerId: z.string().min(1),
       loginCustomerId: z.string().optional(),
+      campaignId: z.string().optional(),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
       limit: z.number().int().min(1).max(100000).optional(),
       includeDailyBreakdown: z.boolean().optional(),
+      includeImpressionShare: z.boolean().optional(),
+      includeQualityScore: z.boolean().optional(),
       orderBy: z.string().optional(),
       extraWhereClauses: z.array(z.string()).optional(),
       pageToken: z.string().optional()
     }).parse(params);
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_google_ads_preset, async ({ googleCredentials }) => {
-      const presetConfig = buildGoogleAdsPresetQuery(parsed);
+      let presetConfig;
+      try {
+        presetConfig = buildGoogleAdsPresetQuery(parsed);
+      } catch (error) {
+        return buildToolResult({
+          error: "invalid_google_ads_preset_request",
+          error_description: error instanceof Error ? error.message : String(error),
+          preset: parsed.preset,
+          presetCatalog: GOOGLE_ADS_PRESET_DEFINITIONS[parsed.preset] || null
+        }, true);
+      }
       const response = await queryGoogleAds(googleCredentials.accessToken, {
         customerId: parsed.customerId,
         loginCustomerId: parsed.loginCustomerId,
         query: presetConfig.query,
-        pageSize: parsed.limit,
+        pageSize: presetConfig.pageSize,
         pageToken: parsed.pageToken
       });
       return buildToolResult({
         preset: parsed.preset,
         entityType: presetConfig.entityType,
+        resource: presetConfig.resource,
+        timeSeries: presetConfig.timeSeries,
         dateRange: presetConfig.dateRange,
+        limit: presetConfig.limit,
+        pageSize: presetConfig.pageSize,
+        nextPageToken: response.ok ? response.body?.nextPageToken || null : null,
+        notes: presetConfig.notes,
         guardrails: PLATFORM_GUARDRAILS.google_ads,
         gaql: presetConfig.query,
         normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
         normalizedRows: response.ok ? normalizeGoogleAdsPresetRows(parsed.preset, response.body) : [],
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("list_google_ads_customer_clients", {
+    title: "List Google Ads Customer Clients",
+    description: "Walk a Google Ads manager (MCC) account tree in a single request and return every child account with id, name, currency, time zone, level, and manager flag. Use this when listAccessibleCustomers only returns the manager account.",
+    inputSchema: {
+      customerId: z.string().min(1),
+      loginCustomerId: z.string().optional(),
+      includeDisabled: z.boolean().optional(),
+      maxLevel: z.number().int().min(0).max(10).optional(),
+      limit: z.number().int().min(1).max(10000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      customerId: z.string().min(1),
+      loginCustomerId: z.string().optional(),
+      includeDisabled: z.boolean().optional(),
+      maxLevel: z.number().int().min(0).max(10).optional(),
+      limit: z.number().int().min(1).max(10000).optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_google_ads_customer_clients, async ({ googleCredentials }) => {
+      const clauses = [];
+      if (!parsed.includeDisabled) clauses.push("customer_client.status = 'ENABLED'");
+      if (parsed.maxLevel !== undefined) clauses.push(`customer_client.level <= ${parsed.maxLevel}`);
+      const whereSql = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+      const limit = parsed.limit || 1000;
+      const query = `SELECT customer_client.id, customer_client.client_customer, customer_client.descriptive_name, customer_client.currency_code, customer_client.time_zone, customer_client.level, customer_client.manager, customer_client.status, customer_client.test_account FROM customer_client${whereSql} ORDER BY customer_client.level ASC LIMIT ${limit}`;
+      const response = await queryGoogleAds(googleCredentials.accessToken, {
+        customerId: parsed.customerId,
+        loginCustomerId: parsed.loginCustomerId,
+        query,
+        pageSize: Math.min(limit, GOOGLE_ADS_MAX_PAGE_SIZE)
+      });
+      const accounts = response.ok
+        ? (response.body?.results || []).map((row) => ({
+            customerId: getGoogleAdsValue(row, "customer_client.id"),
+            resourceName: getGoogleAdsValue(row, "customer_client.client_customer"),
+            name: getGoogleAdsValue(row, "customer_client.descriptive_name"),
+            currency: getGoogleAdsValue(row, "customer_client.currency_code"),
+            timeZone: getGoogleAdsValue(row, "customer_client.time_zone"),
+            level: toNumber(getGoogleAdsValue(row, "customer_client.level")),
+            isManager: getGoogleAdsValue(row, "customer_client.manager") === true,
+            isTestAccount: getGoogleAdsValue(row, "customer_client.test_account") === true,
+            status: getGoogleAdsValue(row, "customer_client.status")
+          }))
+        : [];
+      return buildToolResult({
+        managerCustomerId: normalizeGoogleAdsCustomerId(parsed.customerId),
+        accountCount: accounts.length,
+        accounts,
+        gaql: query,
+        guardrails: PLATFORM_GUARDRAILS.google_ads,
         raw: toGoogleDebugPayload(response)
       }, !response.ok);
     });
@@ -2813,6 +4322,107 @@ function createServer(req) {
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
+  server.registerTool("run_callrail_preset", {
+    title: "Run CallRail Preset",
+    description: "Run expert CallRail reports. CallRail returns raw call records rather than aggregated reports, so this tool fetches one page of calls and aggregates them into call, answered, missed, qualified, first-time, duration, and lead-value totals grouped by source, medium, campaign, keyword, landing page, referrer, tracking number, company, device, city, lead status, tag, answered state, first-time state, duration bucket, or day. Results are normalized into the cross-platform schema so calls can be joined to Google Ads, GA4, and Search Console rows.",
+    inputSchema: {
+      preset: z.enum(CALLRAIL_PRESET_NAMES),
+      accountId: z.string().min(1),
+      companyId: z.string().optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      perPage: z.number().int().min(1).max(250).optional(),
+      page: z.number().int().min(1).optional(),
+      answeredOnly: z.boolean().optional(),
+      minDurationSeconds: z.number().int().min(0).optional(),
+      query: z.record(z.any()).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      preset: z.enum(CALLRAIL_PRESET_NAMES),
+      accountId: z.string().min(1),
+      companyId: z.string().optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      perPage: z.number().int().min(1).max(250).optional(),
+      page: z.number().int().min(1).optional(),
+      answeredOnly: z.boolean().optional(),
+      minDurationSeconds: z.number().int().min(0).optional(),
+      query: z.record(z.any()).optional()
+    }).parse(params);
+    return withCallRailTool(async () => {
+      const definition = CALLRAIL_PRESET_DEFINITIONS[parsed.preset];
+      if (!definition) {
+        return buildToolResult({
+          error: "invalid_callrail_preset",
+          error_description: `Unsupported CallRail preset: ${parsed.preset}`,
+          availablePresets: CALLRAIL_PRESET_NAMES
+        }, true);
+      }
+      const dateRange = resolveDateWindow(parsed);
+      const perPage = parsed.perPage || 250;
+      const response = await listCallRailCalls({
+        accountId: parsed.accountId,
+        query: {
+          start_date: dateRange.startDate,
+          end_date: dateRange.endDate,
+          fields: CALLRAIL_PRESET_FIELDS,
+          per_page: perPage,
+          page: parsed.page || 1,
+          ...(parsed.companyId ? { company_id: parsed.companyId } : {}),
+          ...(parsed.query || {})
+        }
+      });
+      if (!response.ok) {
+        return buildToolResult({
+          preset: parsed.preset,
+          dateRange,
+          guardrails: PLATFORM_GUARDRAILS.callrail,
+          raw: { status: response.status, error: response.body }
+        }, true);
+      }
+      const allCalls = Array.isArray(response.body?.calls) ? response.body.calls : [];
+      const calls = allCalls.filter((call) => {
+        if (parsed.answeredOnly && !call.answered) return false;
+        if (parsed.minDurationSeconds !== undefined && (toNumber(call.duration) || 0) < parsed.minDurationSeconds) return false;
+        return true;
+      });
+      const totalRecords = toNumber(response.body?.total_records);
+      const fetched = allCalls.length;
+      const notes = [];
+      if (totalRecords !== undefined && totalRecords > fetched) {
+        notes.push(`CallRail reports ${totalRecords} calls in this window but one page returned ${fetched}. Aggregates cover only this page; increase perPage or advance page to cover the rest.`);
+      }
+      if (calls.length !== fetched) {
+        notes.push(`${fetched - calls.length} call(s) were excluded by answeredOnly / minDurationSeconds before aggregation.`);
+      }
+      if (parsed.preset === "calls_by_tag") {
+        notes.push("Calls carrying multiple tags are counted once per tag, so tag totals can exceed the call total.");
+      }
+      const isDetail = parsed.preset === "call_details";
+      const aggregated = isDetail ? [] : aggregateCallRailCalls(calls, parsed.preset);
+      return buildToolResult({
+        preset: parsed.preset,
+        entityType: definition.entityType,
+        groupBy: definition.groupBy || "none",
+        dateRange,
+        callsFetched: fetched,
+        callsAggregated: calls.length,
+        totalRecords: totalRecords ?? null,
+        page: parsed.page || 1,
+        perPage,
+        hasMore: totalRecords !== undefined ? (parsed.page || 1) * perPage < totalRecords : null,
+        notes,
+        guardrails: PLATFORM_GUARDRAILS.callrail,
+        normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
+        rows: isDetail ? calls : aggregated,
+        normalizedRows: isDetail
+          ? normalizeCallRailCallRecords(calls)
+          : normalizeCallRailPresetRows(parsed.preset, aggregated)
+      });
+    });
+  });
   server.registerTool("get_callrail_resource", {
     title: "Get CallRail Resource",
     description: "Fetch any supported read-only CallRail v3 JSON endpoint by path, for example /a/{accountId}/calls.json or /a/{accountId}/trackers.json.",
@@ -2880,6 +4490,7 @@ app.get("/auth/google/start", (req, res) => {
         APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY),
         GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
         GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+    GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "basic"),
         CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN)
       }
     });

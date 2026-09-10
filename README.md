@@ -17,6 +17,7 @@ It exposes these MCP tools:
 - `get_search_console_sitemap`
 - `inspect_search_console_url`
 - `run_search_console_preset`
+- `compare_search_console_periods`
 - `list_ga4_properties`
 - `run_ga4_report`
 - `get_ga4_metadata`
@@ -25,6 +26,11 @@ It exposes these MCP tools:
 - `run_ga4_realtime_report`
 - `run_ga4_pivot_report`
 - `run_ga4_preset`
+- `run_ga4_funnel_report`
+- `run_ga4_cohort_report`
+- `list_ga4_custom_definitions`
+- `list_ga4_key_events`
+- `list_ga4_data_streams`
 - `list_merchant_accounts`
 - `get_merchant_account`
 - `list_merchant_products`
@@ -43,6 +49,7 @@ It exposes these MCP tools:
 - `get_google_ads_field`
 - `search_google_ads_fields`
 - `run_google_ads_preset`
+- `list_google_ads_customer_clients`
 - `list_callrail_accounts`
 - `list_callrail_companies`
 - `list_callrail_calls`
@@ -51,6 +58,7 @@ It exposes these MCP tools:
 - `get_callrail_call_timeseries`
 - `list_callrail_trackers`
 - `get_callrail_resource`
+- `run_callrail_preset`
 - `list_marketing_presets`
 - `get_marketing_schema`
 - `list_marketing_guardrails`
@@ -111,6 +119,7 @@ Optional:
 - `CALLRAIL_API_BASE_URL` to override the default CallRail API base URL (`https://api.callrail.com/v3`)
 - `GOOGLE_ADS_LOGIN_CUSTOMER_ID` for manager-account access in Google Ads
 - `GOOGLE_ADS_API_VERSION` to override the default Google Ads API version (`v22`)
+- `GOOGLE_ADS_ACCESS_LEVEL` to record the developer-token tier, `basic` (default) or `standard`
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -145,22 +154,47 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 ## Coverage notes
 
-- Google Ads access is intentionally query-driven. `query_google_ads` and `search_stream_google_ads` use GAQL, which is the primary supported way to fetch campaigns, ad groups, ads, keywords, assets, audiences, conversions, channels, segments, search terms, and most reporting data.
-- GA4 access is intentionally metadata-driven plus report-driven. `get_ga4_metadata` and `check_ga4_compatibility` let ChatGPT discover valid dimensions, metrics, attributes, and filter compatibility before running `run_ga4_report`, `run_ga4_realtime_report`, `run_ga4_pivot_report`, or `batch_run_ga4_reports`.
-- Search Console supports Search Analytics, Sites, Sitemaps, and URL Inspection. The aggregate Search Console UI Index Coverage report is not exposed as a matching public API; `inspect_search_console_url` is the URL-level API alternative.
-- CallRail support is read-only and centered on calls, summaries, time series, trackers, and generic read-only JSON endpoints via `get_callrail_resource`.
+- Google Ads access is both preset-driven and query-driven. `run_google_ads_preset` covers 34 expert reports end to end, while `query_google_ads` and `search_stream_google_ads` remain available for arbitrary GAQL when a report falls outside the catalogue.
+- GA4 access is preset-driven, metadata-driven, and report-driven. `run_ga4_preset` covers 24 expert reports; `get_ga4_metadata` and `check_ga4_compatibility` let ChatGPT discover valid dimensions, metrics, attributes, and filter compatibility before running `run_ga4_report`, `run_ga4_realtime_report`, `run_ga4_pivot_report`, `run_ga4_funnel_report`, `run_ga4_cohort_report`, or `batch_run_ga4_reports`.
+- Search Console supports Search Analytics via 14 presets plus period comparison, and Sites, Sitemaps, and URL Inspection. The aggregate Search Console UI Index Coverage report is not exposed as a matching public API; `inspect_search_console_url` is the URL-level API alternative.
+- CallRail support is read-only and centered on calls, summaries, time series, trackers, and generic read-only JSON endpoints via `get_callrail_resource`. `run_callrail_preset` adds 18 aggregated reports that normalize into the cross-platform schema.
 - The expert preset layer is designed for common analyst workflows, while the raw tools remain available for deeper custom work.
 
 ## Expert Layer
 
-- `run_google_ads_preset` supports:
-  `campaign_performance`, `ad_group_performance`, `keyword_performance`, `search_terms`, `asset_performance`, `conversions_by_campaign`
-- `run_ga4_preset` supports:
-  `channels`, `landing_pages`, `source_medium`, `campaigns`, `key_events`, `ecommerce`, `attribution_breakdown`
-- `run_search_console_preset` supports:
-  `queries`, `pages`, `countries`, `devices`, `date_trends`, `branded_vs_non_branded`
-- `run_merchant_preset` supports:
-  `product_performance`, `product_status`, `price_competitiveness`, `price_insights`, `best_sellers`, `competitive_visibility`
+- `run_google_ads_preset` supports 34 presets:
+  - Core performance: `campaign_performance`, `ad_group_performance`, `keyword_performance`, `search_terms`, `ad_performance`, `asset_performance`, `conversions_by_campaign`
+  - Competitive and quality: `impression_share`, `quality_score`
+  - Shopping and Performance Max: `shopping_performance`, `product_group_performance`, `pmax_asset_groups`, `pmax_search_terms`
+  - Segmentation: `geo_performance`, `device_performance`, `ad_schedule_performance`, `demographics_age`, `demographics_gender`, `audience_performance`, `placement_performance`
+  - Conversion and destination: `conversion_actions`, `landing_page_performance`, `expanded_landing_page_performance`
+  - Account structure and settings: `account_overview`, `campaign_budgets`, `bidding_strategies`, `negative_keywords`, `shared_set_negative_keywords`
+  - Media and calls: `video_performance`, `call_performance`
+  - Audit and diagnostics: `change_history`, `recommendations`, `experiments`, `click_view`
+  - Optional flags: `includeImpressionShare` (campaign, ad group, keyword presets) and `includeQualityScore` (keyword preset). Invalid combinations are rejected locally before any API request is spent.
+- `run_ga4_preset` supports 24 presets:
+  - Acquisition: `channels`, `traffic_acquisition`, `user_acquisition`, `source_medium`, `campaigns`, `google_ads_performance`
+  - Content: `landing_pages`, `pages_and_screens`, `site_search`
+  - Behaviour: `events`, `key_events`, `engagement_overview`, `daily_trends`, `attribution_breakdown`
+  - Ecommerce: `ecommerce`, `item_performance`, `item_list_performance`, `promotions`, `ecommerce_funnel`
+  - Audience: `demographics`, `demographics_detail`, `technology`, `new_vs_returning`, `audiences`
+  - Options: `includeDailyBreakdown` adds a date dimension; `conversionMetric` switches between `keyEvents` (default) and the legacy `conversions`
+- `run_search_console_preset` supports 14 presets:
+  - Core: `queries`, `pages`, `query_page_pairs`, `striking_distance`
+  - Segments: `countries`, `devices`, `country_device`, `search_appearance`, `branded_vs_non_branded`
+  - Trends: `date_trends`, `date_query`, `date_page`
+  - Surfaces: `discover_performance`, `news_performance`
+- `run_merchant_preset` supports 13 presets:
+  - Performance: `product_performance`, `brand_performance`, `category_performance`, `country_performance`, `non_product_performance`
+  - Feed health: `product_status`
+  - Pricing: `price_competitiveness`, `price_insights`
+  - Market: `best_sellers`, `best_sellers_brands`, `competitive_visibility`, `competitive_visibility_benchmark`, `competitive_visibility_top_merchants`
+- `run_callrail_preset` supports 18 presets:
+  - Records: `call_details`, `calls_overview`
+  - Attribution: `calls_by_source`, `calls_by_medium`, `calls_by_campaign`, `calls_by_keyword`, `calls_by_landing_page`, `calls_by_referrer`, `calls_by_tracker`
+  - Segments: `calls_by_company`, `calls_by_device`, `calls_by_city`, `calls_by_lead_status`, `calls_by_tag`
+  - Quality: `answered_vs_missed`, `first_time_vs_repeat`, `call_duration_buckets`
+  - Trends: `daily_call_trends`
 - Every preset returns:
   raw API output, generated request/query metadata, normalized cross-platform rows, and platform guardrails
 - `get_marketing_schema` returns the normalized marketing record format and cross-source field mappings.
@@ -187,11 +221,56 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 - Google Ads tools require both Google OAuth access and a valid `GOOGLE_ADS_DEVELOPER_TOKEN`.
 - For MCC or manager-account setups, set `GOOGLE_ADS_LOGIN_CUSTOMER_ID` if Google Ads requires `login-customer-id` headers.
+- `list_google_ads_accessible_customers` only returns accounts the OAuth user can reach directly. For a full manager-account tree use `list_google_ads_customer_clients`, which walks `customer_client` in a single request.
 - Use `search_google_ads_fields` and `get_google_ads_field` first when you need to discover valid fields, segments, metrics, and filters before writing GAQL.
+
+### Quota
+
+- Set `GOOGLE_ADS_ACCESS_LEVEL` to `basic` or `standard` to document which developer-token tier this deployment holds. It defaults to `basic`.
+- A Basic Access developer token is capped at roughly 15000 operations and 1000 requests per day across the whole token.
+- Every tool call is exactly one Google Ads API request. Auto-pagination is deliberately not implemented so a single call can never silently drain the daily quota; page explicitly with the `nextPageToken` returned in each preset response.
+- `limit` controls the GAQL `LIMIT`, while `pageSize` is clamped to the API maximum of 10000. Asking for more than 10000 rows returns the first page plus a `nextPageToken` and a note explaining the clamp.
+- Prefer one wide preset over several narrow queries. The core performance presets already return cost, conversion, and value metrics together.
+
+### Known API limits
+
+- Auction Insights is not exposed by the Google Ads API. No tool in this server can return it, and none pretends to.
+- Quality Score is a current attribute, not a historical series, so `quality_score` is a snapshot and ignores the date range.
+- Conversion action segmentation is incompatible with cost, click, and impression metrics, so `conversion_actions` intentionally returns conversion metrics only.
+- `change_history` is limited by Google to the last 30 days and 10000 rows; both are clamped automatically and reported in the response `notes`.
+- `click_view` requires a single-day filter and only covers the last 90 days; the preset uses `endDate` as that day.
+- `pmax_search_terms` requires `campaignId` because Google rejects `campaign_search_term_insight` without a campaign filter. Cost is not exposed for that resource.
+- GAQL field paths are snake_case (`metrics.cost_micros`) while REST responses come back camelCase (`metrics.costMicros`); the normalizer resolves either spelling.
+
+## GA4 notes
+
+- Presets default to the `keyEvents` metric. GA4 renamed `conversions` to `keyEvents`; pass `conversionMetric: "conversions"` only if a property rejects the new name.
+- `includeDailyBreakdown` is off by default so presets return totals for the window rather than one row per day.
+- `google_ads_performance` needs a linked Google Ads account, and `site_search` needs site search configured on the property.
+- `demographics_detail` needs Google signals; without it, age and gender come back as `(not set)`.
+- GA4 applies thresholding and sampling on some properties, so small segments can be suppressed or approximate.
+- `run_ga4_funnel_report` uses the Data API **v1alpha** surface, which is the only place funnel reporting exists. Its response shape differs from `runReport`.
+- `run_ga4_cohort_report` builds a rolling cohort series from the date range, or accepts a full `cohortSpec`. GA4 rejects `dateRanges` alongside `cohortSpec`, so the cohort windows carry the dates.
+- `list_ga4_custom_definitions`, `list_ga4_key_events`, and `list_ga4_data_streams` use the Admin API and are the way to confirm what a property actually measures before writing reports.
+
+## Search Console notes
+
+- Search Analytics returns at most **25000 rows** per request. `rowLimit` above that is clamped and reported in `notes`; page with `startRow`.
+- `striking_distance` filters on average position **after** fetching, because the API cannot filter on position. It defaults to positions 5-20 with at least 10 impressions, tunable via `minPosition`, `maxPosition`, and `minImpressions`.
+- `search_appearance` cannot be combined with any other dimension; Google rejects that pairing.
+- `discover_performance` and `news_performance` pin `type` themselves. Discover has no query dimension.
+- Query rows are anonymised, so query totals are lower than the site total, and average position cannot be summed across rows.
+- The last two to three days are incomplete unless `dataState: "all"` is set.
+- `compare_search_console_periods` costs **two** Search Analytics requests and returns per-key deltas plus a `new` / `lost` / `both` status. Position deltas are sign-flipped so positive always means improved.
 
 ## CallRail notes
 
 - CallRail tools use `CALLRAIL_API_TOKEN` from the server environment.
+- CallRail has no server-side aggregation endpoint for most groupings, so `run_callrail_preset` fetches **one page** of call records and aggregates them here. Always compare `callsFetched` against `totalRecords`; if they differ, raise `perPage` (max 250) or advance `page`. Auto-pagination is deliberately not implemented.
+- Presets emit `normalizedRows` in the cross-platform schema, so calls join to Google Ads, GA4, and Search Console rows on campaign, source / medium, landing page, or date.
+- A call carrying several tags is counted once per tag, so `calls_by_tag` totals can exceed the call total. This is stated in the response `notes`.
+- Qualified calls are counted from `lead_status = good_lead`, which only works if the account actually scores leads.
+- `answeredOnly` and `minDurationSeconds` filter calls before aggregation, which is the usual way to drop wrong numbers and hang-ups.
 - ChatGPT does not perform a separate CallRail OAuth flow in this setup.
 - `list_callrail_calls`, `get_callrail_call_summary`, `get_callrail_call_timeseries`, `list_callrail_trackers`, and `get_callrail_resource` accept documented CallRail query parameters via the `query` object.
 - Call transcripts, call recordings, landing pages, tags, channels, sources, and attribution fields depend on what the CallRail API returns for the selected endpoint and the data available in the account.
