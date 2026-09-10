@@ -293,6 +293,18 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 `/.well-known/oauth-authorization-server` advertises `authorization_endpoint: /auth/google/start` and lists only the Google scopes in `scopes_supported`. That is deliberate: there is no standard way to express two authorization endpoints, and Meta uses a separate flow at `/auth/meta/start`. A client requesting a Meta scope from the Google endpoint has it stripped rather than forwarded, because sending a Meta scope to Google fails with `invalid_scope`.
 
+### Connecting from an MCP client
+
+MCP clients only ever visit the advertised `authorization_endpoint`, which is the Google one, so a connector could never reach `/auth/meta` on its own. When Meta is configured, `/auth/google/callback` hands off to Meta consent before issuing the authorization code, so **one connector approval covers both providers**:
+
+```
+Add connector -> Google consent -> Meta consent -> one token holding both
+```
+
+- Chaining turns on automatically once `META_APP_ID` and `META_APP_SECRET` are both set. A Google-only deployment is unaffected.
+- Set `META_CHAIN_AFTER_GOOGLE=false` to disable it, or pass `?include_meta=0` to `/auth/google/start` for a single connection.
+- **If Meta consent is denied or fails, the connection still completes with Google alone.** The user has already approved Google at that point, and throwing it away to make them start over would be worse than a partial connection. Meta tools then report `no_meta_credentials` until the user runs `/auth/meta`.
+
 ### Login modes
 
 `/auth/meta/start` supports two flows and picks automatically:

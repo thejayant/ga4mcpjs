@@ -848,6 +848,22 @@ function getMetaLoginConfigId(value) {
   return candidate ? String(candidate).trim() : null;
 }
 
+// MCP clients only ever visit the advertised authorization_endpoint, which is the
+// Google one, so a connector could never reach the Meta flow on its own. When Meta
+// is configured, the Google callback hands off to Meta consent before issuing the
+// authorization code, so one connector approval covers both providers.
+function isMetaConfigured() {
+  return Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET);
+}
+
+function shouldChainMetaAfterGoogle(requestedValue) {
+  if (!isMetaConfigured()) return false;
+  if (requestedValue !== undefined && requestedValue !== null && requestedValue !== "") {
+    return !["0", "false", "no"].includes(String(requestedValue).toLowerCase());
+  }
+  return !["0", "false", "no"].includes(String(process.env.META_CHAIN_AFTER_GOOGLE || "true").toLowerCase());
+}
+
 function getMetaRedirectUri(req) {
   return `${getBaseUrl(req)}/auth/meta/callback`;
 }
@@ -5463,6 +5479,7 @@ app.get("/auth/google/start", (req, res) => {
     const resource = getRequestedResource(req, getResourceUrl(req));
     const clientRedirectUri = resolveClientRedirectUri(req);
     const appState = {
+      chainMeta: shouldChainMetaAfterGoogle(req.query.include_meta),
       returnTo: req.query.return_to || "/",
       clientRedirectUri,
       clientState: req.query.state || null,
@@ -5555,6 +5572,35 @@ app.get("/auth/google/callback", async (req, res) => {
       }
     });
 
+    // Hand off to Meta consent before returning the code, so the connector ends up
+    // with one token holding both providers. Meta failure degrades to Google-only
+    // rather than losing the Google authorization the user just completed.
+    if (appState.chainMeta && isMetaConfigured()) {
+      const chainUrl = new URL(`${getBaseUrl(req)}/auth/meta/start`);
+      chainUrl.searchParams.set("chain", encryptJson({
+        typ: "meta_chain_state",
+        sessionId,
+        googleAuthCode: authCode,
+        google: {
+          refreshToken: tokens.refresh_token,
+          accessToken: tokens.access_token,
+          expiryDate: tokens.expiry_date,
+          scope: tokens.scope || grantedScopes.join(" "),
+          tokenType: tokens.token_type || "Bearer"
+        },
+        googleScope: grantedScopes.join(" "),
+        clientRedirectUri: appState.clientRedirectUri || null,
+        clientState: appState.clientState || null,
+        codeChallenge: appState.codeChallenge || null,
+        codeChallengeMethod: appState.codeChallengeMethod || "S256",
+        resource: appState.resource,
+        returnTo: appState.returnTo || "/",
+        issuedAt: Date.now()
+      }));
+      logAuthRouteDebug({ route: "/auth/google/callback", chaining_to_meta: true });
+      return res.redirect(302, chainUrl.toString());
+    }
+
     if (appState.clientRedirectUri) {
       const redirectUrl = new URL(String(appState.clientRedirectUri));
       redirectUrl.searchParams.set("code", authCode);
@@ -5609,6 +5655,24 @@ app.get(["/auth/meta", "/auth/meta/start"], (req, res) => {
     let linkedGoogle = null;
     let linkedSessionId = null;
     let linkedScope = null;
+    let chained = null;
+    if (req.query.chain) {
+      try {
+        chained = decryptJson(String(req.query.chain));
+        if (chained.typ !== "meta_chain_state") throw new Error("wrong chain type");
+        if (Date.now() - Number(chained.issuedAt || 0) > OAUTH_STATE_TTL_MS) {
+          throw new Error("chain state expired");
+        }
+        linkedGoogle = chained.google || null;
+        linkedSessionId = chained.sessionId || null;
+        linkedScope = chained.googleScope || null;
+      } catch (error) {
+        return res.status(400).json({
+          error: "invalid_chain_state",
+          error_description: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
     if (req.query.link_token) {
       try {
         const linked = decryptJson(String(req.query.link_token));
@@ -5627,17 +5691,19 @@ app.get(["/auth/meta", "/auth/meta/start"], (req, res) => {
 
     const appState = {
       provider: "meta",
-      returnTo: req.query.return_to || "/",
-      clientRedirectUri,
-      clientState: req.query.state || null,
-      codeChallenge: req.query.code_challenge || null,
-      codeChallengeMethod: req.query.code_challenge_method || "S256",
+      returnTo: chained?.returnTo || req.query.return_to || "/",
+      clientRedirectUri: chained?.clientRedirectUri || clientRedirectUri,
+      clientState: chained?.clientState ?? (req.query.state || null),
+      codeChallenge: chained?.codeChallenge ?? (req.query.code_challenge || null),
+      codeChallengeMethod: chained?.codeChallengeMethod || req.query.code_challenge_method || "S256",
+      // Kept so a denied or failed Meta consent can still complete as Google-only.
+      googleFallbackAuthCode: chained?.googleAuthCode || null,
       // Kept as a fallback for the callback when debug_token cannot be reached.
       scope: requestedScopes.join(" "),
       configId,
       loginMode: configId ? "business_config" : "scope",
-      resource,
-      audience: resource,
+      resource: chained?.resource || resource,
+      audience: chained?.resource || resource,
       linkedGoogle,
       linkedSessionId,
       linkedScope,
@@ -5673,10 +5739,42 @@ app.get(["/auth/meta", "/auth/meta/start"], (req, res) => {
   }
 });
 
+// When Meta consent fails inside a chained connector flow, the user has already
+// completed Google consent. Finish the connection with Google alone rather than
+// throwing that away and forcing them to start over.
+function completeChainWithGoogleOnly(req, res, appState, reason) {
+  if (!appState?.googleFallbackAuthCode) return false;
+  logAuthRouteDebug({
+    route: "/auth/meta/callback",
+    meta_failed_falling_back_to_google_only: true,
+    reason
+  });
+  if (appState.clientRedirectUri) {
+    const redirectUrl = new URL(String(appState.clientRedirectUri));
+    redirectUrl.searchParams.set("code", String(appState.googleFallbackAuthCode));
+    if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
+    res.redirect(redirectUrl.toString());
+    return true;
+  }
+  const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
+  successUrl.searchParams.set("auth", "success");
+  successUrl.searchParams.set("provider", "google");
+  successUrl.searchParams.set("meta_error", String(reason || "meta_authorization_failed"));
+  res.redirect(successUrl.toString());
+  return true;
+}
+
 app.get("/auth/meta/callback", async (req, res) => {
   try {
     // Meta reports user denial as error/error_description rather than an empty code.
     if (req.query.error) {
+      let deniedState = null;
+      try {
+        deniedState = req.query.state ? decryptJson(String(req.query.state)) : null;
+      } catch {
+        // Unreadable state just means no fallback is possible.
+      }
+      if (completeChainWithGoogleOnly(req, res, deniedState, String(req.query.error))) return undefined;
       return res.status(400).json({
         error: String(req.query.error),
         error_description: String(req.query.error_description || req.query.error_reason || "Meta authorization was denied.")
@@ -5693,8 +5791,15 @@ app.get("/auth/meta/callback", async (req, res) => {
       return res.status(400).json({ error: "OAuth state expired. Start over from /auth/meta/start." });
     }
 
-    const shortLived = await exchangeMetaCodeForToken(req, String(code));
+    let shortLived;
+    try {
+      shortLived = await exchangeMetaCodeForToken(req, String(code));
+    } catch (error) {
+      if (completeChainWithGoogleOnly(req, res, appState, "meta_code_exchange_failed")) return undefined;
+      throw error;
+    }
     if (!shortLived?.access_token) {
+      if (completeChainWithGoogleOnly(req, res, appState, "meta_no_access_token")) return undefined;
       return res.status(400).json({ error: "Meta did not return an access token." });
     }
 
