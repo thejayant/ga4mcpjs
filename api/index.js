@@ -5579,7 +5579,9 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
-app.get("/auth/meta/start", (req, res) => {
+// /auth/meta is the documented entry point; /auth/meta/start is kept as an alias
+// so links already handed out keep working.
+app.get(["/auth/meta", "/auth/meta/start"], (req, res) => {
   try {
     logAuthRouteDebug({
       route: "/auth/meta/start",

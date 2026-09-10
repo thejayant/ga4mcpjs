@@ -287,7 +287,7 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 3. Paste that URI into **Valid OAuth Redirect URIs**. The *Redirect URI Validator* on the same page is only a checker; pasting it there does not allow-list it.
 4. Set `META_APP_ID` and `META_APP_SECRET`, and set `META_GRAPH_API_VERSION` to a Graph version Meta still supports.
 5. Create a **Business Login Configuration** under Facebook Login for Business, select the permissions below, and copy its **Configuration ID** into `META_LOGIN_CONFIG_ID`.
-6. Send the user to `/auth/meta/start`.
+6. Send the user to `/auth/meta` (`/auth/meta/start` is an alias for the same route).
 
 ### OAuth discovery
 
