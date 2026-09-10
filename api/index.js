@@ -841,6 +841,13 @@ function requireMetaAppSecret() {
   return requireEnv("META_APP_SECRET");
 }
 
+// Facebook Login for Business drives permissions from a Business Login Configuration
+// rather than a scope list, which is what gives the user the asset picker.
+function getMetaLoginConfigId(value) {
+  const candidate = value || process.env.META_LOGIN_CONFIG_ID;
+  return candidate ? String(candidate).trim() : null;
+}
+
 function getMetaRedirectUri(req) {
   return `${getBaseUrl(req)}/auth/meta/callback`;
 }
@@ -3180,6 +3187,7 @@ function getEnvironmentPresence() {
     META_APP_ID: Boolean(process.env.META_APP_ID),
     META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
     META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
+    META_LOGIN_CONFIG_ID: Boolean(process.env.META_LOGIN_CONFIG_ID),
     CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
     CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
   };
@@ -5390,6 +5398,7 @@ app.get("/", (req, res) => {
     oauthStartUrl: `${baseUrl}/auth/google/start`,
     oauthCallbackUrl: `${baseUrl}/auth/google/callback`,
     metaAuthStartUrl: `${baseUrl}/auth/meta/start`,
+    metaLoginMode: process.env.META_LOGIN_CONFIG_ID ? "business_config" : "scope",
     metaOauthCallbackUrl: `${baseUrl}/auth/meta/callback`,
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
@@ -5428,6 +5437,7 @@ app.get("/auth/google/start", (req, res) => {
     META_APP_ID: Boolean(process.env.META_APP_ID),
     META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
     META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
+        META_LOGIN_CONFIG_ID: Boolean(process.env.META_LOGIN_CONFIG_ID),
         CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN)
       }
     });
@@ -5567,6 +5577,7 @@ app.get("/auth/meta/start", (req, res) => {
         META_APP_ID: Boolean(process.env.META_APP_ID),
         META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
         META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
+        META_LOGIN_CONFIG_ID: Boolean(process.env.META_LOGIN_CONFIG_ID),
         BASE_URL: Boolean(process.env.BASE_URL),
         APP_BASE_URL: Boolean(process.env.APP_BASE_URL),
         APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY)
@@ -5577,6 +5588,7 @@ app.get("/auth/meta/start", (req, res) => {
     logAuthRouteDebug({ route: "/auth/meta/start", computed_redirect_uri: redirectUri });
 
     const requestedScopes = normalizeMetaScopes(req.query.scope);
+    const configId = getMetaLoginConfigId(req.query.config_id);
     const resource = getRequestedResource(req, getResourceUrl(req));
     const clientRedirectUri = resolveClientRedirectUri(req);
 
@@ -5608,7 +5620,10 @@ app.get("/auth/meta/start", (req, res) => {
       clientState: req.query.state || null,
       codeChallenge: req.query.code_challenge || null,
       codeChallengeMethod: req.query.code_challenge_method || "S256",
+      // Kept as a fallback for the callback when debug_token cannot be reached.
       scope: requestedScopes.join(" "),
+      configId,
+      loginMode: configId ? "business_config" : "scope",
       resource,
       audience: resource,
       linkedGoogle,
@@ -5622,8 +5637,13 @@ app.get("/auth/meta/start", (req, res) => {
       client_id: requireMetaAppId(),
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: requestedScopes.join(","),
-      state: encryptJson(appState)
+      state: encryptJson(appState),
+      // With a configuration, permissions and assets come from the config, so scope
+      // is omitted. override_default_response_type is required for Login for Business
+      // to honour response_type=code instead of returning a token in the fragment.
+      ...(configId
+        ? { config_id: configId, override_default_response_type: "true" }
+        : { scope: requestedScopes.join(",") })
     });
 
     logAuthRouteDebug({ route: "/auth/meta/start", generated_auth_url: authUrl.toString() });
@@ -5681,11 +5701,15 @@ app.get("/auth/meta/callback", async (req, res) => {
     // debug_token is authoritative about what was actually granted; the requested
     // scope list is not, because the user can untick permissions in the dialog.
     let grantedScopes = normalizeMetaScopes(appState.scope);
+    let scopeSource = "requested_fallback";
     let metaUserId = null;
     try {
       const debug = await debugMetaToken(tokenResponse.access_token);
       const data = debug.body?.data;
-      if (data?.scopes?.length) grantedScopes = normalizeMetaScopes(data.scopes.join(" "));
+      if (data?.scopes?.length) {
+        grantedScopes = normalizeMetaScopes(data.scopes.join(" "));
+        scopeSource = "debug_token";
+      }
       if (data?.user_id) metaUserId = String(data.user_id);
     } catch (error) {
       logAuthRouteDebug({
@@ -5693,6 +5717,13 @@ app.get("/auth/meta/callback", async (req, res) => {
         debug_token_failed: error instanceof Error ? error.message : String(error)
       });
     }
+
+    logAuthRouteDebug({
+      route: "/auth/meta/callback",
+      login_mode: appState.loginMode || "scope",
+      scope_source: scopeSource,
+      granted_scope_count: grantedScopes.length
+    });
 
     const metaCredentials = buildMetaCredentials(tokenResponse, grantedScopes, metaUserId);
     const linkedGoogleScopes = appState.linkedGoogle ? normalizeScopes(appState.linkedGoogle.scope || appState.linkedScope) : [];

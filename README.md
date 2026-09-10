@@ -128,6 +128,7 @@ Optional:
 - `GOOGLE_ADS_ACCESS_LEVEL` to record the developer-token tier, `basic` (default) or `standard`
 - `META_APP_ID` and `META_APP_SECRET` for the Meta (Facebook / Instagram) tools
 - `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
+- `META_LOGIN_CONFIG_ID` to use a Facebook Login for Business configuration instead of a raw scope list (recommended)
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -285,7 +286,25 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 2. Set the redirect URI to `https://<your-domain>/auth/meta/callback`. Note there is **no** `/api` prefix: `vercel.json` rewrites every path to `api/index.js`, but Express still matches the original path.
 3. Paste that URI into **Valid OAuth Redirect URIs**. The *Redirect URI Validator* on the same page is only a checker; pasting it there does not allow-list it.
 4. Set `META_APP_ID` and `META_APP_SECRET`, and set `META_GRAPH_API_VERSION` to a Graph version Meta still supports.
-5. Send the user to `/auth/meta/start`.
+5. Create a **Business Login Configuration** under Facebook Login for Business, select the permissions below, and copy its **Configuration ID** into `META_LOGIN_CONFIG_ID`.
+6. Send the user to `/auth/meta/start`.
+
+### Login modes
+
+`/auth/meta/start` supports two flows and picks automatically:
+
+| | Business configuration | Raw scope list |
+|---|---|---|
+| Trigger | `META_LOGIN_CONFIG_ID` set, or `?config_id=` passed | neither set |
+| Permissions come from | the configuration in the dashboard | the `scope` query param |
+| Asset access | the user picks which ad accounts and Pages to grant | everything the user can see |
+| Changing permissions | edit the configuration, no redeploy | change the URL |
+
+**Prefer the configuration flow for anyone but yourself.** It is the least-privilege option: an agency user managing forty client ad accounts grants only the ones they choose, rather than all forty. It is also the flow Meta expects for business permissions during App Review.
+
+When a configuration is used, the dialog receives `config_id` plus `override_default_response_type=true` (required for Login for Business to return a `code` rather than a fragment token) and `scope` is omitted. Either way, the scopes actually stored come from `debug_token`, and the callback logs whether they came from there or fell back to the requested list.
+
+`?config_id=` on `/auth/meta/start` overrides the environment variable, which is useful for granting different clients different configurations.
 
 ### Permissions
 
