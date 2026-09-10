@@ -852,6 +852,143 @@ function getMetaLoginConfigId(value) {
 // Google one, so a connector could never reach the Meta flow on its own. When Meta
 // is configured, the Google callback hands off to Meta consent before issuing the
 // authorization code, so one connector approval covers both providers.
+const AUTH_PAGE_GOOGLE_MARK = [
+  '<svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">',
+  '<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>',
+  '<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>',
+  '<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>',
+  '<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>',
+  '</svg>'
+].join("");
+
+const AUTH_PAGE_META_MARK = [
+  '<svg viewBox="0 0 48 32" aria-hidden="true" focusable="false">',
+  '<defs><linearGradient id="metaMark" x1="0" y1="0" x2="1" y2="1">',
+  '<stop offset="0%" stop-color="#0064E0"/><stop offset="100%" stop-color="#0082FB"/>',
+  '</linearGradient></defs>',
+  '<path d="M7 16c0-5 2.6-8.6 6.2-8.6 4.6 0 7.2 8.6 10.8 8.6S30.2 7.4 34.8 7.4C38.4 7.4 41 11 41 16s-2.6 8.6-6.2 8.6c-4.6 0-7.2-8.6-10.8-8.6S17.8 24.6 13.2 24.6C9.6 24.6 7 21 7 16z" ',
+  'fill="none" stroke="url(#metaMark)" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round"/>',
+  '</svg>'
+].join("");
+
+function escapeHtml(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderAuthProviderRow(mark, name, status) {
+  const label = {
+    connected: "Connected",
+    connecting: "Connecting",
+    pending: "Next",
+    skipped: "Not connected",
+    failed: "Failed"
+  }[status] || status;
+  const icon = status === "connected"
+    ? '<svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 4.5l-7 7-4-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    : status === "connecting"
+      ? '<span class="spinner" aria-hidden="true"></span>'
+      : "";
+  return [
+    '<li class="row row--' + escapeHtml(status) + '">',
+    '<span class="mark">' + mark + '</span>',
+    '<span class="name">' + escapeHtml(name) + '</span>',
+    '<span class="status">' + icon + '<span>' + escapeHtml(label) + '</span></span>',
+    '</li>'
+  ].join("");
+}
+
+// These pages sit inside the OAuth redirect chain, so they must carry the browser
+// onward without JavaScript too: the meta refresh and the manual link are fallbacks
+// for when script is blocked.
+function renderAuthStatusPage(options = {}) {
+  const {
+    title = "Connecting",
+    heading = "",
+    message = "",
+    google = "connected",
+    meta = "pending",
+    redirectUrl = null,
+    redirectDelayMs = 1800,
+    continueLabel = "Continue",
+    tone = "progress",
+    footnote = ""
+  } = options;
+
+  const delaySeconds = Math.max(0, Math.round(redirectDelayMs / 100) / 10);
+  const safeRedirect = redirectUrl ? escapeHtml(redirectUrl) : null;
+
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="robots" content="noindex">',
+    safeRedirect ? '<meta http-equiv="refresh" content="' + delaySeconds + ';url=' + safeRedirect + '">' : "",
+    "<title>" + escapeHtml(title) + "</title>",
+    "<style>",
+    ":root{color-scheme:light dark;",
+    "--bg:#f6f7f9;--card:#fff;--ink:#12141a;--muted:#5b6070;--line:#e4e6ec;",
+    "--accent:#1a73e8;--ok:#1a7f4b;--warn:#a8620a;}",
+    "@media (prefers-color-scheme:dark){:root{",
+    "--bg:#0d0f14;--card:#161923;--ink:#f2f4f8;--muted:#9aa1b2;--line:#272b38;",
+    "--accent:#7ca9ff;--ok:#5fd39b;--warn:#e0a75e;}}",
+    "*{box-sizing:border-box}",
+    "body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;",
+    "background:var(--bg);color:var(--ink);",
+    "font:15px/1.55 -apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif}",
+    ".card{width:100%;max-width:440px;background:var(--card);border:1px solid var(--line);",
+    "border-radius:16px;padding:32px 28px;box-shadow:0 1px 2px rgba(0,0,0,.05),0 12px 32px rgba(0,0,0,.06)}",
+    "h1{margin:0 0 8px;font-size:21px;line-height:1.3;letter-spacing:-.01em}",
+    ".sub{margin:0 0 24px;color:var(--muted)}",
+    "ul{list-style:none;margin:0 0 22px;padding:0;border:1px solid var(--line);border-radius:12px;overflow:hidden}",
+    ".row{display:flex;align-items:center;gap:12px;padding:14px 16px}",
+    ".row+.row{border-top:1px solid var(--line)}",
+    ".mark{display:grid;place-items:center;width:26px;height:26px;flex:none}",
+    ".mark svg{width:100%;height:auto;display:block}",
+    ".name{font-weight:600;flex:1}",
+    ".status{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}",
+    ".row--connected .status{color:var(--ok);font-weight:600}",
+    ".row--connecting .status{color:var(--accent);font-weight:600}",
+    ".row--failed .status,.row--skipped .status{color:var(--warn);font-weight:600}",
+    ".tick{width:15px;height:15px}",
+    ".spinner{width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;",
+    "border-radius:50%;animation:spin .7s linear infinite}",
+    "@keyframes spin{to{transform:rotate(360deg)}}",
+    "@media (prefers-reduced-motion:reduce){.spinner{animation:none;opacity:.6}}",
+    ".cta{display:block;text-align:center;text-decoration:none;font-weight:600;",
+    "padding:11px 16px;border-radius:10px;background:var(--accent);color:#fff}",
+    ".cta:focus-visible{outline:3px solid var(--accent);outline-offset:2px}",
+    ".note{margin:16px 0 0;font-size:12.5px;color:var(--muted);text-align:center}",
+    "</style></head><body>",
+    '<main class="card" role="status" aria-live="polite">',
+    "<h1>" + escapeHtml(heading) + "</h1>",
+    message ? '<p class="sub">' + escapeHtml(message) + "</p>" : "",
+    "<ul>",
+    renderAuthProviderRow(AUTH_PAGE_GOOGLE_MARK, "Google", google),
+    renderAuthProviderRow(AUTH_PAGE_META_MARK, "Meta", meta),
+    "</ul>",
+    safeRedirect ? '<a class="cta" href="' + safeRedirect + '">' + escapeHtml(continueLabel) + "</a>" : "",
+    footnote ? '<p class="note">' + escapeHtml(footnote) + "</p>" : "",
+    safeRedirect ? '<p class="note">Taking you there automatically. Use the button if nothing happens.</p>' : "",
+    "</main>",
+    safeRedirect
+      ? "<script>setTimeout(function(){location.replace(" + JSON.stringify(redirectUrl) + ")}," + redirectDelayMs + ")<\/script>"
+      : "",
+    "</body></html>"
+  ].filter(Boolean).join("");
+}
+
+function sendAuthStatusPage(res, options) {
+  res.set("Content-Type", "text/html; charset=utf-8");
+  res.set("Cache-Control", "no-store");
+  return res.status(options.httpStatus || 200).send(renderAuthStatusPage(options));
+}
+
 function isMetaConfigured() {
   return Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET);
 }
@@ -5613,19 +5750,49 @@ app.get("/auth/google/callback", async (req, res) => {
         issuedAt: Date.now()
       }));
       logAuthRouteDebug({ route: "/auth/google/callback", chaining_to_meta: true });
-      return res.redirect(302, chainUrl.toString());
+      return sendAuthStatusPage(res, {
+        title: "Google connected",
+        heading: "Google is connected",
+        message: "Now handing you to Meta to connect Facebook and Instagram.",
+        google: "connected",
+        meta: "connecting",
+        redirectUrl: chainUrl.toString(),
+        redirectDelayMs: 1700,
+        continueLabel: "Continue to Meta"
+      });
     }
 
+    const googleOnlyMetaState = isMetaConfigured() ? "skipped" : "pending";
     if (appState.clientRedirectUri) {
       const redirectUrl = new URL(String(appState.clientRedirectUri));
       redirectUrl.searchParams.set("code", authCode);
       if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
-      return res.redirect(redirectUrl.toString());
+      return sendAuthStatusPage(res, {
+        title: "Google connected",
+        heading: "Google is connected",
+        message: "Your Google Ads, Analytics, Search Console and Merchant Center data is ready.",
+        google: "connected",
+        meta: googleOnlyMetaState,
+        redirectUrl: redirectUrl.toString(),
+        redirectDelayMs: 1600,
+        continueLabel: "Finish setup",
+        footnote: isMetaConfigured() ? "You can connect Meta later at /auth/meta." : ""
+      });
     }
 
     const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
     successUrl.searchParams.set("auth", "success");
-    return res.redirect(successUrl.toString());
+    return sendAuthStatusPage(res, {
+      title: "Google connected",
+      heading: "Google is connected",
+      message: "Your Google Ads, Analytics, Search Console and Merchant Center data is ready to query.",
+      google: "connected",
+      meta: googleOnlyMetaState,
+      redirectUrl: successUrl.toString(),
+      redirectDelayMs: 2000,
+      continueLabel: "Done",
+      footnote: isMetaConfigured() ? "You can connect Meta later at /auth/meta." : ""
+    });
   } catch (error) {
     logAuthRouteDebug({
       route: "/auth/google/callback",
@@ -5764,18 +5931,27 @@ function completeChainWithGoogleOnly(req, res, appState, reason) {
     meta_failed_falling_back_to_google_only: true,
     reason
   });
+  const partial = {
+    title: "Google connected",
+    heading: "Google is connected, Meta is not",
+    message: "Meta authorization did not complete, so we kept your Google connection rather than making you start over.",
+    google: "connected",
+    meta: "failed",
+    redirectDelayMs: 3200,
+    footnote: "Run /auth/meta whenever you want to add Facebook and Instagram."
+  };
   if (appState.clientRedirectUri) {
     const redirectUrl = new URL(String(appState.clientRedirectUri));
     redirectUrl.searchParams.set("code", String(appState.googleFallbackAuthCode));
     if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
-    res.redirect(redirectUrl.toString());
+    sendAuthStatusPage(res, { ...partial, redirectUrl: redirectUrl.toString(), continueLabel: "Finish with Google only" });
     return true;
   }
   const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
   successUrl.searchParams.set("auth", "success");
   successUrl.searchParams.set("provider", "google");
   successUrl.searchParams.set("meta_error", String(reason || "meta_authorization_failed"));
-  res.redirect(successUrl.toString());
+  sendAuthStatusPage(res, { ...partial, redirectUrl: successUrl.toString(), continueLabel: "Continue" });
   return true;
 }
 
@@ -5887,17 +6063,45 @@ app.get("/auth/meta/callback", async (req, res) => {
       meta: metaCredentials
     });
 
+    const googleAlsoConnected = Boolean(appState.linkedGoogle?.refreshToken);
+    const bothHeading = googleAlsoConnected ? "You are all set" : "Meta is connected";
+    const bothMessage = googleAlsoConnected
+      ? "Google and Meta are connected. Ads, analytics, search, shopping, calls and social all answer in one place now."
+      : "Facebook and Instagram data is ready to query.";
+
     if (appState.clientRedirectUri) {
       const redirectUrl = new URL(String(appState.clientRedirectUri));
       redirectUrl.searchParams.set("code", authCode);
       if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
-      return res.redirect(redirectUrl.toString());
+      return sendAuthStatusPage(res, {
+        title: bothHeading,
+        heading: bothHeading,
+        message: bothMessage,
+        google: googleAlsoConnected ? "connected" : "pending",
+        meta: "connected",
+        redirectUrl: redirectUrl.toString(),
+        redirectDelayMs: 2100,
+        continueLabel: "Finish setup",
+        tone: "success",
+        footnote: "Thanks. Meta access lasts about 60 days and renews whenever you reconnect."
+      });
     }
 
     const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
     successUrl.searchParams.set("auth", "success");
     successUrl.searchParams.set("provider", "meta");
-    return res.redirect(successUrl.toString());
+    return sendAuthStatusPage(res, {
+      title: bothHeading,
+      heading: bothHeading,
+      message: bothMessage,
+      google: googleAlsoConnected ? "connected" : "pending",
+      meta: "connected",
+      redirectUrl: successUrl.toString(),
+      redirectDelayMs: 2400,
+      continueLabel: "Done",
+      tone: "success",
+      footnote: "Thanks. Meta access lasts about 60 days and renews whenever you reconnect."
+    });
   } catch (error) {
     logAuthRouteDebug({
       route: "/auth/meta/callback",
