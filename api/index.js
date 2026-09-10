@@ -37,6 +37,8 @@ const TOOL_SCOPE_MAP = {
   get_merchant_product_status_summary: [MERCHANT_CENTER_SCOPE],
   list_merchant_data_sources: [MERCHANT_CENTER_SCOPE],
   run_merchant_preset: [MERCHANT_CENTER_SCOPE],
+  get_merchant_developer_registration: [MERCHANT_CENTER_SCOPE],
+  register_merchant_developer: [MERCHANT_CENTER_SCOPE],
   list_search_console_sitemaps: [SEARCH_CONSOLE_SCOPE],
   get_search_console_sitemap: [SEARCH_CONSOLE_SCOPE],
   inspect_search_console_url: [SEARCH_CONSOLE_SCOPE],
@@ -1640,6 +1642,23 @@ async function searchMerchantReports(accessToken, params) {
   });
 }
 
+async function getMerchantDeveloperRegistration(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  return callGoogleApi(`https://merchantapi.googleapis.com/accounts/v1/${parent}/developerRegistration`, accessToken, {
+    method: "GET"
+  });
+}
+
+// The only write call in this server. Merchant API refuses every other request with
+// GCP_NOT_REGISTERED until the calling Cloud project is registered against the account.
+async function registerMerchantDeveloper(accessToken, params) {
+  const parent = normalizeMerchantAccountName(params.accountId);
+  return callGoogleApi(`https://merchantapi.googleapis.com/accounts/v1/${parent}/developerRegistration:registerGcp`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({ developerEmail: params.developerEmail })
+  });
+}
+
 async function listMerchantSubaccounts(accessToken, params) {
   const parent = normalizeMerchantAccountName(params.accountId);
   const url = new URL(`https://merchantapi.googleapis.com/accounts/v1/${parent}:listSubaccounts`);
@@ -2297,6 +2316,48 @@ function createServer(req) {
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.search_merchant_reports, async ({ googleCredentials }) => {
       const response = await searchMerchantReports(googleCredentials.accessToken, parsed);
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("get_merchant_developer_registration", {
+    title: "Get Merchant Center Developer Registration",
+    description: "Check whether this server's Google Cloud project is registered as a Merchant API developer for an account. Merchant API returns GCP_NOT_REGISTERED for every other call until it is.",
+    inputSchema: {
+      accountId: z.string().min(1)
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1)
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_merchant_developer_registration, async ({ googleCredentials }) => {
+      const response = await getMerchantDeveloperRegistration(googleCredentials.accessToken, parsed);
+      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+    });
+  });
+  server.registerTool("register_merchant_developer", {
+    title: "Register Merchant Center Developer (write)",
+    description: "Register this server's Google Cloud project as a Merchant API developer for one Merchant Center account, which is required before any other Merchant API call will succeed. This WRITES to the Merchant Center account: it grants the API_DEVELOPER role to developerEmail if that address is already a user on the account, and otherwise sends that address an invitation that must be accepted. Prefer an email that already has access to the account. Registration takes about 5 minutes to take effect and can be undone in Merchant Center.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      developerEmail: z.string().email()
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      accountId: z.string().min(1),
+      developerEmail: z.string().email()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.register_merchant_developer, async ({ googleCredentials }) => {
+      const response = await registerMerchantDeveloper(googleCredentials.accessToken, parsed);
+      return buildToolResult({
+        accountId: parsed.accountId,
+        developerEmail: parsed.developerEmail,
+        registered: response.ok,
+        note: response.ok
+          ? "Registered. Merchant API calls for this account should start working in about 5 minutes."
+          : "Registration failed. See raw for the API error.",
+        raw: toGoogleDebugPayload(response)
+      }, !response.ok);
     });
   });
   server.registerTool("list_merchant_subaccounts", {

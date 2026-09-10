@@ -35,6 +35,8 @@ It exposes these MCP tools:
 - `get_merchant_product_status_summary`
 - `list_merchant_data_sources`
 - `run_merchant_preset`
+- `get_merchant_developer_registration`
+- `register_merchant_developer`
 - `list_google_ads_accessible_customers`
 - `query_google_ads`
 - `search_stream_google_ads`
@@ -168,6 +170,8 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 ## Merchant Center notes
 
 - Merchant Center tools use the Google Merchant API v1.
+- Merchant API rejects every call with `GCP_NOT_REGISTERED` until this server's Google Cloud project is registered against the Merchant Center account. Check with `get_merchant_developer_registration` and fix with `register_merchant_developer`, which must be run once per Merchant account and takes about 5 minutes to take effect.
+- `register_merchant_developer` is the only write tool in this server. It grants the API_DEVELOPER role to the supplied email if that address is already a user on the account, and otherwise sends an invitation that has to be accepted, so prefer an email that already has access.
 - Reports run against the GA `reports/v1` sub-API. Accounts, products and data sources use `accounts/v1`, `products/v1` and `datasources/v1`; product status aggregation uses `issueresolution/v1`.
 - `run_merchant_preset` with `product_performance` and `marketingMethod: "ORGANIC"` reports free listing traffic, so it works without a Google Ads account.
 - `product_status`, `price_competitiveness` and `price_insights` are current snapshots and ignore the date range. `best_sellers` needs `reportDate` plus `reportCountryCode`; `competitive_visibility` needs `reportCountryCode`.
