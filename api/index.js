@@ -1127,6 +1127,17 @@ function normalizeScopes(scopeValue) {
 // normalizeScopes is deliberately permissive because session and token scope strings
 // can hold a Google + Meta union. Anything that builds a Google authorization URL must
 // use this instead, or a Meta scope would reach Google and be rejected as invalid_scope.
+// A session can hold Google credentials, Meta credentials, or both, and each provider
+// only ever reports its own scopes. Deriving the union from the credentials actually
+// present stops one provider's scope string from overwriting the other's, which would
+// silently strip the second provider's permissions from the minted token.
+function buildSessionScope({ googleScope, metaScope, fallbackScope } = {}) {
+  const google = googleScope ? normalizeGoogleAuthScopes(googleScope) : [];
+  const meta = metaScope ? normalizeMetaScopes(metaScope) : [];
+  const combined = Array.from(new Set([...google, ...meta]));
+  return combined.length ? combined.join(" ") : String(fallbackScope || "");
+}
+
 function normalizeGoogleAuthScopes(scopeValue) {
   if (!scopeValue) return [...GOOGLE_SCOPES];
   const requested = String(scopeValue).split(/\s+/).map((s) => s.trim()).filter(Boolean);
@@ -1517,7 +1528,11 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       refreshToken: session?.refreshToken || payload.google?.refreshToken || null,
       accessToken: session?.refreshToken ? session.accessToken : null,
       expiryDate: session?.refreshToken ? session.expiryDate : 0,
-      scope: session?.scope || payload.google?.scope || payload.scope,
+      scope: session?.scope || buildSessionScope({
+        googleScope: payload.google?.scope,
+        metaScope: payload.meta?.scope,
+        fallbackScope: payload.scope
+      }),
       tokenType: payload.google?.tokenType || "Bearer",
       meta: session?.meta || (payload.meta?.accessToken ? payload.meta : null),
       sessionExpiresAt: Date.now() + SESSION_TTL_MS
@@ -5950,7 +5965,11 @@ app.post("/oauth/token", async (req, res) => {
         refreshToken: payload.google?.refreshToken || null,
         accessToken: payload.google?.accessToken || null,
         expiryDate: payload.google?.expiryDate || 0,
-        scope: payload.google?.scope || payload.scope,
+        scope: buildSessionScope({
+          googleScope: payload.google?.scope,
+          metaScope: payload.meta?.scope,
+          fallbackScope: payload.scope
+        }),
         tokenType: payload.google?.tokenType || "Bearer",
         meta: payload.meta?.accessToken ? payload.meta : null,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
@@ -6026,7 +6045,11 @@ app.post("/oauth/token", async (req, res) => {
         refreshToken: payload.google?.refreshToken || null,
         accessToken: null,
         expiryDate: 0,
-        scope: payload.google?.scope || payload.scope,
+        scope: buildSessionScope({
+          googleScope: payload.google?.scope,
+          metaScope: payload.meta?.scope,
+          fallbackScope: payload.scope
+        }),
         tokenType: payload.google?.tokenType || "Bearer",
         meta: payload.meta?.accessToken ? payload.meta : null,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
@@ -6066,7 +6089,13 @@ app.post("/oauth/token", async (req, res) => {
         }
       }
 
-      const grantedScopes = normalizeScopes(refreshedScope || session.scope || payload.scope);
+      // Google's refresh response only ever reports Google scopes, so re-merge the
+      // Meta scopes rather than letting the refresh narrow the session.
+      const grantedScopes = normalizeScopes(buildSessionScope({
+        googleScope: refreshedScope || googleCredentials?.scope || payload.google?.scope,
+        metaScope: metaCredentials?.scope || payload.meta?.scope,
+        fallbackScope: session.scope || payload.scope
+      }));
       saveSession(sessionId, {
         ...(googleCredentials || session),
         sessionId,
