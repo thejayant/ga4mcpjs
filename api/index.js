@@ -10,6 +10,25 @@ const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const MERCHANT_CENTER_SCOPE = "https://www.googleapis.com/auth/content";
 const GOOGLE_ADS_SCOPE = "https://www.googleapis.com/auth/adwords";
 const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE];
+// Meta permissions. All of these require App Review before anyone outside the app's own
+// admins, developers and testers can grant them.
+const META_ADS_SCOPE = "ads_read";
+const META_BUSINESS_SCOPE = "business_management";
+const META_PAGES_LIST_SCOPE = "pages_show_list";
+const META_PAGES_READ_SCOPE = "pages_read_engagement";
+const META_INSIGHTS_SCOPE = "read_insights";
+const META_INSTAGRAM_SCOPE = "instagram_basic";
+const META_INSTAGRAM_INSIGHTS_SCOPE = "instagram_manage_insights";
+const META_SCOPES = [
+  META_ADS_SCOPE,
+  META_BUSINESS_SCOPE,
+  META_PAGES_LIST_SCOPE,
+  META_PAGES_READ_SCOPE,
+  META_INSIGHTS_SCOPE,
+  META_INSTAGRAM_SCOPE,
+  META_INSTAGRAM_INSIGHTS_SCOPE
+];
+const ALL_KNOWN_SCOPES = [...GOOGLE_SCOPES, ...META_SCOPES];
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -56,7 +75,13 @@ const TOOL_SCOPE_MAP = {
   list_ga4_key_events: [GA4_SCOPE],
   list_ga4_data_streams: [GA4_SCOPE],
   run_search_console_preset: [SEARCH_CONSOLE_SCOPE],
-  compare_search_console_periods: [SEARCH_CONSOLE_SCOPE]
+  compare_search_console_periods: [SEARCH_CONSOLE_SCOPE],
+  list_meta_ad_accounts: [META_ADS_SCOPE],
+  list_meta_pages: [META_PAGES_LIST_SCOPE],
+  list_meta_instagram_accounts: [META_INSTAGRAM_SCOPE],
+  get_meta_token_info: [META_ADS_SCOPE],
+  query_meta_graph: [META_ADS_SCOPE],
+  run_meta_preset: [META_ADS_SCOPE]
 };
 const CALLRAIL_TOOL_NAMES = [
   "list_callrail_accounts",
@@ -490,6 +515,23 @@ const PLATFORM_GUARDRAILS = {
       "Report queries use snake_case names while responses come back camelCase."
     ]
   },
+  meta: {
+    strengths: [
+      "Best source for Meta Ads delivery and spend, Facebook Page organic reach and engagement, and Instagram organic performance.",
+      "Ads presets cover account, campaign, ad set and ad levels plus age/gender, country, region, platform, device and placement breakdowns.",
+      "Page and Instagram presets pivot Meta's metric-major insights into dated rows that join the other platforms."
+    ],
+    limitations: [
+      "Meta has no refresh tokens. A long-lived user token lasts about 60 days; refreshing an MCP token re-extends it, but if the window lapses the user must re-authorize at /auth/meta/start.",
+      "Every permission used here needs Meta App Review. Before approval only the app's own admins, developers and testers can grant them.",
+      "Page and Instagram insights are documented against a Page access token, which costs one extra Graph request per call to resolve.",
+      "Meta rotates and deprecates insight metric names between Graph versions. Presets carry defaults for the configured version and expose a metrics override; set META_GRAPH_API_VERSION to a version Meta still supports.",
+      "Instagram follower demographics need at least 100 followers, and Instagram stories only cover the last 24 hours.",
+      "Conversions are read from the actions array. Which action_type counts as a conversion depends on the pixel setup, so conversionActionType is configurable and the raw actions are always returned.",
+      "Ads insights are attributed on Meta's own attribution windows, so Meta conversion counts will not tie out exactly against GA4 or Google Ads.",
+      "Meta enforces per-app rate limits that vary with spend and app tier; no auto-pagination is performed, so page explicitly with the returned nextCursor."
+    ]
+  },
   callrail: {
     strengths: [
       "Best source for call records, trackers, summaries, time series, and CallRail-native attribution fields.",
@@ -508,7 +550,7 @@ const PLATFORM_GUARDRAILS = {
 const NORMALIZED_MARKETING_SCHEMA = {
   version: EXPERT_VERSION,
   recordShape: {
-    platform: "google_ads | ga4 | search_console | merchant_center | callrail",
+    platform: "google_ads | ga4 | search_console | merchant_center | callrail | meta",
     preset: "preset or custom normalization label",
     entityType: "campaign | ad_group | ad | keyword | search_term | asset | asset_group | product | product_group | geo | device | ad_schedule | age_range | gender | audience | placement | conversion_action | landing_page | budget | bidding_strategy | video | call | account | negative_keyword | change_event | recommendation | experiment | click | channel | source_medium | event | attribution | query | page | country | date | tracker",
     sourcePrimaryKey: "stable identifier from the source when available",
@@ -572,7 +614,16 @@ const NORMALIZED_MARKETING_SCHEMA = {
     "account_name",
     "call_segment",
     "event_name",
-    "brand"
+    "brand",
+    "ad_account_id",
+    "ad_name",
+    "ad_set_id",
+    "ad_set_name",
+    "post_id",
+    "media_id",
+    "media_type",
+    "placement",
+    "publisher_platform"
   ],
   standardMetrics: [
     "impressions",
@@ -638,7 +689,20 @@ const NORMALIZED_MARKETING_SCHEMA = {
     "ads_organic_ratio",
     "click_potential_rank",
     "predicted_clicks_change",
-    "predicted_conversions_change"
+    "predicted_conversions_change",
+    "reach",
+    "frequency",
+    "engagements",
+    "followers",
+    "follower_adds",
+    "follower_removes",
+    "profile_views",
+    "likes",
+    "comments",
+    "shares",
+    "saves",
+    "video_plays",
+    "video_completions"
   ],
   crossSourceMappings: {
     campaign_name: {
@@ -646,27 +710,74 @@ const NORMALIZED_MARKETING_SCHEMA = {
       ga4: ["sessionCampaignName", "firstUserCampaignName"],
       search_console: [],
       merchant_center: [],
-      callrail: ["utm_campaign", "campaign"]
+      callrail: ["utm_campaign", "campaign"],
+      meta: ["campaign_name"]
     },
     channel: {
       google_ads: ["campaign.advertising_channel_type"],
       ga4: ["sessionDefaultChannelGroup", "firstUserDefaultChannelGroup"],
       search_console: ["searchType"],
       merchant_center: ["marketingMethod"],
-      callrail: ["source", "medium", "channel"]
+      callrail: ["source", "medium", "channel"],
+      meta: ["publisher_platform", "platform_position"]
     },
     landing_page: {
       google_ads: ["landing_page_view.unexpanded_final_url"],
       ga4: ["landingPagePlusQueryString"],
       search_console: ["page"],
       merchant_center: [],
-      callrail: ["landing_page_url"]
+      callrail: ["landing_page_url"],
+      meta: ["permalink_url", "permalink"]
+    },
+    cost: {
+      google_ads: ["metrics.cost_micros"],
+      ga4: ["advertiserAdCost"],
+      search_console: [],
+      merchant_center: [],
+      callrail: [],
+      meta: ["spend"]
     }
   }
 };
 const MERCHANT_PRESET_NAMES = Object.keys(MERCHANT_PRESET_DEFINITIONS);
 // CallRail returns raw call records rather than aggregated reports, so these presets
 // declare which field to group by and the aggregation happens server-side here.
+// Meta Ads insights are row-major; Page and Instagram insights are metric-major
+// (one entry per metric, each holding a series of dated values). The normalizer
+// pivots the latter into dated rows so all three surfaces land in one schema.
+const META_ADS_BASE_FIELDS = "impressions,clicks,spend,reach,frequency,cpm,cpc,ctr,actions,action_values,cost_per_action_type,purchase_roas,account_currency,date_start,date_stop";
+const META_ADS_VIDEO_FIELDS = "impressions,spend,video_play_actions,video_thruplay_watched_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions";
+const META_CONVERSION_ACTION_TYPES = [
+  "offsite_conversion.fb_pixel_purchase",
+  "omni_purchase",
+  "purchase",
+  "onsite_web_purchase"
+];
+const META_PRESET_DEFINITIONS = {
+  ads_account_performance: { surface: "ads", shape: "insights", entityType: "account", level: "account", description: "Ad account totals: spend, impressions, clicks, reach, frequency, conversions and ROAS." },
+  ads_campaign_performance: { surface: "ads", shape: "insights", entityType: "campaign", level: "campaign", description: "Campaign performance with spend, delivery, conversions and ROAS." },
+  ads_adset_performance: { surface: "ads", shape: "insights", entityType: "ad_set", level: "adset", description: "Ad set performance with campaign context." },
+  ads_ad_performance: { surface: "ads", shape: "insights", entityType: "ad", level: "ad", description: "Ad-level performance with campaign and ad set context." },
+  ads_daily_trends: { surface: "ads", shape: "insights", entityType: "date", level: "account", timeIncrement: 1, description: "Daily account spend and delivery over the window." },
+  ads_by_age_gender: { surface: "ads", shape: "insights", entityType: "demographic", level: "account", breakdowns: "age,gender", description: "Spend and results split by age bracket and gender." },
+  ads_by_country: { surface: "ads", shape: "insights", entityType: "country", level: "account", breakdowns: "country", description: "Spend and results split by country." },
+  ads_by_region: { surface: "ads", shape: "insights", entityType: "country", level: "account", breakdowns: "region", description: "Spend and results split by region." },
+  ads_by_platform: { surface: "ads", shape: "insights", entityType: "placement", level: "account", breakdowns: "publisher_platform,platform_position", description: "Spend split across Facebook, Instagram, Audience Network and Messenger, and position within each." },
+  ads_by_device: { surface: "ads", shape: "insights", entityType: "device", level: "account", breakdowns: "impression_device", description: "Spend and results split by impression device." },
+  ads_by_placement: { surface: "ads", shape: "insights", entityType: "placement", level: "campaign", breakdowns: "publisher_platform,platform_position,device_platform", description: "Full placement breakdown at campaign level." },
+  ads_video_performance: { surface: "ads", shape: "insights", entityType: "ad", level: "ad", fields: "video", description: "Video ad performance with plays, ThruPlays and quartile completions." },
+  ads_conversions: { surface: "ads", shape: "insights", entityType: "campaign", level: "campaign", description: "Campaign conversions and conversion value by action type, with cost per action and ROAS." },
+  page_overview: { surface: "page", shape: "metric_series", entityType: "page", period: "day", metrics: "page_impressions,page_impressions_unique,page_post_engagements,page_views_total", description: "Facebook Page reach, impressions, engagement and views per day." },
+  page_daily_trends: { surface: "page", shape: "metric_series", entityType: "date", period: "day", metrics: "page_impressions,page_impressions_unique,page_post_engagements", description: "Daily Page impressions, reach and engagement." },
+  page_audience: { surface: "page", shape: "metric_series", entityType: "page", period: "day", metrics: "page_fans,page_fan_adds,page_fan_removes", description: "Page follower count with daily adds and removes." },
+  page_posts: { surface: "page", shape: "edge", entityType: "post", edge: "posts", description: "Recent Page posts with per-post impressions, reach, engaged users and clicks." },
+  instagram_account_overview: { surface: "instagram", shape: "metric_series", entityType: "account", period: "day", metrics: "reach,profile_views", description: "Instagram account reach and profile views per day." },
+  instagram_daily_trends: { surface: "instagram", shape: "metric_series", entityType: "date", period: "day", metrics: "reach,follower_count", description: "Daily Instagram reach and follower change." },
+  instagram_media_performance: { surface: "instagram", shape: "edge", entityType: "media", edge: "media", description: "Instagram posts with likes, comments, reach, saves, shares and total interactions." },
+  instagram_stories: { surface: "instagram", shape: "edge", entityType: "media", edge: "stories", description: "Instagram stories from the last 24 hours with reach and replies." },
+  instagram_audience: { surface: "instagram", shape: "demographics", entityType: "demographic", metrics: "follower_demographics", description: "Instagram follower demographics. Requires at least 100 followers or Meta returns no data." }
+};
+const META_PRESET_NAMES = Object.keys(META_PRESET_DEFINITIONS);
 const CALLRAIL_PRESET_DEFINITIONS = {
   call_details: { entityType: "call", groupBy: null, description: "Individual call records with attribution, duration, and lead status. Not aggregated." },
   calls_overview: { entityType: "account", groupBy: null, aggregateAll: true, description: "Single-row summary: total, answered, missed, first-time callers, total and average duration, and lead value." },
@@ -710,6 +821,122 @@ function getResourceUrl(req) {
 
 function getCallRailBaseUrl() {
   return String(process.env.CALLRAIL_API_BASE_URL || "https://api.callrail.com/v3").replace(/\/+$/, "");
+}
+
+function getMetaGraphApiVersion() {
+  // Meta deprecates Graph versions roughly two years after release, so this is
+  // deliberately env-driven rather than pinned in code.
+  return String(process.env.META_GRAPH_API_VERSION || "v21.0").trim();
+}
+
+function getMetaGraphBaseUrl() {
+  return `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
+}
+
+function requireMetaAppId() {
+  return requireEnv("META_APP_ID");
+}
+
+function requireMetaAppSecret() {
+  return requireEnv("META_APP_SECRET");
+}
+
+function getMetaRedirectUri(req) {
+  return `${getBaseUrl(req)}/auth/meta/callback`;
+}
+
+// Meta signs API calls with appsecret_proof when the app has it enabled, and
+// accepts it unconditionally, so it is always sent.
+function buildMetaAppSecretProof(accessToken) {
+  return crypto.createHmac("sha256", requireMetaAppSecret()).update(String(accessToken)).digest("hex");
+}
+
+async function callMetaGraphApi(pathOrUrl, accessToken, params = {}) {
+  const url = pathOrUrl.startsWith("http")
+    ? new URL(pathOrUrl)
+    : new URL(`${getMetaGraphBaseUrl()}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`);
+  appendQueryParams(url, params);
+  if (accessToken) {
+    url.searchParams.set("access_token", String(accessToken));
+    try {
+      url.searchParams.set("appsecret_proof", buildMetaAppSecretProof(accessToken));
+    } catch {
+      // META_APP_SECRET missing; the call will fail on its own with a clearer error.
+    }
+  }
+  const response = await fetch(url.toString(), { method: "GET" });
+  const rawBody = await response.text();
+  let parsedBody = rawBody;
+  try {
+    parsedBody = rawBody ? JSON.parse(rawBody) : null;
+  } catch {}
+  // Never log the token or the proof.
+  const safeUrl = new URL(url.toString());
+  safeUrl.searchParams.delete("access_token");
+  safeUrl.searchParams.delete("appsecret_proof");
+  console.log(JSON.stringify({ type: "meta_api_debug", url: safeUrl.toString(), status: response.status, body: parsedBody }));
+  return { ok: response.ok, status: response.status, body: parsedBody };
+}
+
+function toMetaDebugPayload(response) {
+  return response.ok ? response.body : { status: response.status, error: response.body };
+}
+
+async function exchangeMetaCodeForToken(req, code) {
+  const url = new URL(`${getMetaGraphBaseUrl()}/oauth/access_token`);
+  appendQueryParams(url, {
+    client_id: requireMetaAppId(),
+    client_secret: requireMetaAppSecret(),
+    redirect_uri: getMetaRedirectUri(req),
+    code
+  });
+  const response = await fetch(url.toString(), { method: "GET" });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(`Meta code exchange failed: ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+// Meta has no refresh tokens. A short-lived user token is exchanged for a long-lived
+// one (~60 days), and re-exchanging a still-valid long-lived token resets that window.
+async function exchangeMetaLongLivedToken(shortLivedToken) {
+  const url = new URL(`${getMetaGraphBaseUrl()}/oauth/access_token`);
+  appendQueryParams(url, {
+    grant_type: "fb_exchange_token",
+    client_id: requireMetaAppId(),
+    client_secret: requireMetaAppSecret(),
+    fb_exchange_token: shortLivedToken
+  });
+  const response = await fetch(url.toString(), { method: "GET" });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(`Meta long-lived token exchange failed: ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+async function debugMetaToken(accessToken) {
+  const url = new URL(`${getMetaGraphBaseUrl()}/debug_token`);
+  appendQueryParams(url, {
+    input_token: accessToken,
+    access_token: `${requireMetaAppId()}|${requireMetaAppSecret()}`
+  });
+  const response = await fetch(url.toString(), { method: "GET" });
+  const body = await response.json().catch(() => null);
+  return { ok: response.ok, status: response.status, body };
+}
+
+function buildMetaCredentials(tokenResponse, grantedScopes, userId) {
+  const expiresInSeconds = toNumber(tokenResponse?.expires_in);
+  return {
+    accessToken: tokenResponse?.access_token,
+    tokenType: tokenResponse?.token_type || "bearer",
+    // Meta omits expires_in for tokens that do not expire; treat that as no expiry.
+    expiresAt: expiresInSeconds ? Date.now() + expiresInSeconds * 1000 : null,
+    scope: Array.isArray(grantedScopes) ? grantedScopes.join(" ") : String(grantedScopes || ""),
+    userId: userId || null
+  };
 }
 
 function getGoogleAdsApiVersion() {
@@ -870,8 +1097,19 @@ function normalizeMerchantAccountName(accountName) {
 function normalizeScopes(scopeValue) {
   if (!scopeValue) return [...GOOGLE_SCOPES];
   const requested = String(scopeValue).split(/\s+/).map((s) => s.trim()).filter(Boolean);
-  const allowed = requested.filter((scope) => GOOGLE_SCOPES.includes(scope));
+  const allowed = requested.filter((scope) => ALL_KNOWN_SCOPES.includes(scope));
   return allowed.length ? Array.from(new Set(allowed)) : [...GOOGLE_SCOPES];
+}
+
+function normalizeMetaScopes(scopeValue) {
+  if (!scopeValue) return [...META_SCOPES];
+  const requested = String(scopeValue).split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  const allowed = requested.filter((scope) => META_SCOPES.includes(scope));
+  return allowed.length ? Array.from(new Set(allowed)) : [...META_SCOPES];
+}
+
+function scopesInclude(scopes, candidates) {
+  return scopes.some((scope) => candidates.includes(scope));
 }
 
 function hasScopes(grantedScopes, requiredScopes) {
@@ -1092,6 +1330,28 @@ function deleteSession(sessionId) {
   sessionStore.delete(sessionId);
 }
 
+// A session may hold Google credentials, Meta credentials, or both, so these
+// sections are emitted only when the provider is actually connected.
+function sealGoogleSection(google) {
+  if (!google?.refreshToken) return undefined;
+  return {
+    refreshToken: google.refreshToken,
+    scope: google.scope,
+    tokenType: google.tokenType || "Bearer"
+  };
+}
+
+function sealMetaSection(meta) {
+  if (!meta?.accessToken) return undefined;
+  return {
+    accessToken: meta.accessToken,
+    tokenType: meta.tokenType || "bearer",
+    expiresAt: meta.expiresAt || null,
+    scope: meta.scope,
+    userId: meta.userId || null
+  };
+}
+
 function mintAccessToken(req, payload) {
   return encryptJson({
     typ: "mcp_access_token",
@@ -1102,11 +1362,8 @@ function mintAccessToken(req, payload) {
     scope: payload.scope,
     iat: Date.now(),
     exp: Date.now() + ACCESS_TOKEN_TTL_MS,
-    google: {
-      refreshToken: payload.google?.refreshToken,
-      scope: payload.google?.scope,
-      tokenType: payload.google?.tokenType || "Bearer"
-    }
+    google: sealGoogleSection(payload.google),
+    meta: sealMetaSection(payload.meta)
   });
 }
 
@@ -1120,11 +1377,8 @@ function mintRefreshToken(req, payload) {
     scope: payload.scope,
     iat: Date.now(),
     exp: Date.now() + REFRESH_TOKEN_TTL_MS,
-    google: {
-      refreshToken: payload.google.refreshToken,
-      scope: payload.google.scope,
-      tokenType: payload.google.tokenType || "Bearer"
-    }
+    google: sealGoogleSection(payload.google),
+    meta: sealMetaSection(payload.meta)
   });
 }
 
@@ -1223,14 +1477,16 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
   let session = sessionId ? getSession(sessionId) : null;
   // Serverless instances do not share the in-memory session cache, so rebuild the
   // session from the credentials sealed inside the access token when it is missing.
-  if (!session && sessionId && payload.google?.refreshToken) {
+  if (sessionId && (payload.google?.refreshToken || payload.meta?.accessToken)) {
     session = saveSession(sessionId, {
+      ...(session || {}),
       sessionId,
-      refreshToken: payload.google.refreshToken,
-      accessToken: null,
-      expiryDate: 0,
-      scope: payload.google.scope || payload.scope,
-      tokenType: payload.google.tokenType || "Bearer",
+      refreshToken: session?.refreshToken || payload.google?.refreshToken || null,
+      accessToken: session?.refreshToken ? session.accessToken : null,
+      expiryDate: session?.refreshToken ? session.expiryDate : 0,
+      scope: session?.scope || payload.google?.scope || payload.scope,
+      tokenType: payload.google?.tokenType || "Bearer",
+      meta: session?.meta || (payload.meta?.accessToken ? payload.meta : null),
       sessionExpiresAt: Date.now() + SESSION_TTL_MS
     });
   }
@@ -1251,13 +1507,43 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       details: { debug: "missing_scopes", required_scopes: requiredScopes, granted_scopes: grantedScopes }
     });
   }
-  const googleCredentials = await refreshGoogleTokensIfNeeded(req, session);
+
+  // Only touch a provider the caller actually needs, so a Meta-only session is not
+  // rejected for having no Google refresh token and vice versa.
+  const needsGoogle = scopesInclude(requiredScopes, GOOGLE_SCOPES);
+  const needsMeta = scopesInclude(requiredScopes, META_SCOPES);
+
+  const metaCredentials = session.meta || (payload.meta?.accessToken ? payload.meta : null);
+  if (needsMeta) {
+    if (!metaCredentials?.accessToken) {
+      throw buildAuthError({
+        httpStatus: 401,
+        error: "invalid_token",
+        errorDescription: "No Meta credentials on this session. Authorize at /auth/meta/start.",
+        details: { debug: "no_meta_credentials" }
+      });
+    }
+    if (metaCredentials.expiresAt && Number(metaCredentials.expiresAt) <= Date.now()) {
+      throw buildAuthError({
+        httpStatus: 401,
+        error: "invalid_token",
+        errorDescription: "Meta access token expired. Meta has no refresh tokens, so re-authorize at /auth/meta/start.",
+        details: { debug: "meta_token_expired", expired_at: metaCredentials.expiresAt }
+      });
+    }
+  }
+
+  const googleCredentials = needsGoogle || session.refreshToken
+    ? await refreshGoogleTokensIfNeeded(req, session)
+    : null;
+
   req.mcpAuth = {
     issuer,
     resource,
     scope: grantedScopes.join(" "),
     scopes: grantedScopes,
     googleCredentials,
+    metaCredentials,
     sessionId,
     verifiedScopesKey: requiredScopes.join(" ")
   };
@@ -2503,6 +2789,365 @@ function normalizeCallRailCallRecords(calls) {
   }));
 }
 
+function metaAdsLevelFields(level) {
+  if (level === "campaign") return "campaign_id,campaign_name";
+  if (level === "adset") return "campaign_id,campaign_name,adset_id,adset_name";
+  if (level === "ad") return "campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name";
+  return "account_id,account_name";
+}
+
+function buildMetaPresetRequest(params) {
+  const definition = META_PRESET_DEFINITIONS[params.preset];
+  if (!definition) throw new Error(`Unsupported Meta preset: ${params.preset}`);
+
+  const dateRange = resolveDateWindow(params);
+  const notes = [];
+  const limit = Math.min(Number(params.limit || 100), 500);
+
+  if (definition.surface === "ads") {
+    if (!params.adAccountId) throw new Error(`Meta preset "${params.preset}" requires adAccountId, for example act_1234567890 or 1234567890.`);
+    const raw = String(params.adAccountId).trim();
+    const accountPath = raw.startsWith("act_") ? raw : `act_${raw.replace(/[^0-9]/g, "")}`;
+    const fields = definition.fields === "video"
+      ? `${metaAdsLevelFields(definition.level)},${META_ADS_VIDEO_FIELDS}`
+      : `${metaAdsLevelFields(definition.level)},${META_ADS_BASE_FIELDS}`;
+    return {
+      surface: "ads",
+      shape: "insights",
+      entityType: definition.entityType,
+      needsPageToken: false,
+      path: `${accountPath}/insights`,
+      query: {
+        level: definition.level,
+        fields: params.fields || fields,
+        time_range: JSON.stringify({ since: dateRange.startDate, until: dateRange.endDate }),
+        time_increment: params.includeDailyBreakdown === true ? 1 : definition.timeIncrement,
+        breakdowns: params.breakdowns || definition.breakdowns,
+        action_breakdowns: params.actionBreakdowns,
+        filtering: params.filtering ? JSON.stringify(params.filtering) : undefined,
+        limit,
+        after: params.after
+      },
+      dateRange,
+      notes
+    };
+  }
+
+  if (definition.surface === "page") {
+    if (!params.pageId) throw new Error(`Meta preset "${params.preset}" requires pageId.`);
+    if (definition.shape === "edge") {
+      return {
+        surface: "page",
+        shape: "edge",
+        entityType: definition.entityType,
+        needsPageToken: true,
+        path: `${params.pageId}/${definition.edge}`,
+        query: {
+          fields: params.fields || "id,message,created_time,permalink_url,insights.metric(post_impressions,post_impressions_unique,post_engaged_users,post_clicks)",
+          since: dateRange.startDate,
+          until: dateRange.endDate,
+          limit,
+          after: params.after
+        },
+        dateRange,
+        notes
+      };
+    }
+    return {
+      surface: "page",
+      shape: "metric_series",
+      entityType: definition.entityType,
+      needsPageToken: true,
+      path: `${params.pageId}/insights`,
+      query: {
+        metric: params.metrics || definition.metrics,
+        period: params.period || definition.period || "day",
+        since: dateRange.startDate,
+        until: dateRange.endDate
+      },
+      dateRange,
+      notes
+    };
+  }
+
+  // Instagram
+  if (!params.instagramAccountId) {
+    throw new Error(`Meta preset "${params.preset}" requires instagramAccountId. Find it with list_meta_instagram_accounts.`);
+  }
+  if (!params.pageId) {
+    notes.push("No pageId supplied, so the user access token is used. Instagram insights are documented against the linked Page access token; pass pageId if Meta rejects the call.");
+  }
+  if (definition.shape === "edge") {
+    const fields = definition.edge === "stories"
+      ? "id,media_type,media_product_type,timestamp,permalink,insights.metric(reach,replies)"
+      : "id,caption,media_type,media_product_type,timestamp,permalink,like_count,comments_count,insights.metric(reach,saved,shares,total_interactions)";
+    if (definition.edge === "stories") {
+      notes.push("Instagram only exposes stories from the last 24 hours, so the date range does not apply.");
+    }
+    return {
+      surface: "instagram",
+      shape: "edge",
+      entityType: definition.entityType,
+      needsPageToken: Boolean(params.pageId),
+      path: `${params.instagramAccountId}/${definition.edge}`,
+      query: {
+        fields: params.fields || fields,
+        since: definition.edge === "stories" ? undefined : dateRange.startDate,
+        until: definition.edge === "stories" ? undefined : dateRange.endDate,
+        limit,
+        after: params.after
+      },
+      dateRange,
+      notes
+    };
+  }
+  if (definition.shape === "demographics") {
+    return {
+      surface: "instagram",
+      shape: "demographics",
+      entityType: definition.entityType,
+      needsPageToken: Boolean(params.pageId),
+      path: `${params.instagramAccountId}/insights`,
+      query: {
+        metric: params.metrics || definition.metrics,
+        period: "lifetime",
+        metric_type: "total_value",
+        breakdown: params.breakdowns || "country"
+      },
+      dateRange,
+      notes
+    };
+  }
+  return {
+    surface: "instagram",
+    shape: "metric_series",
+    entityType: definition.entityType,
+    needsPageToken: Boolean(params.pageId),
+    path: `${params.instagramAccountId}/insights`,
+    query: {
+      metric: params.metrics || definition.metrics,
+      period: params.period || definition.period || "day",
+      since: dateRange.startDate,
+      until: dateRange.endDate
+    },
+    dateRange,
+    notes
+  };
+}
+
+function sumMetaActions(actions, types) {
+  if (!Array.isArray(actions)) return undefined;
+  let total;
+  for (const entry of actions) {
+    if (types && !types.includes(entry?.action_type)) continue;
+    const value = toNumber(entry?.value);
+    if (value === undefined) continue;
+    total = (total || 0) + value;
+  }
+  return total;
+}
+
+function firstMetaActionValue(actions) {
+  if (!Array.isArray(actions) || !actions.length) return undefined;
+  return toNumber(actions[0]?.value);
+}
+
+function normalizeMetaAdsRows(preset, responseBody, conversionActionType) {
+  const definition = META_PRESET_DEFINITIONS[preset];
+  const types = conversionActionType ? [conversionActionType] : META_CONVERSION_ACTION_TYPES;
+  return (responseBody?.data || []).map((row) => {
+    const dimensions = {
+      date: row.date_start,
+      ad_account_id: row.account_id,
+      account_name: row.account_name,
+      campaign_id: row.campaign_id,
+      campaign_name: row.campaign_name,
+      ad_set_id: row.adset_id,
+      ad_set_name: row.adset_name,
+      ad_id: row.ad_id,
+      ad_name: row.ad_name,
+      age_range: row.age,
+      gender: row.gender,
+      country: row.country,
+      region: row.region,
+      device: firstDefined(row.impression_device, row.device_platform),
+      publisher_platform: row.publisher_platform,
+      placement: firstDefined(row.platform_position, row.publisher_platform),
+      currency: row.account_currency
+    };
+    return buildNormalizedRecord({
+      platform: "meta",
+      preset,
+      entityType: definition?.entityType || "custom",
+      sourcePrimaryKey: firstDefined(
+        dimensions.ad_id,
+        dimensions.ad_set_id,
+        dimensions.campaign_id,
+        dimensions.age_range && dimensions.gender ? `${dimensions.age_range}:${dimensions.gender}` : undefined,
+        dimensions.country,
+        dimensions.placement,
+        dimensions.device,
+        dimensions.ad_account_id,
+        dimensions.date
+      ) || null,
+      dimensions,
+      metrics: {
+        impressions: toNumber(row.impressions),
+        clicks: toNumber(row.clicks),
+        cost: toNumber(row.spend),
+        ctr: toNumber(row.ctr),
+        average_cpc: toNumber(row.cpc),
+        average_cpm: toNumber(row.cpm),
+        reach: toNumber(row.reach),
+        frequency: toNumber(row.frequency),
+        conversions: sumMetaActions(row.actions, types),
+        conversion_value: sumMetaActions(row.action_values, types),
+        return_on_ad_spend: firstMetaActionValue(row.purchase_roas),
+        video_plays: sumMetaActions(row.video_play_actions),
+        video_views: sumMetaActions(row.video_thruplay_watched_actions),
+        video_completions: sumMetaActions(row.video_p100_watched_actions)
+      },
+      sourceContext: {
+        actions: row.actions,
+        action_values: row.action_values,
+        cost_per_action_type: row.cost_per_action_type,
+        date_stop: row.date_stop,
+        conversion_action_types_used: types
+      }
+    });
+  });
+}
+
+const META_METRIC_ALIASES = {
+  page_impressions: "impressions",
+  page_impressions_unique: "reach",
+  page_post_engagements: "engagements",
+  page_views_total: "page_views",
+  page_fans: "followers",
+  page_fan_adds: "follower_adds",
+  page_fan_removes: "follower_removes",
+  post_impressions: "impressions",
+  post_impressions_unique: "reach",
+  post_engaged_users: "engagements",
+  post_clicks: "clicks",
+  reach: "reach",
+  impressions: "impressions",
+  views: "impressions",
+  profile_views: "profile_views",
+  follower_count: "follower_adds",
+  saved: "saves",
+  shares: "shares",
+  replies: "comments",
+  total_interactions: "engagements"
+};
+
+// Page and Instagram insights come back metric-major, so pivot them into one row
+// per end_time with every metric attached.
+function normalizeMetaMetricSeriesRows(preset, responseBody) {
+  const definition = META_PRESET_DEFINITIONS[preset];
+  const byDate = new Map();
+  for (const metric of responseBody?.data || []) {
+    const normalizedName = META_METRIC_ALIASES[metric?.name] || metric?.name;
+    for (const point of metric?.values || []) {
+      const date = String(point?.end_time || "").slice(0, 10) || "(unknown)";
+      if (!byDate.has(date)) byDate.set(date, {});
+      const value = toNumber(point?.value);
+      if (value !== undefined) byDate.get(date)[normalizedName] = value;
+    }
+  }
+  return [...byDate.entries()].map(([date, metrics]) => buildNormalizedRecord({
+    platform: "meta",
+    preset,
+    entityType: definition?.entityType || "custom",
+    sourcePrimaryKey: date,
+    dimensions: { date },
+    metrics,
+    sourceContext: { shape: "metric_series" }
+  }));
+}
+
+function flattenMetaEdgeInsights(node) {
+  const metrics = {};
+  for (const metric of node?.insights?.data || []) {
+    const normalizedName = META_METRIC_ALIASES[metric?.name] || metric?.name;
+    const value = toNumber(metric?.values?.[0]?.value);
+    if (value !== undefined) metrics[normalizedName] = value;
+  }
+  return metrics;
+}
+
+function normalizeMetaEdgeRows(preset, responseBody) {
+  const definition = META_PRESET_DEFINITIONS[preset];
+  return (responseBody?.data || []).map((node) => {
+    const isPost = definition?.surface === "page";
+    return buildNormalizedRecord({
+      platform: "meta",
+      preset,
+      entityType: definition?.entityType || "custom",
+      sourcePrimaryKey: node.id || null,
+      dimensions: {
+        date: String(node.created_time || node.timestamp || "").slice(0, 10) || undefined,
+        post_id: isPost ? node.id : undefined,
+        media_id: isPost ? undefined : node.id,
+        media_type: firstDefined(node.media_product_type, node.media_type),
+        page: node.permalink_url || node.permalink,
+        product_title: node.caption || node.message
+      },
+      metrics: {
+        ...flattenMetaEdgeInsights(node),
+        likes: toNumber(node.like_count),
+        comments: toNumber(node.comments_count)
+      },
+      sourceContext: { shape: "edge", raw: node }
+    });
+  });
+}
+
+function normalizeMetaDemographicsRows(preset, responseBody) {
+  const definition = META_PRESET_DEFINITIONS[preset];
+  const rows = [];
+  for (const metric of responseBody?.data || []) {
+    for (const breakdown of metric?.total_value?.breakdowns || []) {
+      const dimensionName = breakdown?.dimension_keys?.[0] || "segment";
+      for (const result of breakdown?.results || []) {
+        const key = result?.dimension_values?.[0];
+        rows.push(buildNormalizedRecord({
+          platform: "meta",
+          preset,
+          entityType: definition?.entityType || "demographic",
+          sourcePrimaryKey: key || null,
+          dimensions: {
+            country: dimensionName === "country" ? key : undefined,
+            city: dimensionName === "city" ? key : undefined,
+            age_range: dimensionName === "age" ? key : undefined,
+            gender: dimensionName === "gender" ? key : undefined
+          },
+          metrics: { followers: toNumber(result?.value) },
+          sourceContext: { dimension: dimensionName, metric: metric?.name }
+        }));
+      }
+    }
+  }
+  return rows;
+}
+
+function normalizeMetaPresetRows(preset, responseBody, options = {}) {
+  const definition = META_PRESET_DEFINITIONS[preset];
+  if (!definition) return [];
+  if (definition.shape === "insights") return normalizeMetaAdsRows(preset, responseBody, options.conversionActionType);
+  if (definition.shape === "metric_series") return normalizeMetaMetricSeriesRows(preset, responseBody);
+  if (definition.shape === "demographics") return normalizeMetaDemographicsRows(preset, responseBody);
+  return normalizeMetaEdgeRows(preset, responseBody);
+}
+
+// Page and Instagram insights are documented against a Page access token, which is
+// fetched per call. Costs one extra Graph request; ads presets never need it.
+async function resolveMetaPageAccessToken(userAccessToken, pageId) {
+  const response = await callMetaGraphApi(String(pageId), userAccessToken, { fields: "access_token" });
+  if (!response.ok || !response.body?.access_token) return null;
+  return response.body.access_token;
+}
+
 function buildMarketingGuardrailsPayload() {
   return {
     expertVersion: EXPERT_VERSION,
@@ -2518,7 +3163,8 @@ function buildMarketingPresetCatalog() {
     ga4: GA4_PRESET_DEFINITIONS,
     search_console: SEARCH_CONSOLE_PRESET_DEFINITIONS,
     merchant_center: MERCHANT_PRESET_DEFINITIONS,
-    callrail: CALLRAIL_PRESET_DEFINITIONS
+    callrail: CALLRAIL_PRESET_DEFINITIONS,
+    meta: META_PRESET_DEFINITIONS
   };
 }
 
@@ -2531,6 +3177,9 @@ function getEnvironmentPresence() {
     GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
     GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
     GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "basic"),
+    META_APP_ID: Boolean(process.env.META_APP_ID),
+    META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
+    META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
     CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
     CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
   };
@@ -4322,6 +4971,289 @@ function createServer(req) {
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
+  server.registerTool("list_meta_ad_accounts", {
+    title: "List Meta Ad Accounts",
+    description: "List the Meta ad accounts the authorized user can access, with id, name, currency, timezone and account status.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_meta_ad_accounts, async ({ metaCredentials }) => {
+      const response = await callMetaGraphApi("me/adaccounts", metaCredentials.accessToken, {
+        fields: "id,account_id,name,currency,timezone_name,account_status,business_name",
+        limit: parsed.limit || 100,
+        after: parsed.after
+      });
+      return buildToolResult({
+        graphApiVersion: getMetaGraphApiVersion(),
+        guardrails: PLATFORM_GUARDRAILS.meta,
+        nextCursor: response.body?.paging?.cursors?.after || null,
+        raw: toMetaDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("list_meta_pages", {
+    title: "List Meta Pages",
+    description: "List the Facebook Pages the authorized user manages, with id, name, category and any linked Instagram business account. Page access tokens are deliberately not returned; they are resolved internally when a Page or Instagram preset needs one.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_meta_pages, async ({ metaCredentials }) => {
+      const response = await callMetaGraphApi("me/accounts", metaCredentials.accessToken, {
+        fields: "id,name,category,tasks,instagram_business_account{id,username}",
+        limit: parsed.limit || 100,
+        after: parsed.after
+      });
+      // Strip page access tokens so credentials never reach the model or the transcript.
+      const pages = (response.body?.data || []).map((page) => ({
+        id: page.id,
+        name: page.name,
+        category: page.category,
+        tasks: page.tasks,
+        instagramBusinessAccountId: page.instagram_business_account?.id || null,
+        instagramUsername: page.instagram_business_account?.username || null
+      }));
+      return buildToolResult({
+        graphApiVersion: getMetaGraphApiVersion(),
+        pageCount: pages.length,
+        pages,
+        nextCursor: response.body?.paging?.cursors?.after || null,
+        guardrails: PLATFORM_GUARDRAILS.meta,
+        raw: response.ok ? { paging: response.body?.paging || null } : toMetaDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("list_meta_instagram_accounts", {
+    title: "List Meta Instagram Accounts",
+    description: "List Instagram business accounts reachable through the authorized user's Pages, with follower and media counts. Each Instagram account is returned alongside the Page it is linked to, which is the pageId to pass to Instagram presets.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({ limit: z.number().int().min(1).max(500).optional() }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_meta_instagram_accounts, async ({ metaCredentials }) => {
+      const response = await callMetaGraphApi("me/accounts", metaCredentials.accessToken, {
+        fields: "id,name,instagram_business_account{id,username,name,followers_count,media_count,profile_picture_url}",
+        limit: parsed.limit || 100
+      });
+      const accounts = (response.body?.data || [])
+        .filter((page) => page.instagram_business_account)
+        .map((page) => ({
+          instagramAccountId: page.instagram_business_account.id,
+          username: page.instagram_business_account.username,
+          name: page.instagram_business_account.name,
+          followersCount: toNumber(page.instagram_business_account.followers_count),
+          mediaCount: toNumber(page.instagram_business_account.media_count),
+          pageId: page.id,
+          pageName: page.name
+        }));
+      return buildToolResult({
+        graphApiVersion: getMetaGraphApiVersion(),
+        accountCount: accounts.length,
+        accounts,
+        guardrails: PLATFORM_GUARDRAILS.meta,
+        raw: response.ok ? { paging: response.body?.paging || null } : toMetaDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("get_meta_token_info", {
+    title: "Get Meta Token Info",
+    description: "Inspect the stored Meta access token: which permissions were actually granted, which Meta user it belongs to, and when it expires. Meta has no refresh tokens, so use this to check how long the connection has left before re-authorization is needed.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true }
+  }, async () => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_meta_token_info, async ({ metaCredentials }) => {
+    const debug = await debugMetaToken(metaCredentials.accessToken);
+    const data = debug.body?.data || {};
+    const expiresAtMs = data.expires_at ? Number(data.expires_at) * 1000 : metaCredentials.expiresAt;
+    return buildToolResult({
+      graphApiVersion: getMetaGraphApiVersion(),
+      userId: data.user_id || metaCredentials.userId || null,
+      appId: data.app_id || null,
+      isValid: data.is_valid ?? null,
+      grantedScopes: data.scopes || normalizeMetaScopes(metaCredentials.scope),
+      expiresAt: expiresAtMs ? new Date(expiresAtMs).toISOString() : null,
+      daysUntilExpiry: expiresAtMs ? Math.max(0, Math.round((expiresAtMs - Date.now()) / 86400000)) : null,
+      neverExpires: !expiresAtMs,
+      guardrails: PLATFORM_GUARDRAILS.meta,
+      raw: debug.ok ? debug.body : { status: debug.status, error: debug.body }
+    }, !debug.ok);
+  }));
+  server.registerTool("query_meta_graph", {
+    title: "Query Meta Graph API",
+    description: "Run an arbitrary read-only Meta Graph API GET request for anything the presets do not cover. Supply a node path such as act_123/insights or 17841400000000000/media, plus query parameters. Access tokens are injected by the server and must never be passed here.",
+    inputSchema: {
+      path: z.string().min(1),
+      params: z.record(z.any()).optional(),
+      pageId: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      path: z.string().min(1),
+      params: z.record(z.any()).optional(),
+      pageId: z.string().optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.query_meta_graph, async ({ metaCredentials }) => {
+      const cleanPath = String(parsed.path).replace(/^\/+/, "");
+      if (/^https?:/i.test(cleanPath)) {
+        return buildToolResult({
+          error: "invalid_meta_path",
+          error_description: "Pass a Graph node path such as act_123/insights, not a full URL."
+        }, true);
+      }
+      const supplied = { ...(parsed.params || {}) };
+      // Refuse caller-supplied credentials rather than silently honouring them.
+      for (const key of ["access_token", "appsecret_proof", "client_secret"]) {
+        if (key in supplied) {
+          return buildToolResult({
+            error: "credentials_not_accepted",
+            error_description: `Remove ${key}. The server injects Meta credentials itself.`
+          }, true);
+        }
+      }
+      let token = metaCredentials.accessToken;
+      let requestCount = 1;
+      if (parsed.pageId) {
+        const pageToken = await resolveMetaPageAccessToken(metaCredentials.accessToken, parsed.pageId);
+        requestCount += 1;
+        if (pageToken) token = pageToken;
+      }
+      const response = await callMetaGraphApi(cleanPath, token, supplied);
+      return buildToolResult({
+        path: cleanPath,
+        graphApiVersion: getMetaGraphApiVersion(),
+        usedPageToken: Boolean(parsed.pageId),
+        requestCount,
+        guardrails: PLATFORM_GUARDRAILS.meta,
+        raw: toMetaDebugPayload(response)
+      }, !response.ok);
+    });
+  });
+  server.registerTool("run_meta_preset", {
+    title: "Run Meta Preset",
+    description: "Run expert Meta reports across three surfaces. Meta Ads: account, campaign, ad set and ad performance, daily trends, age and gender, country, region, platform, device, placement, video and conversions. Facebook Page organic: overview, daily trends, audience growth and per-post performance. Instagram organic: account overview, daily trends, media performance, stories and follower demographics. All results are normalized into the cross-platform schema so Meta joins Google Ads, GA4, Search Console and CallRail.",
+    inputSchema: {
+      preset: z.enum(META_PRESET_NAMES),
+      adAccountId: z.string().optional(),
+      pageId: z.string().optional(),
+      instagramAccountId: z.string().optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional(),
+      includeDailyBreakdown: z.boolean().optional(),
+      breakdowns: z.string().optional(),
+      actionBreakdowns: z.string().optional(),
+      conversionActionType: z.string().optional(),
+      metrics: z.string().optional(),
+      fields: z.string().optional(),
+      period: z.enum(["day", "week", "days_28", "lifetime"]).optional(),
+      filtering: z.array(z.record(z.any())).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      preset: z.enum(META_PRESET_NAMES),
+      adAccountId: z.string().optional(),
+      pageId: z.string().optional(),
+      instagramAccountId: z.string().optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional(),
+      includeDailyBreakdown: z.boolean().optional(),
+      breakdowns: z.string().optional(),
+      actionBreakdowns: z.string().optional(),
+      conversionActionType: z.string().optional(),
+      metrics: z.string().optional(),
+      fields: z.string().optional(),
+      period: z.enum(["day", "week", "days_28", "lifetime"]).optional(),
+      filtering: z.array(z.record(z.any())).optional()
+    }).parse(params);
+    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_meta_preset, async ({ metaCredentials, scopes }) => {
+      let presetConfig;
+      try {
+        presetConfig = buildMetaPresetRequest(parsed);
+      } catch (error) {
+        return buildToolResult({
+          error: "invalid_meta_preset_request",
+          error_description: error instanceof Error ? error.message : String(error),
+          preset: parsed.preset,
+          presetCatalog: META_PRESET_DEFINITIONS[parsed.preset] || null
+        }, true);
+      }
+
+      // Surface the missing-permission case as a clear message instead of a raw Meta error.
+      const requiredScopeBySurface = {
+        ads: [META_ADS_SCOPE],
+        page: [META_PAGES_READ_SCOPE, META_INSIGHTS_SCOPE],
+        instagram: [META_INSTAGRAM_SCOPE, META_INSTAGRAM_INSIGHTS_SCOPE]
+      }[presetConfig.surface] || [];
+      const missingScopes = requiredScopeBySurface.filter((scope) => !scopes.includes(scope));
+      if (missingScopes.length) {
+        return buildToolResult({
+          error: "insufficient_meta_permissions",
+          error_description: `This session was not granted ${missingScopes.join(", ")}. Re-authorize at /auth/meta/start, and note these permissions need Meta App Review before non-testers can grant them.`,
+          preset: parsed.preset,
+          surface: presetConfig.surface,
+          grantedScopes: scopes.filter((scope) => META_SCOPES.includes(scope))
+        }, true);
+      }
+
+      const notes = [...presetConfig.notes];
+      let token = metaCredentials.accessToken;
+      let requestCount = 1;
+      if (presetConfig.needsPageToken && parsed.pageId) {
+        const pageToken = await resolveMetaPageAccessToken(metaCredentials.accessToken, parsed.pageId);
+        requestCount += 1;
+        if (pageToken) {
+          token = pageToken;
+        } else {
+          notes.push("Could not resolve a Page access token for this pageId; falling back to the user token. If Meta rejects the call, confirm the user manages this Page.");
+        }
+      }
+
+      const response = await callMetaGraphApi(presetConfig.path, token, presetConfig.query);
+      const normalizedRows = response.ok
+        ? normalizeMetaPresetRows(parsed.preset, response.body, { conversionActionType: parsed.conversionActionType })
+        : [];
+      if (response.ok && !normalizedRows.length) {
+        notes.push("Meta returned no rows. Common causes: no delivery in the window, an Instagram account under 100 followers for demographics, or a metric Meta has deprecated in this Graph version.");
+      }
+
+      return buildToolResult({
+        preset: parsed.preset,
+        surface: presetConfig.surface,
+        entityType: presetConfig.entityType,
+        dateRange: presetConfig.dateRange,
+        graphApiVersion: getMetaGraphApiVersion(),
+        usedPageToken: presetConfig.needsPageToken && requestCount > 1,
+        requestCount,
+        rowCount: normalizedRows.length,
+        nextCursor: response.body?.paging?.cursors?.after || null,
+        notes,
+        request: { path: presetConfig.path, query: presetConfig.query },
+        guardrails: PLATFORM_GUARDRAILS.meta,
+        normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
+        normalizedRows,
+        raw: toMetaDebugPayload(response)
+      }, !response.ok);
+    });
+  });
   server.registerTool("run_callrail_preset", {
     title: "Run CallRail Preset",
     description: "Run expert CallRail reports. CallRail returns raw call records rather than aggregated reports, so this tool fetches one page of calls and aggregates them into call, answered, missed, qualified, first-time, duration, and lead-value totals grouped by source, medium, campaign, keyword, landing page, referrer, tracking number, company, device, city, lead status, tag, answered state, first-time state, duration bucket, or day. Results are normalized into the cross-platform schema so calls can be joined to Google Ads, GA4, and Search Console rows.",
@@ -4457,6 +5389,8 @@ app.get("/", (req, res) => {
     mcpUrl: `${baseUrl}/mcp`,
     oauthStartUrl: `${baseUrl}/auth/google/start`,
     oauthCallbackUrl: `${baseUrl}/auth/google/callback`,
+    metaAuthStartUrl: `${baseUrl}/auth/meta/start`,
+    metaOauthCallbackUrl: `${baseUrl}/auth/meta/callback`,
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
     scopes: GOOGLE_SCOPES,
@@ -4491,6 +5425,9 @@ app.get("/auth/google/start", (req, res) => {
         GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
         GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
     GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "basic"),
+    META_APP_ID: Boolean(process.env.META_APP_ID),
+    META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
+    META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
         CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN)
       }
     });
@@ -4622,6 +5559,195 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 });
 
+app.get("/auth/meta/start", (req, res) => {
+  try {
+    logAuthRouteDebug({
+      route: "/auth/meta/start",
+      env_present: {
+        META_APP_ID: Boolean(process.env.META_APP_ID),
+        META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
+        META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
+        BASE_URL: Boolean(process.env.BASE_URL),
+        APP_BASE_URL: Boolean(process.env.APP_BASE_URL),
+        APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY)
+      }
+    });
+
+    const redirectUri = getMetaRedirectUri(req);
+    logAuthRouteDebug({ route: "/auth/meta/start", computed_redirect_uri: redirectUri });
+
+    const requestedScopes = normalizeMetaScopes(req.query.scope);
+    const resource = getRequestedResource(req, getResourceUrl(req));
+    const clientRedirectUri = resolveClientRedirectUri(req);
+
+    // link_token lets an existing Google-authorized MCP token be carried through this
+    // flow, so a single connector ends up holding both Google and Meta credentials.
+    let linkedGoogle = null;
+    let linkedSessionId = null;
+    let linkedScope = null;
+    if (req.query.link_token) {
+      try {
+        const linked = decryptJson(String(req.query.link_token));
+        if (linked.typ === "mcp_access_token" || linked.typ === "mcp_refresh_token") {
+          linkedGoogle = linked.google || null;
+          linkedSessionId = linked.sessionId || null;
+          linkedScope = linked.scope || null;
+        }
+      } catch {
+        return res.status(400).json({
+          error: "invalid_link_token",
+          error_description: "link_token could not be decrypted. Pass an MCP access or refresh token issued by this server."
+        });
+      }
+    }
+
+    const appState = {
+      provider: "meta",
+      returnTo: req.query.return_to || "/",
+      clientRedirectUri,
+      clientState: req.query.state || null,
+      codeChallenge: req.query.code_challenge || null,
+      codeChallengeMethod: req.query.code_challenge_method || "S256",
+      scope: requestedScopes.join(" "),
+      resource,
+      audience: resource,
+      linkedGoogle,
+      linkedSessionId,
+      linkedScope,
+      issuedAt: Date.now()
+    };
+
+    const authUrl = new URL(`https://www.facebook.com/${getMetaGraphApiVersion()}/dialog/oauth`);
+    appendQueryParams(authUrl, {
+      client_id: requireMetaAppId(),
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: requestedScopes.join(","),
+      state: encryptJson(appState)
+    });
+
+    logAuthRouteDebug({ route: "/auth/meta/start", generated_auth_url: authUrl.toString() });
+    return res.redirect(302, authUrl.toString());
+  } catch (error) {
+    logAuthRouteDebug({
+      route: "/auth/meta/start",
+      error_message: error instanceof Error ? error.message : String(error),
+      error_stack: error instanceof Error ? error.stack : String(error)
+    });
+    return res.status(error?.statusCode || 500).json({
+      error: error?.oauthError || "auth_start_failed",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.get("/auth/meta/callback", async (req, res) => {
+  try {
+    // Meta reports user denial as error/error_description rather than an empty code.
+    if (req.query.error) {
+      return res.status(400).json({
+        error: String(req.query.error),
+        error_description: String(req.query.error_description || req.query.error_reason || "Meta authorization was denied.")
+      });
+    }
+
+    const { code, state } = req.query;
+    if (!code || !state) {
+      return res.status(400).json({ error: "Missing Meta OAuth code or state." });
+    }
+
+    const appState = decryptJson(String(state));
+    if (Date.now() - Number(appState.issuedAt || 0) > OAUTH_STATE_TTL_MS) {
+      return res.status(400).json({ error: "OAuth state expired. Start over from /auth/meta/start." });
+    }
+
+    const shortLived = await exchangeMetaCodeForToken(req, String(code));
+    if (!shortLived?.access_token) {
+      return res.status(400).json({ error: "Meta did not return an access token." });
+    }
+
+    // Always trade up to a long-lived token; the short-lived one dies in about an hour.
+    let tokenResponse = shortLived;
+    try {
+      const longLived = await exchangeMetaLongLivedToken(shortLived.access_token);
+      if (longLived?.access_token) tokenResponse = longLived;
+    } catch (error) {
+      logAuthRouteDebug({
+        route: "/auth/meta/callback",
+        long_lived_exchange_failed: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    // debug_token is authoritative about what was actually granted; the requested
+    // scope list is not, because the user can untick permissions in the dialog.
+    let grantedScopes = normalizeMetaScopes(appState.scope);
+    let metaUserId = null;
+    try {
+      const debug = await debugMetaToken(tokenResponse.access_token);
+      const data = debug.body?.data;
+      if (data?.scopes?.length) grantedScopes = normalizeMetaScopes(data.scopes.join(" "));
+      if (data?.user_id) metaUserId = String(data.user_id);
+    } catch (error) {
+      logAuthRouteDebug({
+        route: "/auth/meta/callback",
+        debug_token_failed: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    const metaCredentials = buildMetaCredentials(tokenResponse, grantedScopes, metaUserId);
+    const linkedGoogleScopes = appState.linkedGoogle ? normalizeScopes(appState.linkedGoogle.scope || appState.linkedScope) : [];
+    const combinedScope = Array.from(new Set([...linkedGoogleScopes, ...grantedScopes])).join(" ");
+
+    const sessionId = appState.linkedSessionId || crypto.randomUUID();
+    saveSession(sessionId, {
+      sessionId,
+      refreshToken: appState.linkedGoogle?.refreshToken || null,
+      accessToken: null,
+      expiryDate: 0,
+      scope: combinedScope,
+      tokenType: "Bearer",
+      meta: metaCredentials,
+      sessionExpiresAt: Date.now() + SESSION_TTL_MS
+    });
+
+    const authCode = encryptJson({
+      typ: "mcp_authorization_code",
+      iss: getBaseUrl(req),
+      aud: appState.resource,
+      resource: appState.resource,
+      sessionId,
+      scope: combinedScope,
+      codeChallenge: appState.codeChallenge,
+      codeChallengeMethod: appState.codeChallengeMethod,
+      exp: Date.now() + AUTH_CODE_TTL_MS,
+      google: appState.linkedGoogle || undefined,
+      meta: metaCredentials
+    });
+
+    if (appState.clientRedirectUri) {
+      const redirectUrl = new URL(String(appState.clientRedirectUri));
+      redirectUrl.searchParams.set("code", authCode);
+      if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
+      return res.redirect(redirectUrl.toString());
+    }
+
+    const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
+    successUrl.searchParams.set("auth", "success");
+    successUrl.searchParams.set("provider", "meta");
+    return res.redirect(successUrl.toString());
+  } catch (error) {
+    logAuthRouteDebug({
+      route: "/auth/meta/callback",
+      error_message: error instanceof Error ? error.message : String(error),
+      error_stack: error instanceof Error ? error.stack : String(error)
+    });
+    return res.status(500).json({
+      error: "OAuth callback failed.",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
 app.post("/oauth/token", async (req, res) => {
   try {
     const {
@@ -4673,11 +5799,12 @@ app.post("/oauth/token", async (req, res) => {
       const sessionId = payload.sessionId || crypto.randomUUID();
       const session = saveSession(sessionId, {
         sessionId,
-        refreshToken: payload.google.refreshToken,
-        accessToken: payload.google.accessToken,
-        expiryDate: payload.google.expiryDate,
-        scope: payload.google.scope || payload.scope,
-        tokenType: payload.google.tokenType || "Bearer",
+        refreshToken: payload.google?.refreshToken || null,
+        accessToken: payload.google?.accessToken || null,
+        expiryDate: payload.google?.expiryDate || 0,
+        scope: payload.google?.scope || payload.scope,
+        tokenType: payload.google?.tokenType || "Bearer",
+        meta: payload.meta?.accessToken ? payload.meta : null,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
       });
 
@@ -4685,13 +5812,15 @@ app.post("/oauth/token", async (req, res) => {
         sessionId,
         resource: payload.resource,
         scope: payload.scope,
-        google: session
+        google: session.refreshToken ? session : null,
+        meta: session.meta
       });
       const newRefreshToken = mintRefreshToken(req, {
         sessionId,
         resource: payload.resource,
         scope: payload.scope,
-        google: session
+        google: session.refreshToken ? session : null,
+        meta: session.meta
       });
 
       return res.json({
@@ -4746,37 +5875,70 @@ app.post("/oauth/token", async (req, res) => {
       const existingSession = getSession(sessionId);
       const session = existingSession || saveSession(sessionId, {
         sessionId,
-        refreshToken: payload.google.refreshToken,
+        refreshToken: payload.google?.refreshToken || null,
         accessToken: null,
         expiryDate: 0,
-        scope: payload.google.scope || payload.scope,
-        tokenType: payload.google.tokenType || "Bearer",
+        scope: payload.google?.scope || payload.scope,
+        tokenType: payload.google?.tokenType || "Bearer",
+        meta: payload.meta?.accessToken ? payload.meta : null,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
       });
 
-      const refreshed = await exchangeGoogleRefreshToken(req, session.refreshToken);
-      const grantedScopes = normalizeScopes(refreshed.scope || payload.scope);
-      const googleCredentials = saveSession(sessionId, {
-        ...session,
+      let googleCredentials = null;
+      let refreshedScope = null;
+      if (session.refreshToken) {
+        const refreshed = await exchangeGoogleRefreshToken(req, session.refreshToken);
+        refreshedScope = refreshed.scope;
+        googleCredentials = saveSession(sessionId, {
+          ...session,
+          sessionId,
+          accessToken: refreshed.access_token,
+          refreshToken: session.refreshToken,
+          expiryDate: refreshed.expiry_date,
+          scope: refreshed.scope || session.scope || payload.scope,
+          tokenType: refreshed.token_type || session.tokenType || "Bearer",
+          sessionExpiresAt: Date.now() + SESSION_TTL_MS
+        });
+      }
+
+      // Meta has no refresh token, but re-exchanging a still-valid long-lived token
+      // resets its 60-day window. Failure here must not break the Google refresh.
+      let metaCredentials = (googleCredentials || session).meta || session.meta || null;
+      if (metaCredentials?.accessToken) {
+        try {
+          const extended = await exchangeMetaLongLivedToken(metaCredentials.accessToken);
+          if (extended?.access_token) {
+            metaCredentials = buildMetaCredentials(extended, metaCredentials.scope, metaCredentials.userId);
+          }
+        } catch (error) {
+          console.log(JSON.stringify({
+            type: "meta_token_extend_failed",
+            message: error instanceof Error ? error.message : String(error)
+          }));
+        }
+      }
+
+      const grantedScopes = normalizeScopes(refreshedScope || session.scope || payload.scope);
+      saveSession(sessionId, {
+        ...(googleCredentials || session),
         sessionId,
-        accessToken: refreshed.access_token,
-        refreshToken: session.refreshToken,
-        expiryDate: refreshed.expiry_date,
-        scope: refreshed.scope || session.scope || payload.scope,
-        tokenType: refreshed.token_type || session.tokenType || "Bearer",
+        meta: metaCredentials,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
       });
+
       const accessToken = mintAccessToken(req, {
         sessionId,
         resource: payload.resource,
         scope: grantedScopes.join(" "),
-        google: googleCredentials
+        google: googleCredentials,
+        meta: metaCredentials
       });
       const newRefreshToken = mintRefreshToken(req, {
         sessionId,
         resource: payload.resource,
         scope: grantedScopes.join(" "),
-        google: googleCredentials
+        google: googleCredentials,
+        meta: metaCredentials
       });
 
       return res.json({

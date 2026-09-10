@@ -59,6 +59,12 @@ It exposes these MCP tools:
 - `list_callrail_trackers`
 - `get_callrail_resource`
 - `run_callrail_preset`
+- `list_meta_ad_accounts`
+- `list_meta_pages`
+- `list_meta_instagram_accounts`
+- `get_meta_token_info`
+- `query_meta_graph`
+- `run_meta_preset`
 - `list_marketing_presets`
 - `get_marketing_schema`
 - `list_marketing_guardrails`
@@ -120,6 +126,8 @@ Optional:
 - `GOOGLE_ADS_LOGIN_CUSTOMER_ID` for manager-account access in Google Ads
 - `GOOGLE_ADS_API_VERSION` to override the default Google Ads API version (`v22`)
 - `GOOGLE_ADS_ACCESS_LEVEL` to record the developer-token tier, `basic` (default) or `standard`
+- `META_APP_ID` and `META_APP_SECRET` for the Meta (Facebook / Instagram) tools
+- `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -158,6 +166,7 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 - GA4 access is preset-driven, metadata-driven, and report-driven. `run_ga4_preset` covers 24 expert reports; `get_ga4_metadata` and `check_ga4_compatibility` let ChatGPT discover valid dimensions, metrics, attributes, and filter compatibility before running `run_ga4_report`, `run_ga4_realtime_report`, `run_ga4_pivot_report`, `run_ga4_funnel_report`, `run_ga4_cohort_report`, or `batch_run_ga4_reports`.
 - Search Console supports Search Analytics via 14 presets plus period comparison, and Sites, Sitemaps, and URL Inspection. The aggregate Search Console UI Index Coverage report is not exposed as a matching public API; `inspect_search_console_url` is the URL-level API alternative.
 - CallRail support is read-only and centered on calls, summaries, time series, trackers, and generic read-only JSON endpoints via `get_callrail_resource`. `run_callrail_preset` adds 18 aggregated reports that normalize into the cross-platform schema.
+- Meta support covers three separate surfaces through one connector: Meta Ads (Marketing API insights), Facebook Page organic insights, and Instagram business insights. `query_meta_graph` is the raw escape hatch.
 - The expert preset layer is designed for common analyst workflows, while the raw tools remain available for deeper custom work.
 
 ## Expert Layer
@@ -195,6 +204,11 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
   - Segments: `calls_by_company`, `calls_by_device`, `calls_by_city`, `calls_by_lead_status`, `calls_by_tag`
   - Quality: `answered_vs_missed`, `first_time_vs_repeat`, `call_duration_buckets`
   - Trends: `daily_call_trends`
+- `run_meta_preset` supports 22 presets across three surfaces:
+  - Meta Ads: `ads_account_performance`, `ads_campaign_performance`, `ads_adset_performance`, `ads_ad_performance`, `ads_daily_trends`, `ads_conversions`, `ads_video_performance`
+  - Meta Ads breakdowns: `ads_by_age_gender`, `ads_by_country`, `ads_by_region`, `ads_by_platform`, `ads_by_device`, `ads_by_placement`
+  - Facebook Page organic: `page_overview`, `page_daily_trends`, `page_audience`, `page_posts`
+  - Instagram organic: `instagram_account_overview`, `instagram_daily_trends`, `instagram_media_performance`, `instagram_stories`, `instagram_audience`
 - Every preset returns:
   raw API output, generated request/query metadata, normalized cross-platform rows, and platform guardrails
 - `get_marketing_schema` returns the normalized marketing record format and cross-source field mappings.
@@ -262,6 +276,58 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 - Query rows are anonymised, so query totals are lower than the site total, and average position cannot be summed across rows.
 - The last two to three days are incomplete unless `dataState: "all"` is set.
 - `compare_search_console_periods` costs **two** Search Analytics requests and returns per-key deltas plus a `new` / `lost` / `both` status. Position deltas are sign-flipped so positive always means improved.
+
+## Meta notes (Facebook / Instagram)
+
+### Setup
+
+1. Create a Meta app and add the **Facebook Login for Business** product.
+2. Set the redirect URI to `https://<your-domain>/auth/meta/callback`. Note there is **no** `/api` prefix: `vercel.json` rewrites every path to `api/index.js`, but Express still matches the original path.
+3. Paste that URI into **Valid OAuth Redirect URIs**. The *Redirect URI Validator* on the same page is only a checker; pasting it there does not allow-list it.
+4. Set `META_APP_ID` and `META_APP_SECRET`, and set `META_GRAPH_API_VERSION` to a Graph version Meta still supports.
+5. Send the user to `/auth/meta/start`.
+
+### Permissions
+
+All of these require **Meta App Review**. Until the app is approved, only its own admins, developers, and testers can grant them:
+
+| Permission | Needed for |
+|---|---|
+| `ads_read` | Meta Ads insights |
+| `business_management` | Business-owned ad accounts and pages |
+| `pages_show_list` | Listing Pages |
+| `pages_read_engagement`, `read_insights` | Page insights and posts |
+| `instagram_basic`, `instagram_manage_insights` | Instagram account and media insights |
+
+`run_meta_preset` checks the granted scopes for the surface being queried and returns a clear `insufficient_meta_permissions` error rather than a raw Meta failure.
+
+### Tokens
+
+- Meta has **no refresh tokens**. The callback exchanges the short-lived token for a long-lived one (about 60 days) and stores that.
+- Refreshing an MCP token re-exchanges the Meta token, which resets the 60-day window. Connect at least once every 60 days and access continues indefinitely; let it lapse and the user must re-authorize.
+- `get_meta_token_info` reports granted scopes, the Meta user, and `daysUntilExpiry`.
+- Granted scopes come from `debug_token`, not from what was requested, because users can untick permissions in the dialog.
+- Page access tokens are never returned by any tool. They are resolved server-side when a Page or Instagram preset needs one, which costs one extra Graph request (reported as `requestCount`).
+- `query_meta_graph` rejects caller-supplied `access_token`, `appsecret_proof`, or `client_secret` instead of honouring them.
+- Requests are signed with `appsecret_proof`, and tokens are stripped from debug logs.
+
+### Connecting Google and Meta together
+
+The two providers have separate flows. To hold both in **one** connector, pass an existing Google-authorized MCP token when starting the Meta flow:
+
+```
+/auth/meta/start?link_token=<existing MCP access or refresh token>
+```
+
+The resulting token carries both credential sets, so Google and Meta tools work in the same session. Without `link_token`, the Meta flow produces a Meta-only session and Google tools return `no_valid_session`.
+
+### Known API limits
+
+- Meta rotates and deprecates insight metric names between Graph versions. Every preset accepts a `metrics` override, and `instagram_account_overview` in particular is a common casualty. If a preset returns no rows, check `notes` and the raw error.
+- Conversions are read from the `actions` array. Which `action_type` counts as a conversion depends on the pixel setup, so `conversionActionType` is configurable; the default prefers purchase-type actions and the raw `actions` array is always returned.
+- Meta attributes conversions on its **own** attribution windows, so Meta conversion counts will not tie out exactly against GA4 or Google Ads. Compare trends, not absolute totals.
+- Instagram follower demographics need at least 100 followers; Instagram stories only cover the last 24 hours.
+- No auto-pagination. Page explicitly with the returned `nextCursor`.
 
 ## CallRail notes
 
