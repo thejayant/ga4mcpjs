@@ -153,31 +153,37 @@ const MERCHANT_PRESET_DEFINITIONS = {
   product_performance: {
     entityType: "product",
     view: "ProductPerformanceView",
+    table: "product_performance_view",
     description: "Product clicks, impressions, CTR, conversions and conversion value. Set marketingMethod to ORGANIC for free listings or ADS for Shopping ads."
   },
   product_status: {
     entityType: "product",
     view: "ProductView",
+    table: "product_view",
     description: "Current feed snapshot: availability, condition, approval status per reporting context, click potential and item issues. Not a time series."
   },
   price_competitiveness: {
     entityType: "product",
     view: "PriceCompetitivenessProductView",
+    table: "price_competitiveness_product_view",
     description: "Your price against the benchmark price other merchants charge for the same product. Requires reportCountryCode."
   },
   price_insights: {
     entityType: "product",
     view: "PriceInsightsProductView",
+    table: "price_insights_product_view",
     description: "Google suggested price per product plus predicted clicks, impressions and conversions change at that price."
   },
   best_sellers: {
     entityType: "product",
     view: "BestSellersProductClusterView",
+    table: "best_sellers_product_cluster_view",
     description: "Best selling product clusters with rank, relative demand and inventory status. Requires reportDate and reportCountryCode."
   },
   competitive_visibility: {
     entityType: "domain",
     view: "CompetitiveVisibilityCompetitorView",
+    table: "competitive_visibility_competitor_view",
     description: "Competing domains in Shopping surfaces with relative visibility, page overlap and higher-position rate. Requires reportCountryCode."
   }
 };
@@ -1157,6 +1163,18 @@ function quoteMerchantLiteral(value) {
   return `'${String(value).replace(/'/g, "\\'")}'`;
 }
 
+// best_sellers_product_cluster_view only accepts a report_date that is the first
+// day of a week (Monday) or of a month, depending on granularity.
+function snapMerchantReportDate(date, granularity) {
+  const d = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  if (String(granularity).toUpperCase() === "MONTHLY") {
+    return `${d.toISOString().slice(0, 7)}-01`;
+  }
+  const backToMonday = (d.getUTCDay() + 6) % 7;
+  return new Date(d.getTime() - backToMonday * 86400000).toISOString().slice(0, 10);
+}
+
 function buildMerchantPresetQuery(params) {
   const dateRange = resolveDateWindow(params);
   const limit = Number(params.limit || 100);
@@ -1165,71 +1183,80 @@ function buildMerchantPresetQuery(params) {
   const country = params.reportCountryCode ? String(params.reportCountryCode).toUpperCase() : null;
   const dailyField = params.includeDailyBreakdown === true ? ", date" : "";
 
-  function compose(select, view, where, orderBy) {
+  // The Merchant reports query language uses snake_case table and field names.
+  // Responses come back camelCase, which is what normalizeMerchantPresetRows reads.
+  function compose(select, table, where, orderBy) {
     const clauses = [...where.filter(Boolean), ...extra];
     const whereSql = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
     const orderSql = params.orderBy ? ` ORDER BY ${params.orderBy}` : (orderBy ? ` ORDER BY ${orderBy}` : "");
-    return `SELECT ${select} FROM ${view}${whereSql}${orderSql}${limitSql}`;
+    return `SELECT ${select} FROM ${table}${whereSql}${orderSql}${limitSql}`;
   }
 
   const presets = {
     product_performance: () => compose(
-      `offerId, title, brand, categoryL1, customerCountryCode, marketingMethod${dailyField}, clicks, impressions, clickThroughRate, conversions, conversionValue, conversionRate`,
-      "ProductPerformanceView",
+      `offer_id, title, brand, category_l1, customer_country_code, marketing_method${dailyField}, clicks, impressions, click_through_rate, conversions, conversion_value, conversion_rate`,
+      "product_performance_view",
       [
         `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
-        params.marketingMethod ? `marketingMethod = ${quoteMerchantLiteral(String(params.marketingMethod).toUpperCase())}` : null,
-        country ? `customerCountryCode = ${quoteMerchantLiteral(country)}` : null
+        params.marketingMethod ? `marketing_method = ${quoteMerchantLiteral(String(params.marketingMethod).toUpperCase())}` : null,
+        country ? `customer_country_code = ${quoteMerchantLiteral(country)}` : null
       ],
       "clicks DESC"
     ),
     product_status: () => compose(
-      `offerId, id, title, brand, condition, availability, channel, feedLabel, languageCode, aggregatedReportingContextStatus, clickPotential, clickPotentialRank${params.includeItemIssues === false ? "" : ", itemIssues"}`,
-      "ProductView",
-      [params.aggregatedStatus ? `aggregatedReportingContextStatus = ${quoteMerchantLiteral(String(params.aggregatedStatus).toUpperCase())}` : null],
+      `offer_id, id, title, brand, condition, availability, channel, feed_label, language_code, aggregated_reporting_context_status, click_potential, click_potential_rank${params.includeItemIssues === false ? "" : ", item_issues"}`,
+      "product_view",
+      [params.aggregatedStatus ? `aggregated_reporting_context_status = ${quoteMerchantLiteral(String(params.aggregatedStatus).toUpperCase())}` : null],
       null
     ),
     price_competitiveness: () => compose(
-      "offerId, id, title, brand, price, benchmarkPrice, reportCountryCode, categoryL1",
-      "PriceCompetitivenessProductView",
-      [country ? `reportCountryCode = ${quoteMerchantLiteral(country)}` : null],
+      "offer_id, id, title, brand, price, benchmark_price, report_country_code, category_l1",
+      "price_competitiveness_product_view",
+      [country ? `report_country_code = ${quoteMerchantLiteral(country)}` : null],
       null
     ),
     price_insights: () => compose(
-      "offerId, id, title, brand, price, suggestedPrice, effectiveness, predictedClicksChangeFraction, predictedImpressionsChangeFraction, predictedConversionsChangeFraction",
-      "PriceInsightsProductView",
+      "offer_id, id, title, brand, price, suggested_price, effectiveness, predicted_clicks_change_fraction, predicted_impressions_change_fraction, predicted_conversions_change_fraction",
+      "price_insights_product_view",
       [],
       null
     ),
     best_sellers: () => compose(
-      "title, brand, rank, previousRank, relativeDemand, previousRelativeDemand, relativeDemandChange, inventoryStatus, brandInventoryStatus, reportDate, reportCountryCode, reportCategoryId, reportGranularity",
-      "BestSellersProductClusterView",
+      "title, brand, rank, previous_rank, relative_demand, previous_relative_demand, relative_demand_change, inventory_status, brand_inventory_status, report_date, report_country_code, report_category_id, report_granularity",
+      "best_sellers_product_cluster_view",
       [
-        `reportDate = '${params.reportDate || dateRange.endDate}'`,
-        `reportGranularity = ${quoteMerchantLiteral(String(params.reportGranularity || "WEEKLY").toUpperCase())}`,
-        country ? `reportCountryCode = ${quoteMerchantLiteral(country)}` : null,
-        params.reportCategoryId ? `reportCategoryId = ${quoteMerchantLiteral(params.reportCategoryId)}` : null
+        `report_date = '${snapMerchantReportDate(params.reportDate || dateRange.endDate, params.reportGranularity || "WEEKLY")}'`,
+        `report_granularity = ${quoteMerchantLiteral(String(params.reportGranularity || "WEEKLY").toUpperCase())}`,
+        country ? `report_country_code = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `report_category_id = ${Number(params.reportCategoryId)}` : null
       ],
       "rank ASC"
     ),
     competitive_visibility: () => compose(
-      "domain, rank, relativeVisibility, adsOrganicRatio, pageOverlapRate, higherPositionRate, isYourDomain, trafficSource, date, reportCountryCode",
-      "CompetitiveVisibilityCompetitorView",
+      "domain, rank, relative_visibility, ads_organic_ratio, page_overlap_rate, higher_position_rate, is_your_domain, traffic_source, date, report_country_code, report_category_id",
+      "competitive_visibility_competitor_view",
       [
         `date BETWEEN '${dateRange.startDate}' AND '${dateRange.endDate}'`,
-        country ? `reportCountryCode = ${quoteMerchantLiteral(country)}` : null,
-        params.reportCategoryId ? `reportCategoryId = ${quoteMerchantLiteral(params.reportCategoryId)}` : null
+        country ? `report_country_code = ${quoteMerchantLiteral(country)}` : null,
+        params.reportCategoryId ? `report_category_id = ${Number(params.reportCategoryId)}` : null
       ],
-      "relativeVisibility DESC"
+      "relative_visibility DESC"
     )
   };
 
+  if (params.preset === "competitive_visibility" && !params.reportCategoryId) {
+    throw new Error(
+      "competitive_visibility requires reportCategoryId (a numeric Google product category ID, for example 536 for Home & Garden). " +
+      "Run the product_performance preset first and use the category_l1 it reports to pick one."
+    );
+  }
   const build = presets[params.preset];
   if (!build) throw new Error(`Unsupported Merchant Center preset: ${params.preset}`);
   const definition = MERCHANT_PRESET_DEFINITIONS[params.preset];
   return {
     entityType: definition.entityType,
     view: definition.view,
+    table: definition.table,
     query: build(),
     dateRange,
     limit,

@@ -176,6 +176,9 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 - `run_merchant_preset` with `product_performance` and `marketingMethod: "ORGANIC"` reports free listing traffic, so it works without a Google Ads account.
 - `product_status`, `price_competitiveness` and `price_insights` are current snapshots and ignore the date range. `best_sellers` needs `reportDate` plus `reportCountryCode`; `competitive_visibility` needs `reportCountryCode`.
 - Set `includeItemIssues: false` on `product_status` if selecting the repeated `itemIssues` field is rejected for the account.
+- Report queries use snake_case table and field names (`product_performance_view`, `offer_id`), while responses come back camelCase (`productPerformanceView`, `offerId`).
+- `competitive_visibility` requires `reportCategoryId`, a numeric Google product category ID such as 536 for Home & Garden, and it is sent unquoted because the field is a number.
+- `best_sellers` snaps `reportDate` to the Monday of that week for WEEKLY granularity, or to the first of the month for MONTHLY, because the API rejects any other date.
 - Google may require the Cloud project to be registered for Merchant API access before Merchant Center requests succeed.
 - The Merchant Center OAuth scope is not read-only; this server exposes only read-only Merchant Center MCP tools.
 - `search_merchant_reports` is the reporting entry point for performance and diagnostic-style Merchant datasets that are available through the Merchant API.
