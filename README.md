@@ -396,6 +396,20 @@ CallRail authenticates with an API key rather than OAuth. The key is collected o
 - `get_callrail_connection` reports which account a session is attached to and a masked fingerprint of the key. No tool returns the key itself.
 - Connect later at `/auth/callrail`, reached by running the connector setup again.
 
+### Key lifecycle
+
+| Event | What happens to the key |
+|---|---|
+| Entered on the connect screen | Sealed into that session's token and stored server-side |
+| Token refresh | Carried forward; the connection keeps working |
+| Server cold start | Rebuilt from the token, so it survives |
+| Connector removed | The client destroys the token.  also drops the stored session |
+| Connector reconnected | A new session is minted with no key, and the connect screen asks again |
+
+The key lives in two places: sealed inside the session token, and in the server's session store. Tokens are self-contained so any serverless instance can serve them, which means a token someone still holds keeps working even after revocation. The protection when a connector is removed is that the client destroys the token, and the key exists nowhere else. It is never written to logs and never returned by a tool.
+
+To change or remove a key, reconnect the connector. Because the token carries the key, editing it in place would not reliably take effect across serverless instances.
+
 ### Environment variables
 
 | Variable | Effect |

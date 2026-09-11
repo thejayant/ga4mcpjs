@@ -1128,7 +1128,7 @@ function renderCallRailConnectPage(options = {}) {
     '<label for="apiKey">CallRail API key</label>',
     '<input id="apiKey" name="apiKey" type="password" required autocomplete="off" ',
     'spellcheck="false" autocapitalize="off" placeholder="Paste your API key">',
-    '<span class="hint">CallRail: Account &rarr; Integrations &rarr; API Keys. The key is stored encrypted in your session and never shown again.</span>',
+    '<span class="hint">CallRail: Account &rarr; Integrations &rarr; API Keys. Stored encrypted in this connection only. It stays until you remove or reconnect the connector, and is never shown again.</span>',
     "</span>",
     '<button class="cta" type="submit">Connect CallRail</button>',
     "</form>",
@@ -6733,6 +6733,36 @@ app.get("/auth/callrail/skip", (req, res) => {
   }
 });
 
+// RFC 7009. Clients call this when a connector is removed. Tokens are self-contained so
+// that any serverless instance can serve them, which means a token the client still
+// holds keeps working; what this does is drop the stored session, so the CallRail key
+// and Meta token held server-side stop existing. The real protection when someone
+// removes a connector is that the client destroys the token, and the key lives nowhere
+// else.
+app.post("/oauth/revoke", (req, res) => {
+  // The spec requires 200 for an invalid or already-revoked token, so nothing here
+  // distinguishes a bad token from a good one.
+  try {
+    const token = req.body?.token;
+    if (token) {
+      const payload = decryptJson(String(token));
+      if (payload?.sessionId) {
+        const existed = Boolean(getSession(payload.sessionId));
+        deleteSession(payload.sessionId);
+        logAuthRouteDebug({
+          route: "/oauth/revoke",
+          session_found: existed,
+          had_callrail: Boolean(payload.callrail?.apiKey),
+          had_meta: Boolean(payload.meta?.accessToken)
+        });
+      }
+    }
+  } catch {
+    // Undecryptable token: nothing to revoke, and the spec still wants a 200.
+  }
+  return res.status(200).end();
+});
+
 app.post("/oauth/token", async (req, res) => {
   try {
     const {
@@ -7008,6 +7038,7 @@ function buildAuthorizationServerMetadata(req) {
     authorization_endpoint: `${baseUrl}/auth/google/start`,
     token_endpoint: `${baseUrl}/oauth/token`,
     registration_endpoint: `${baseUrl}/register`,
+    revocation_endpoint: `${baseUrl}/oauth/revoke`,
     scopes_supported: GOOGLE_SCOPES,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
