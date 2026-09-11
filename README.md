@@ -386,21 +386,30 @@ The resulting token carries both credential sets, so Google and Meta tools work 
 
 The Google Ads developer token, and optionally the CallRail key, are central resources handed to whoever connects. Google meters Ads quota **per developer token, not per user**, so an unrestricted server lets a stranger exhaust the team's daily Basic Access allowance just by querying their own accounts. Sustained abuse can also get a developer token suspended. Access is therefore gated on who is connecting.
 
-Two ways to qualify:
+An address qualifies if **any one** of these is true:
 
-1. The address is on an allowed domain: `cibirix.com`.
-2. The address is on a partner domain (`sensei.com`, `senseidigita.com`, `shelterscore.com`) **and** its local part contains `cibirix` or `cbx`. Those domains are shared with people outside the team, so an address there has to identify itself.
-
-So `jayant@cibirix.com` and `jayant.cibirix@sensei.com` connect; `john@sensei.com` and `stranger@gmail.com` do not.
-
-| Variable | Effect |
+| Rule | Example |
 |---|---|
-| `ALLOWED_EMAIL_DOMAINS` | Domains allowed outright. Default `cibirix.com`. |
-| `ALLOWED_PARTNER_DOMAINS` | Domains that additionally require a marker. Default `sensei.com,senseidigita.com,shelterscore.com`. |
-| `ALLOWED_EMAIL_MARKERS` | Markers accepted in the local part. Default `cibirix,cbx`. |
-| `ACCESS_ALLOWLIST_DISABLED` | Set to `true` to turn the gate off entirely. |
+| It is named explicitly in `ALLOWED_EMAILS` | anything you list |
+| Its domain is in `ALLOWED_EMAIL_DOMAINS` | `jayant@cibirix.com` |
+| Its domain is in `ALLOWED_PARTNER_DOMAINS` | `john@sensei.com` |
+| Its local part contains a marker from `ALLOWED_EMAIL_MARKERS` | `jayant.cibirix@gmail.com` |
 
-Setting any list replaces its default rather than adding to it. Empty lists mean no enforcement.
+| Variable | Default |
+|---|---|
+| `ALLOWED_EMAILS` | empty |
+| `ALLOWED_EMAIL_DOMAINS` | `cibirix.com` |
+| `ALLOWED_PARTNER_DOMAINS` | `sensei.com,senseidigita.com,shelterscore.com` |
+| `ALLOWED_EMAIL_MARKERS` | `cibirix,cbx` |
+| `ACCESS_ALLOWLIST_DISABLED` | unset; set to `true` to turn the gate off |
+
+Setting any list replaces its default rather than adding to it. If every list is empty the gate is off.
+
+### What the marker rule does and does not do
+
+The marker rule accepts a personal mailbox such as `jayant.cibirix@gmail.com`, which is its purpose. It follows that it accepts **any** address a stranger chooses to put `cibirix` or `cbx` in, on any domain: `cbx@attacker.com` gets in. Anyone can create such a mailbox in a minute.
+
+So treat markers as a convenience for people you already know, not as a security boundary. The domain rules are the boundary. If that trade is not worth it, clear `ALLOWED_EMAIL_MARKERS` and list the handful of personal addresses in `ALLOWED_EMAILS` instead, which gives the same access without the open pattern. `describeAllowlist` reports `markerRuleAcceptsAnyDomain` so the current posture is visible in `/debug/integrations`.
 
 ### How it is enforced
 

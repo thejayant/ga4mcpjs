@@ -1574,37 +1574,55 @@ function getEmailMarkers() {
   return parseListEnv("ALLOWED_EMAIL_MARKERS", DEFAULT_EMAIL_MARKERS);
 }
 
+// Named addresses, for people on mailboxes no rule covers.
+function getAllowedEmails() {
+  return parseListEnv("ALLOWED_EMAILS", []);
+}
+
 function isAllowlistEnforced() {
   if (["1", "true", "yes"].includes(String(process.env.ACCESS_ALLOWLIST_DISABLED || "").toLowerCase())) {
     return false;
   }
-  return getAllowedDomains().length > 0 || getPartnerDomains().length > 0;
+  return getAllowedDomains().length > 0
+    || getPartnerDomains().length > 0
+    || getEmailMarkers().length > 0
+    || getAllowedEmails().length > 0;
 }
+
+const EMAIL_SHAPE = /^[^\s@]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 
 function splitEmail(email) {
   const value = String(email || "").trim().toLowerCase();
   // Exactly one @ and a hostname-shaped domain. Splitting on the last @ alone would let
   // "x@evil.com?@cibirix.com" read as the cibirix.com domain.
-  if (!/^[^s@]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(value)) return null;
+  if (!EMAIL_SHAPE.test(value)) return null;
   const at = value.lastIndexOf("@");
   return { local: value.slice(0, at), domain: value.slice(at + 1), email: value };
 }
 
-// Two ways in: the address is on a domain we own outright, or it is on a partner domain
-// and the local part carries one of our markers.
+// Any one of these is enough on its own: an exact address, a domain we own, a partner
+// domain, or a marker in the local part.
+//
+// The marker rule deliberately accepts personal mailboxes such as
+// jayant.cibirix@gmail.com, which means it also accepts any address a stranger chooses
+// to put "cibirix" or "cbx" in. It is a convenience rule, not a security boundary. Use
+// ALLOWED_EMAILS for named personal accounts if that matters more than the convenience.
 function isEmailAllowed(email) {
   if (!isAllowlistEnforced()) return { allowed: true, reason: "allowlist_disabled" };
   const parts = splitEmail(email);
   if (!parts) return { allowed: false, reason: "no_email" };
+  if (getAllowedEmails().includes(parts.email)) {
+    return { allowed: true, reason: "exact_address", email: parts.email };
+  }
   if (getAllowedDomains().includes(parts.domain)) {
     return { allowed: true, reason: "allowed_domain", domain: parts.domain };
   }
   if (getPartnerDomains().includes(parts.domain)) {
-    const marker = getEmailMarkers().find((m) => parts.local.includes(m));
-    if (marker) return { allowed: true, reason: "partner_domain_with_marker", domain: parts.domain, marker };
-    return { allowed: false, reason: "partner_domain_without_marker", domain: parts.domain };
+    return { allowed: true, reason: "partner_domain", domain: parts.domain };
   }
-  return { allowed: false, reason: "domain_not_allowed", domain: parts.domain };
+  const marker = getEmailMarkers().find((m) => parts.local.includes(m));
+  if (marker) return { allowed: true, reason: "email_marker", domain: parts.domain, marker };
+  return { allowed: false, reason: "no_matching_rule", domain: parts.domain };
 }
 
 // The id_token comes straight back from Google's token endpoint over TLS in response to
@@ -1625,7 +1643,9 @@ function describeAllowlist() {
     enforced: isAllowlistEnforced(),
     allowedDomains: getAllowedDomains(),
     partnerDomains: getPartnerDomains(),
-    emailMarkers: getEmailMarkers()
+    emailMarkers: getEmailMarkers(),
+    allowedEmails: getAllowedEmails(),
+    markerRuleAcceptsAnyDomain: getEmailMarkers().length > 0
   };
 }
 
