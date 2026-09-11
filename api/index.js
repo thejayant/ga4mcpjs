@@ -9,7 +9,11 @@ const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonl
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const MERCHANT_CENTER_SCOPE = "https://www.googleapis.com/auth/content";
 const GOOGLE_ADS_SCOPE = "https://www.googleapis.com/auth/adwords";
-const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE];
+// Requested purely so the callback can read which account is connecting. Without an
+// identity scope Google returns no email and the allowlist has nothing to check.
+const OPENID_SCOPE = "openid";
+const EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
+const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE, OPENID_SCOPE, EMAIL_SCOPE];
 // Meta permissions. All of these require App Review before anyone outside the app's own
 // admins, developers and testers can grant them.
 const META_ADS_SCOPE = "ads_read";
@@ -1543,6 +1547,88 @@ function extractBearerToken(req) {
 // The shared environment token is every user of this server querying the deployer's
 // own CallRail account, so it is off unless someone deliberately turns it on for a
 // single-tenant deployment.
+// This server hands every user the same Google Ads developer token and, optionally, the
+// same CallRail key. Those are metered and owned centrally, so who may connect has to be
+// controlled here rather than left to whoever finds the URL.
+const DEFAULT_ALLOWED_DOMAINS = ["cibirix.com"];
+// Partner domains are shared with people who are not on the team, so an address there
+// must also identify itself as one of ours.
+const DEFAULT_PARTNER_DOMAINS = ["sensei.com", "senseidigita.com", "shelterscore.com"];
+const DEFAULT_EMAIL_MARKERS = ["cibirix", "cbx"];
+
+function parseListEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  return String(raw).split(/[,\s]+/).map((v) => v.trim().toLowerCase()).filter(Boolean);
+}
+
+function getAllowedDomains() {
+  return parseListEnv("ALLOWED_EMAIL_DOMAINS", DEFAULT_ALLOWED_DOMAINS);
+}
+
+function getPartnerDomains() {
+  return parseListEnv("ALLOWED_PARTNER_DOMAINS", DEFAULT_PARTNER_DOMAINS);
+}
+
+function getEmailMarkers() {
+  return parseListEnv("ALLOWED_EMAIL_MARKERS", DEFAULT_EMAIL_MARKERS);
+}
+
+function isAllowlistEnforced() {
+  if (["1", "true", "yes"].includes(String(process.env.ACCESS_ALLOWLIST_DISABLED || "").toLowerCase())) {
+    return false;
+  }
+  return getAllowedDomains().length > 0 || getPartnerDomains().length > 0;
+}
+
+function splitEmail(email) {
+  const value = String(email || "").trim().toLowerCase();
+  // Exactly one @ and a hostname-shaped domain. Splitting on the last @ alone would let
+  // "x@evil.com?@cibirix.com" read as the cibirix.com domain.
+  if (!/^[^s@]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(value)) return null;
+  const at = value.lastIndexOf("@");
+  return { local: value.slice(0, at), domain: value.slice(at + 1), email: value };
+}
+
+// Two ways in: the address is on a domain we own outright, or it is on a partner domain
+// and the local part carries one of our markers.
+function isEmailAllowed(email) {
+  if (!isAllowlistEnforced()) return { allowed: true, reason: "allowlist_disabled" };
+  const parts = splitEmail(email);
+  if (!parts) return { allowed: false, reason: "no_email" };
+  if (getAllowedDomains().includes(parts.domain)) {
+    return { allowed: true, reason: "allowed_domain", domain: parts.domain };
+  }
+  if (getPartnerDomains().includes(parts.domain)) {
+    const marker = getEmailMarkers().find((m) => parts.local.includes(m));
+    if (marker) return { allowed: true, reason: "partner_domain_with_marker", domain: parts.domain, marker };
+    return { allowed: false, reason: "partner_domain_without_marker", domain: parts.domain };
+  }
+  return { allowed: false, reason: "domain_not_allowed", domain: parts.domain };
+}
+
+// The id_token comes straight back from Google's token endpoint over TLS in response to
+// a request carrying our client secret, so the payload is read directly.
+function readEmailFromIdToken(idToken) {
+  const parts = String(idToken || "").split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return payload?.email ? String(payload.email).toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function describeAllowlist() {
+  return {
+    enforced: isAllowlistEnforced(),
+    allowedDomains: getAllowedDomains(),
+    partnerDomains: getPartnerDomains(),
+    emailMarkers: getEmailMarkers()
+  };
+}
+
 function allowsSharedCallRailToken() {
   return ["1", "true", "yes"].includes(String(process.env.CALLRAIL_ALLOW_SHARED_TOKEN || "").toLowerCase());
 }
@@ -1728,7 +1814,10 @@ function sealGoogleSection(google) {
   return {
     refreshToken: google.refreshToken,
     scope: google.scope,
-    tokenType: google.tokenType || "Bearer"
+    tokenType: google.tokenType || "Bearer",
+    // Kept so access can be re-checked on every call, which is what makes removing
+    // someone from the allowlist take effect immediately rather than in 30 days.
+    email: google.email || null
   };
 }
 
@@ -1912,6 +2001,7 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
         fallbackScope: payload.scope
       }),
       tokenType: payload.google?.tokenType || "Bearer",
+      email: session?.email || payload.google?.email || null,
       meta: session?.meta || (payload.meta?.accessToken ? payload.meta : null),
       callrail: session?.callrail || (payload.callrail?.apiKey ? payload.callrail : null),
       sessionExpiresAt: Date.now() + SESSION_TTL_MS
@@ -1925,6 +2015,22 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       details: { debug: "no_valid_session" }
     });
   }
+  // Re-checked per request rather than only at connect, so taking someone off the
+  // allowlist cuts them off now instead of when their token eventually expires.
+  const sessionEmail = session.email || payload.google?.email || null;
+  const sessionAccess = isEmailAllowed(sessionEmail);
+  if (!sessionAccess.allowed) {
+    if (sessionId) deleteSession(sessionId);
+    throw buildAuthError({
+      httpStatus: 403,
+      error: "access_denied",
+      errorDescription: sessionAccess.reason === "no_email"
+        ? "This connection predates access control. Reconnect to continue."
+        : "This account is not permitted to use this server.",
+      details: { debug: "not_on_allowlist", reason: sessionAccess.reason }
+    });
+  }
+
   const grantedScopes = normalizeScopes(session.scope || payload.scope);
   if (!hasScopes(grantedScopes, requiredScopes)) {
     throw buildAuthError({
@@ -3639,6 +3745,7 @@ function getEnvironmentPresence() {
     META_LOGIN_CONFIG_ID: Boolean(process.env.META_LOGIN_CONFIG_ID),
     CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
     CALLRAIL_ALLOW_SHARED_TOKEN: allowsSharedCallRailToken(),
+    ACCESS_ALLOWLIST: describeAllowlist(),
     CALLRAIL_OFFER_STEP: shouldOfferCallRail(),
     CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
   };
@@ -6105,9 +6212,39 @@ app.get("/auth/google/callback", async (req, res) => {
       });
     }
 
+    // Check who this is before issuing anything. The Google Ads developer token and any
+    // shared CallRail key are central resources handed to whoever connects, so the gate
+    // belongs here rather than at the tools.
+    const connectingEmail = readEmailFromIdToken(tokens.id_token);
+    const access = isEmailAllowed(connectingEmail);
+    if (!access.allowed) {
+      logAuthRouteDebug({
+        route: "/auth/google/callback",
+        access_denied: true,
+        reason: access.reason,
+        domain: access.domain || null
+      });
+      return sendAuthStatusPage(res, {
+        httpStatus: 403,
+        title: "Access not available",
+        heading: "This account can't connect",
+        message: access.reason === "no_email"
+          ? "Google did not return an email address for this account, so access could not be checked. Reconnect and allow the email permission."
+          : "This server is limited to the team. Sign in again with your work account, or ask an admin to add your address.",
+        google: "failed",
+        meta: "pending",
+        callrail: "hidden",
+        autoAdvance: false,
+        redirectUrl: `${getBaseUrl(req)}/auth/google/start`,
+        continueLabel: "Try a different account",
+        footnote: connectingEmail ? `Signed in as ${connectingEmail}` : ""
+      });
+    }
+
     const grantedScopes = normalizeGoogleAuthScopes(tokens.scope || appState.scope);
     const sessionId = crypto.randomUUID();
     saveSession(sessionId, {
+      email: connectingEmail,
       sessionId,
       refreshToken: tokens.refresh_token,
       accessToken: tokens.access_token,
@@ -6145,6 +6282,7 @@ app.get("/auth/google/callback", async (req, res) => {
         sessionId,
         googleAuthCode: authCode,
         google: {
+          email: connectingEmail,
           refreshToken: tokens.refresh_token,
           accessToken: tokens.access_token,
           expiryDate: tokens.expiry_date,
@@ -6172,6 +6310,7 @@ app.get("/auth/google/callback", async (req, res) => {
         return buildCallRailStepUrl(req, {
           sessionId,
           google: {
+            email: connectingEmail,
             refreshToken: tokens.refresh_token,
             accessToken: tokens.access_token,
             expiryDate: tokens.expiry_date,

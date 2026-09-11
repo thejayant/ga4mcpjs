@@ -382,6 +382,38 @@ The resulting token carries both credential sets, so Google and Meta tools work 
 - Instagram follower demographics need at least 100 followers; Instagram stories only cover the last 24 hours.
 - No auto-pagination. Page explicitly with the returned `nextCursor`.
 
+## Access control
+
+The Google Ads developer token, and optionally the CallRail key, are central resources handed to whoever connects. Google meters Ads quota **per developer token, not per user**, so an unrestricted server lets a stranger exhaust the team's daily Basic Access allowance just by querying their own accounts. Sustained abuse can also get a developer token suspended. Access is therefore gated on who is connecting.
+
+Two ways to qualify:
+
+1. The address is on an allowed domain: `cibirix.com`.
+2. The address is on a partner domain (`sensei.com`, `senseidigita.com`, `shelterscore.com`) **and** its local part contains `cibirix` or `cbx`. Those domains are shared with people outside the team, so an address there has to identify itself.
+
+So `jayant@cibirix.com` and `jayant.cibirix@sensei.com` connect; `john@sensei.com` and `stranger@gmail.com` do not.
+
+| Variable | Effect |
+|---|---|
+| `ALLOWED_EMAIL_DOMAINS` | Domains allowed outright. Default `cibirix.com`. |
+| `ALLOWED_PARTNER_DOMAINS` | Domains that additionally require a marker. Default `sensei.com,senseidigita.com,shelterscore.com`. |
+| `ALLOWED_EMAIL_MARKERS` | Markers accepted in the local part. Default `cibirix,cbx`. |
+| `ACCESS_ALLOWLIST_DISABLED` | Set to `true` to turn the gate off entirely. |
+
+Setting any list replaces its default rather than adding to it. Empty lists mean no enforcement.
+
+### How it is enforced
+
+- The flow requests `openid` and the email scope. Without an identity scope Google returns no email and there is nothing to check.
+- The email is read from the `id_token`, which comes straight back from Google's token endpoint over TLS in response to a request carrying the client secret.
+- A refused account gets a clear screen, and no authorization code is issued.
+- The address is sealed into the session token and **re-checked on every request**, so removing someone from the allowlist cuts them off immediately rather than when their token expires. Their stored session is dropped at the same time.
+- Connections made before this existed carry no email and are refused with a message telling the user to reconnect.
+
+### Choosing between a shared CallRail key and per-user keys
+
+With the allowlist in place, a shared key becomes a reasonable choice for a single team: set `CALLRAIL_ALLOW_SHARED_TOKEN=true` and the CallRail step disappears, since everyone who can connect is already trusted with the same account. Keep per-user keys when people need to reach **different** CallRail accounts, such as a client with their own. The connect screen remains available either way.
+
 ## CallRail notes
 
 ### Per-user API keys
