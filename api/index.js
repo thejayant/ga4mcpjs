@@ -819,6 +819,37 @@ function getResourceUrl(req) {
   return `${getBaseUrl(req)}/mcp`;
 }
 
+// Issuer and resource are compared against values a client echoes back to us, and
+// clients are not consistent about trailing slashes or host casing. Treating those
+// as a mismatch rejects a perfectly good token, and a rejected token is what makes
+// a connector ask the user to sign in again.
+function urlsMatch(a, b) {
+  if (!a || !b) return false;
+  const normalize = (value) => String(value).trim().replace(/\/+$/, "").toLowerCase();
+  return normalize(a) === normalize(b);
+}
+
+// A resource may legitimately arrive as either the MCP endpoint or the server root.
+function resourcesMatch(requested, expected) {
+  if (urlsMatch(requested, expected)) return true;
+  const stripMcp = (value) => String(value).trim().replace(/\/+$/, "").replace(/\/mcp$/i, "");
+  return urlsMatch(stripMcp(requested), stripMcp(expected));
+}
+
+// Google answers a dead grant (revoked access, deleted client, changed password) with
+// one of these. Anything else - a network blip, a 429, a 5xx - is transient, and must
+// not cost the user their connection.
+const PERMANENT_GOOGLE_AUTH_ERRORS = ["invalid_grant", "invalid_client", "unauthorized_client"];
+
+function isPermanentGoogleAuthFailure(error) {
+  const haystack = [
+    error?.response?.data?.error,
+    error?.response?.data?.error_description,
+    error?.message
+  ].filter(Boolean).join(" ").toLowerCase();
+  return PERMANENT_GOOGLE_AUTH_ERRORS.some((code) => haystack.includes(code));
+}
+
 function getCallRailBaseUrl() {
   return String(process.env.CALLRAIL_API_BASE_URL || "https://api.callrail.com/v3").replace(/\/+$/, "");
 }
@@ -1237,7 +1268,7 @@ function readClientRegistration(req, clientId) {
     return null;
   }
   if (payload.typ !== "mcp_client_registration") return null;
-  if (payload.iss !== getBaseUrl(req)) return null;
+  if (!urlsMatch(payload.iss, getBaseUrl(req))) return null;
   if (payload.exp && Number(payload.exp) <= Date.now()) return null;
   return payload;
 }
@@ -1629,13 +1660,31 @@ async function refreshGoogleTokensIfNeeded(req, session) {
       tokenType: credentials.token_type || session.tokenType || "Bearer"
     });
   } catch (error) {
+    const permanent = isPermanentGoogleAuthFailure(error);
+    console.log(JSON.stringify({
+      type: "google_refresh_failed",
+      grant: "per_request",
+      permanent,
+      message: error instanceof Error ? error.message : String(error)
+    }));
+    // Dropping the session on a transient failure is what turns one bad minute at
+    // Google into a re-login prompt, so only a dead grant clears it. A 503 tells the
+    // client to retry; a 401 would tell it to start OAuth over.
+    if (!permanent) {
+      throw buildAuthError({
+        httpStatus: 503,
+        error: "temporarily_unavailable",
+        errorDescription: "Could not reach Google to refresh credentials. Retry shortly.",
+        details: { debug: "google_refresh_transient" }
+      });
+    }
     if (session.sessionId) {
       deleteSession(session.sessionId);
     }
     throw buildAuthError({
       httpStatus: 401,
       error: "invalid_token",
-      errorDescription: "Failed to refresh Google credentials.",
+      errorDescription: "Google access was revoked or expired. Reconnect to continue.",
       details: { debug: "google_refresh_failed", google_error: error instanceof Error ? error.message : String(error) }
     });
   }
@@ -1665,7 +1714,7 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       details: { debug: "wrong_token_type", token_type: payload.typ || null }
     });
   }
-  if (payload.iss !== issuer) {
+  if (!urlsMatch(payload.iss, issuer)) {
     throw buildAuthError({
       httpStatus: 401,
       error: "invalid_token",
@@ -1674,7 +1723,7 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
     });
   }
   const tokenAudience = payload.resource || payload.aud;
-  if (tokenAudience !== resource) {
+  if (!resourcesMatch(tokenAudience, resource)) {
     throw buildAuthError({
       httpStatus: 401,
       error: "invalid_token",
@@ -6241,7 +6290,7 @@ app.post("/oauth/token", async (req, res) => {
           error_description: "Code is not a Vercel-issued authorization code."
         });
       }
-      if (payload.iss !== getBaseUrl(req)) {
+      if (!urlsMatch(payload.iss, getBaseUrl(req))) {
         return res.status(400).json({
           error: "invalid_grant",
           error_description: "Authorization code issuer mismatch."
@@ -6263,7 +6312,7 @@ app.post("/oauth/token", async (req, res) => {
       }
 
       const requestedResource = String(resource || audience || payload.resource);
-      if (requestedResource !== payload.resource) {
+      if (!resourcesMatch(requestedResource, payload.resource)) {
         return res.status(400).json({
           error: "invalid_grant",
           error_description: "Requested resource does not match authorization code."
@@ -6328,7 +6377,7 @@ app.post("/oauth/token", async (req, res) => {
           error_description: "Refresh token is not a Vercel-issued refresh token."
         });
       }
-      if (payload.iss !== getBaseUrl(req)) {
+      if (!urlsMatch(payload.iss, getBaseUrl(req))) {
         return res.status(400).json({
           error: "invalid_grant",
           error_description: "Refresh token issuer mismatch."
@@ -6342,7 +6391,7 @@ app.post("/oauth/token", async (req, res) => {
       }
 
       const requestedResource = String(resource || audience || payload.resource);
-      if (requestedResource !== payload.resource) {
+      if (!resourcesMatch(requestedResource, payload.resource)) {
         return res.status(400).json({
           error: "invalid_grant",
           error_description: "Requested resource does not match refresh token."
@@ -6369,18 +6418,44 @@ app.post("/oauth/token", async (req, res) => {
       let googleCredentials = null;
       let refreshedScope = null;
       if (session.refreshToken) {
-        const refreshed = await exchangeGoogleRefreshToken(req, session.refreshToken);
-        refreshedScope = refreshed.scope;
-        googleCredentials = saveSession(sessionId, {
-          ...session,
-          sessionId,
-          accessToken: refreshed.access_token,
-          refreshToken: session.refreshToken,
-          expiryDate: refreshed.expiry_date,
-          scope: refreshed.scope || session.scope || payload.scope,
-          tokenType: refreshed.token_type || session.tokenType || "Bearer",
-          sessionExpiresAt: Date.now() + SESSION_TTL_MS
-        });
+        try {
+          const refreshed = await exchangeGoogleRefreshToken(req, session.refreshToken);
+          refreshedScope = refreshed.scope;
+          googleCredentials = saveSession(sessionId, {
+            ...session,
+            sessionId,
+            accessToken: refreshed.access_token,
+            refreshToken: session.refreshToken,
+            expiryDate: refreshed.expiry_date,
+            scope: refreshed.scope || session.scope || payload.scope,
+            tokenType: refreshed.token_type || session.tokenType || "Bearer",
+            sessionExpiresAt: Date.now() + SESSION_TTL_MS
+          });
+        } catch (error) {
+          const permanent = isPermanentGoogleAuthFailure(error);
+          console.log(JSON.stringify({
+            type: "google_refresh_failed",
+            grant: "refresh_token",
+            permanent,
+            message: error instanceof Error ? error.message : String(error)
+          }));
+          // Only a genuinely dead grant justifies sending the user back through
+          // consent. A transient Google failure previously escaped as a 500, which
+          // clients read as "this connection is broken" and answer by asking the
+          // user to sign in again - so it is reported as retryable instead, with
+          // the session and its refresh token left intact.
+          if (permanent) {
+            deleteSession(sessionId);
+            return res.status(400).json({
+              error: "invalid_grant",
+              error_description: "Google access was revoked or expired. Reconnect at /auth/google/start."
+            });
+          }
+          return res.status(503).json({
+            error: "temporarily_unavailable",
+            error_description: "Could not reach Google to refresh credentials. The connection is still valid; retry shortly."
+          });
+        }
       }
 
       // Meta has no refresh token, but re-exchanging a still-valid long-lived token
@@ -6515,6 +6590,14 @@ app.get("/.well-known/oauth-protected-resource/mcp", (req, res) => {
 });
 
 function sendUnauthorized(req, res, error) {
+  // WWW-Authenticate is the signal that starts an OAuth flow, so it must only go out
+  // when re-authorizing is genuinely the fix. A retryable upstream failure carries no
+  // challenge and keeps its own status, otherwise every Google hiccup would read to
+  // the client as "your login expired".
+  const status = error?.statusCode || 401;
+  if (status !== 401 && status !== 403) {
+    return res.status(status).json(formatAuthErrorResponse(error || {}));
+  }
   const parts = ['Bearer realm="mcp"', `resource_metadata="${getBaseUrl(req)}/.well-known/oauth-protected-resource"`];
   if (error?.oauthError) parts.push(`error="${error.oauthError}"`);
   if (error?.oauthErrorDescription) {
@@ -6522,7 +6605,7 @@ function sendUnauthorized(req, res, error) {
   }
   if (error?.details?.required_scopes?.length) parts.push(`scope="${error.details.required_scopes.join(" ")}"`);
   res.setHeader("WWW-Authenticate", parts.join(", "));
-  return res.status(error?.statusCode === 403 ? 403 : 401).json(formatAuthErrorResponse(error || {}));
+  return res.status(status).json(formatAuthErrorResponse(error || {}));
 }
 
 app.all("/mcp", async (req, res) => {
@@ -6531,6 +6614,19 @@ app.all("/mcp", async (req, res) => {
   try {
     await verifyMcpAccessToken(req, []);
   } catch (error) {
+    // Every repeated sign-in prompt a user sees starts with one of these, so record
+    // which check failed rather than leaving it to be inferred from the symptom.
+    console.log(JSON.stringify({
+      type: "mcp_auth_rejected",
+      status: error?.statusCode || 401,
+      reason: error?.details?.debug || error?.oauthError || "unknown",
+      expected_issuer: error?.details?.expected_issuer,
+      actual_issuer: error?.details?.actual_issuer,
+      expected_resource: error?.details?.expected_resource,
+      actual_resource: error?.details?.actual_resource,
+      has_authorization_header: Boolean(req.get("authorization")),
+      host: req.get("host")
+    }));
     return sendUnauthorized(req, res, error);
   }
 
