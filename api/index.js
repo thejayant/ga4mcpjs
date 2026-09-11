@@ -1053,6 +1053,7 @@ function renderAuthStatusPage(options = {}) {
     '<meta name="robots" content="noindex">',
     advances ? '<meta http-equiv="refresh" content="' + delaySeconds + ';url=' + safeRedirect + '">' : "",
     "<title>" + escapeHtml(title) + "</title>",
+    "<style>",
     AUTH_PAGE_STYLES,
     "</style></head><body>",
     '<main class="card" role="status" aria-live="polite">',
