@@ -129,6 +129,8 @@ Optional:
 - `META_APP_ID` and `META_APP_SECRET` for the Meta (Facebook / Instagram) tools
 - `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
 - `META_LOGIN_CONFIG_ID` to use a Facebook Login for Business configuration instead of a raw scope list (recommended)
+- `CALLRAIL_ALLOW_SHARED_TOKEN` to let all users share one `CALLRAIL_API_TOKEN` (off by default; see CallRail notes)
+- `CALLRAIL_OFFER_STEP` to drop the CallRail step from the connection flow
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -381,6 +383,28 @@ The resulting token carries both credential sets, so Google and Meta tools work 
 - No auto-pagination. Page explicitly with the returned `nextCursor`.
 
 ## CallRail notes
+
+### Per-user API keys
+
+CallRail authenticates with an API key rather than OAuth. The key is collected on a connect screen at the end of the connection flow, verified against CallRail, then sealed into that user's session token the same way Meta credentials are.
+
+**This replaces a shared server key.** Previously `CALLRAIL_API_TOKEN` was read straight from the environment on every call, and the CallRail tools performed no authorization check at all, so anyone who could reach this server's MCP endpoint could read the deployer's own call records, including caller numbers, recordings and transcripts. CallRail tools now sit behind the same token check as every other provider and use the key belonging to the calling session.
+
+- The connect screen is the last step of setup, after Google and the optional Meta step.
+- It is optional. Skipping leaves the CallRail tools switched off and changes nothing else.
+- The key is posted over HTTPS, never placed in a URL, and never rendered back to the page.
+- `get_callrail_connection` reports which account a session is attached to and a masked fingerprint of the key. No tool returns the key itself.
+- Connect later at `/auth/callrail`, reached by running the connector setup again.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `CALLRAIL_API_TOKEN` | A shared fallback key. **Ignored unless `CALLRAIL_ALLOW_SHARED_TOKEN` is also set.** |
+| `CALLRAIL_ALLOW_SHARED_TOKEN` | Set to `true` to let every user of this deployment share the key above. Only appropriate for a single-tenant deployment you control. Off by default. |
+| `CALLRAIL_OFFER_STEP` | Set to `false` to drop the CallRail step from the connection flow. |
+
+When the shared key is in use, `get_callrail_connection` returns a `sharedKeyWarning` saying so, so it is never silently in play.
 
 - CallRail tools use `CALLRAIL_API_TOKEN` from the server environment.
 - CallRail has no server-side aggregation endpoint for most groupings, so `run_callrail_preset` fetches **one page** of call records and aggregates them here. Always compare `callsFetched` against `totalRecords`; if they differ, raise `perPage` (max 250) or advance `page`. Auto-pagination is deliberately not implemented.
