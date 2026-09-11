@@ -295,15 +295,31 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 ### Connecting from an MCP client
 
-MCP clients only ever visit the advertised `authorization_endpoint`, which is the Google one, so a connector could never reach `/auth/meta` on its own. When Meta is configured, `/auth/google/callback` hands off to Meta consent before issuing the authorization code, so **one connector approval covers both providers**:
+MCP clients only ever visit the advertised `authorization_endpoint`, which is the Google one, so a connector could never reach `/auth/meta` on its own.
+
+**Google is required. Meta is optional.** Google consent completes the connection on its own. The user is then *asked* whether to add Meta, and both answers are a valid place to stop:
 
 ```
-Add connector -> Google consent -> Meta consent -> one token holding both
+Add connector -> Google consent -> "Add Meta?" -> Connect Meta -> both connected
+                                              \-> Skip         -> Google only
 ```
 
-- Chaining turns on automatically once `META_APP_ID` and `META_APP_SECRET` are both set. A Google-only deployment is unaffected.
-- Set `META_CHAIN_AFTER_GOOGLE=false` to disable it, or pass `?include_meta=0` to `/auth/google/start` for a single connection.
-- **If Meta consent is denied or fails, the connection still completes with Google alone.** The user has already approved Google at that point, and throwing it away to make them start over would be worse than a partial connection. Meta tools then report `no_meta_credentials` until the user runs `/auth/meta`.
+- **Nobody is ever sent to Facebook without choosing to.** The question screen does not auto-advance in either direction, because both outcomes are correct and picking one for the user would be picking wrongly half the time.
+- A user who skips has a fully working connection. Meta tools report `no_meta_credentials` until they run `/auth/meta`.
+- The Meta step carries the completed Google authorization with it, so completing Meta, denying it, failing it, or skipping it all still hand the connector a usable code. The user never loses the Google consent they already gave.
+- Set `META_OFFER_AFTER_GOOGLE=false`, or pass `?include_meta=0` to `/auth/google/start`, to suppress the question entirely and finish on Google. Useful while the Meta app is unreviewed. The older `META_CHAIN_AFTER_GOOGLE` is still read as a fallback for this setting.
+- `/auth/meta/skip?chain=…` finishes an in-flight Meta step with Google alone.
+
+#### Why the flow never auto-advances into Meta
+
+Facebook's failure screens are terminal pages that **never redirect back to `/auth/meta/callback`**, so the server's fallback logic cannot run. A user pushed there automatically is stranded with no authorization code, and the browser back button only returns them to an already-spent one. The two common screens:
+
+| Screen | Cause |
+| --- | --- |
+| **App not active** | The Meta app is in Development mode, unpublished, or disabled. |
+| **not a tester of this app** | The app is in Development mode and this user is not an admin, developer or tester on it. |
+
+Both are Meta App Dashboard state, not server bugs. Every permission this server uses needs App Review before anyone outside the app's own admins, developers and testers can grant them. Until the app is Live and reviewed, a user who clicks **Connect Meta** will hit one of these — they can still return and skip, and setting `META_OFFER_AFTER_GOOGLE=false` hides the option until the app is ready.
 
 ### Login modes
 

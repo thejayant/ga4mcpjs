@@ -880,23 +880,35 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+// The detail line says what the account actually buys you, so "Optional" reads as a
+// real choice with known stakes rather than a step the user is failing to complete.
+const AUTH_PROVIDER_DETAIL = {
+  Google: "Ads, Analytics, Search Console, Merchant Center",
+  Meta: "Facebook and Instagram"
+};
+
 function renderAuthProviderRow(mark, name, status) {
   const label = {
     connected: "Connected",
     connecting: "Connecting",
     pending: "Next",
+    optional: "Optional",
     skipped: "Not connected",
-    failed: "Failed"
+    failed: "Couldn't connect"
   }[status] || status;
   const icon = status === "connected"
     ? '<svg class="tick" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 4.5l-7 7-4-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
     : status === "connecting"
       ? '<span class="spinner" aria-hidden="true"></span>'
       : "";
+  const detail = AUTH_PROVIDER_DETAIL[name];
   return [
     '<li class="row row--' + escapeHtml(status) + '">',
     '<span class="mark">' + mark + '</span>',
+    '<span class="who">',
     '<span class="name">' + escapeHtml(name) + '</span>',
+    detail ? '<span class="detail">' + escapeHtml(detail) + '</span>' : "",
+    '</span>',
     '<span class="status">' + icon + '<span>' + escapeHtml(label) + '</span></span>',
     '</li>'
   ].join("");
@@ -916,11 +928,18 @@ function renderAuthStatusPage(options = {}) {
     redirectDelayMs = 1800,
     continueLabel = "Continue",
     tone = "progress",
-    footnote = ""
+    footnote = "",
+    secondaryUrl = null,
+    secondaryLabel = "",
+    // A screen that asks the user a question must not answer it for them, so any
+    // page offering a genuine choice turns the auto-advance off and waits.
+    autoAdvance = true
   } = options;
 
   const delaySeconds = Math.max(0, Math.round(redirectDelayMs / 100) / 10);
   const safeRedirect = redirectUrl ? escapeHtml(redirectUrl) : null;
+  const safeSecondary = secondaryUrl && secondaryLabel ? escapeHtml(secondaryUrl) : null;
+  const advances = Boolean(safeRedirect && autoAdvance);
 
   return [
     "<!doctype html>",
@@ -928,7 +947,7 @@ function renderAuthStatusPage(options = {}) {
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
     '<meta name="robots" content="noindex">',
-    safeRedirect ? '<meta http-equiv="refresh" content="' + delaySeconds + ';url=' + safeRedirect + '">' : "",
+    advances ? '<meta http-equiv="refresh" content="' + delaySeconds + ';url=' + safeRedirect + '">' : "",
     "<title>" + escapeHtml(title) + "</title>",
     "<style>",
     ":root{color-scheme:light dark;",
@@ -950,11 +969,15 @@ function renderAuthStatusPage(options = {}) {
     ".row+.row{border-top:1px solid var(--line)}",
     ".mark{display:grid;place-items:center;width:26px;height:26px;flex:none}",
     ".mark svg{width:100%;height:auto;display:block}",
-    ".name{font-weight:600;flex:1}",
+    ".who{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}",
+    ".name{font-weight:600}",
+    ".detail{font-size:12px;color:var(--muted);line-height:1.35}",
     ".status{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}",
     ".row--connected .status{color:var(--ok);font-weight:600}",
     ".row--connecting .status{color:var(--accent);font-weight:600}",
     ".row--failed .status,.row--skipped .status{color:var(--warn);font-weight:600}",
+    ".row--optional .status{color:var(--muted)}",
+    ".row--optional .mark{opacity:.55}",
     ".tick{width:15px;height:15px}",
     ".spinner{width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;",
     "border-radius:50%;animation:spin .7s linear infinite}",
@@ -963,6 +986,9 @@ function renderAuthStatusPage(options = {}) {
     ".cta{display:block;text-align:center;text-decoration:none;font-weight:600;",
     "padding:11px 16px;border-radius:10px;background:var(--accent);color:#fff}",
     ".cta:focus-visible{outline:3px solid var(--accent);outline-offset:2px}",
+    ".cta--ghost{margin-top:10px;background:transparent;color:var(--muted);",
+    "font-weight:500;border:1px solid var(--line)}",
+    ".cta--ghost:hover{color:var(--ink)}",
     ".note{margin:16px 0 0;font-size:12.5px;color:var(--muted);text-align:center}",
     "</style></head><body>",
     '<main class="card" role="status" aria-live="polite">',
@@ -973,11 +999,16 @@ function renderAuthStatusPage(options = {}) {
     renderAuthProviderRow(AUTH_PAGE_META_MARK, "Meta", meta),
     "</ul>",
     safeRedirect ? '<a class="cta" href="' + safeRedirect + '">' + escapeHtml(continueLabel) + "</a>" : "",
+    safeSecondary ? '<a class="cta cta--ghost" href="' + safeSecondary + '">' + escapeHtml(secondaryLabel) + "</a>" : "",
     footnote ? '<p class="note">' + escapeHtml(footnote) + "</p>" : "",
-    safeRedirect ? '<p class="note">Taking you there automatically. Use the button if nothing happens.</p>' : "",
+    advances ? '<p class="note">Taking you there automatically. Use the button if nothing happens.</p>' : "",
     "</main>",
-    safeRedirect
-      ? "<script>setTimeout(function(){location.replace(" + JSON.stringify(redirectUrl) + ")}," + redirectDelayMs + ")<\/script>"
+    // A click must win the race against any pending auto-redirect, otherwise choosing
+    // the optional path would be silently undone a moment later.
+    advances
+      ? "<script>(function(){var t=setTimeout(function(){location.replace("
+        + JSON.stringify(redirectUrl) + ")}," + redirectDelayMs + ");"
+        + "document.addEventListener('click',function(e){if(e.target.closest('a'))clearTimeout(t)});})()<\/script>"
       : "",
     "</body></html>"
   ].filter(Boolean).join("");
@@ -993,12 +1024,17 @@ function isMetaConfigured() {
   return Boolean(process.env.META_APP_ID && process.env.META_APP_SECRET);
 }
 
-function shouldChainMetaAfterGoogle(requestedValue) {
+// Google is the only provider required to use this server; Meta is an add-on. After
+// Google consent the user is *asked* whether to add Meta, never sent there. Turning
+// this off skips the question entirely and finishes on Google alone, which is what a
+// deployment wants while its Meta app is still unreviewed or in Development mode.
+function shouldOfferMetaAfterGoogle(requestedValue) {
   if (!isMetaConfigured()) return false;
   if (requestedValue !== undefined && requestedValue !== null && requestedValue !== "") {
     return !["0", "false", "no"].includes(String(requestedValue).toLowerCase());
   }
-  return !["0", "false", "no"].includes(String(process.env.META_CHAIN_AFTER_GOOGLE || "true").toLowerCase());
+  const configured = process.env.META_OFFER_AFTER_GOOGLE ?? process.env.META_CHAIN_AFTER_GOOGLE ?? "true";
+  return !["0", "false", "no"].includes(String(configured).toLowerCase());
 }
 
 function getMetaRedirectUri(req) {
@@ -5578,6 +5614,10 @@ app.get("/", (req, res) => {
     metaAuthStartUrl: `${baseUrl}/auth/meta/start`,
     metaLoginMode: process.env.META_LOGIN_CONFIG_ID ? "business_config" : "scope",
     metaOauthCallbackUrl: `${baseUrl}/auth/meta/callback`,
+    // Google is the only provider required to connect. Meta is an add-on.
+    requiredProviders: ["google"],
+    optionalProviders: isMetaConfigured() ? ["meta"] : [],
+    metaOfferedAfterGoogle: shouldOfferMetaAfterGoogle(),
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
     scopes: GOOGLE_SCOPES,
@@ -5631,7 +5671,7 @@ app.get("/auth/google/start", (req, res) => {
     const resource = getRequestedResource(req, getResourceUrl(req));
     const clientRedirectUri = resolveClientRedirectUri(req);
     const appState = {
-      chainMeta: shouldChainMetaAfterGoogle(req.query.include_meta),
+      offerMeta: shouldOfferMetaAfterGoogle(req.query.include_meta),
       returnTo: req.query.return_to || "/",
       clientRedirectUri,
       clientState: req.query.state || null,
@@ -5724,10 +5764,9 @@ app.get("/auth/google/callback", async (req, res) => {
       }
     });
 
-    // Hand off to Meta consent before returning the code, so the connector ends up
-    // with one token holding both providers. Meta failure degrades to Google-only
-    // rather than losing the Google authorization the user just completed.
-    if (appState.chainMeta && isMetaConfigured()) {
+    // Carries the finished Google authorization through the Meta flow, so that
+    // completing Meta *or* failing it both still hand the connector a usable code.
+    const buildMetaChainUrl = () => {
       const chainUrl = new URL(`${getBaseUrl(req)}/auth/meta/start`);
       chainUrl.searchParams.set("chain", encryptJson({
         typ: "meta_chain_state",
@@ -5749,49 +5788,59 @@ app.get("/auth/google/callback", async (req, res) => {
         returnTo: appState.returnTo || "/",
         issuedAt: Date.now()
       }));
-      logAuthRouteDebug({ route: "/auth/google/callback", chaining_to_meta: true });
+      return chainUrl.toString();
+    };
+
+    // Where "finish on Google alone" sends the browser: back to the connector with the
+    // code if one is waiting, otherwise to the app's own success page.
+    const buildGoogleOnlyUrl = () => {
+      if (appState.clientRedirectUri) {
+        const redirectUrl = new URL(String(appState.clientRedirectUri));
+        redirectUrl.searchParams.set("code", authCode);
+        if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
+        return redirectUrl.toString();
+      }
+      const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
+      successUrl.searchParams.set("auth", "success");
+      successUrl.searchParams.set("provider", "google");
+      return successUrl.toString();
+    };
+
+    // Google is done and the connection already works, so Meta is a genuine either/or:
+    // ask once and let the answer decide. Nothing auto-advances. Both outcomes are valid,
+    // and Facebook's failure screens are terminal pages whose only way back is the browser
+    // back button, which would land here again on an already spent authorization code.
+    if (appState.offerMeta && isMetaConfigured()) {
+      logAuthRouteDebug({ route: "/auth/google/callback", offering_meta_choice: true });
       return sendAuthStatusPage(res, {
-        title: "Google connected",
+        title: "Add Meta?",
         heading: "Google is connected",
-        message: "Now handing you to Meta to connect Facebook and Instagram.",
+        message: "Ads, Analytics, Search Console and Merchant Center are ready to query. Add Facebook and Instagram too, or carry on with Google on its own.",
         google: "connected",
-        meta: "connecting",
-        redirectUrl: chainUrl.toString(),
-        redirectDelayMs: 1700,
-        continueLabel: "Continue to Meta"
+        meta: "optional",
+        autoAdvance: false,
+        redirectUrl: buildMetaChainUrl(),
+        continueLabel: "Connect Meta",
+        secondaryUrl: buildGoogleOnlyUrl(),
+        secondaryLabel: "Skip — continue with Google only",
+        footnote: `Meta is optional and nothing here depends on it. You can add it later at ${getBaseUrl(req)}/auth/meta.`
       });
     }
 
-    const googleOnlyMetaState = isMetaConfigured() ? "skipped" : "pending";
-    if (appState.clientRedirectUri) {
-      const redirectUrl = new URL(String(appState.clientRedirectUri));
-      redirectUrl.searchParams.set("code", authCode);
-      if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
-      return sendAuthStatusPage(res, {
-        title: "Google connected",
-        heading: "Google is connected",
-        message: "Your Google Ads, Analytics, Search Console and Merchant Center data is ready.",
-        google: "connected",
-        meta: googleOnlyMetaState,
-        redirectUrl: redirectUrl.toString(),
-        redirectDelayMs: 1600,
-        continueLabel: "Finish setup",
-        footnote: isMetaConfigured() ? "You can connect Meta later at /auth/meta." : ""
-      });
-    }
-
-    const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
-    successUrl.searchParams.set("auth", "success");
+    // The question was suppressed, so there is nothing to decide: finish on Google.
     return sendAuthStatusPage(res, {
       title: "Google connected",
-      heading: "Google is connected",
-      message: "Your Google Ads, Analytics, Search Console and Merchant Center data is ready to query.",
+      heading: "You're all set",
+      message: "Ads, Analytics, Search Console and Merchant Center are ready to query.",
       google: "connected",
-      meta: googleOnlyMetaState,
-      redirectUrl: successUrl.toString(),
-      redirectDelayMs: 2000,
-      continueLabel: "Done",
-      footnote: isMetaConfigured() ? "You can connect Meta later at /auth/meta." : ""
+      meta: isMetaConfigured() ? "optional" : "pending",
+      redirectUrl: buildGoogleOnlyUrl(),
+      redirectDelayMs: 1800,
+      continueLabel: appState.clientRedirectUri ? "Finish setup" : "Done",
+      tone: "success",
+      footnote: isMetaConfigured()
+        ? `Facebook and Instagram are optional. Add them any time at ${getBaseUrl(req)}/auth/meta.`
+        : ""
     });
   } catch (error) {
     logAuthRouteDebug({
@@ -5931,20 +5980,24 @@ function completeChainWithGoogleOnly(req, res, appState, reason) {
     meta_failed_falling_back_to_google_only: true,
     reason
   });
+  const skipped = String(reason || "") === "meta_skipped_by_user";
   const partial = {
-    title: "Google connected",
-    heading: "Google is connected, Meta is not",
-    message: "Meta authorization did not complete, so we kept your Google connection rather than making you start over.",
+    title: skipped ? "Google connected" : "Meta didn't connect",
+    heading: skipped ? "You're all set" : "Finished with Google only",
+    message: skipped
+      ? "Ads, Analytics, Search Console and Merchant Center are ready to query."
+      : "Meta didn't finish connecting, so we kept your Google connection rather than making you start over. Everything except Facebook and Instagram works.",
     google: "connected",
-    meta: "failed",
+    meta: skipped ? "optional" : "failed",
     redirectDelayMs: 3200,
-    footnote: "Run /auth/meta whenever you want to add Facebook and Instagram."
+    tone: skipped ? "success" : "progress",
+    footnote: `Facebook and Instagram are optional. Add them any time at ${getBaseUrl(req)}/auth/meta.`
   };
   if (appState.clientRedirectUri) {
     const redirectUrl = new URL(String(appState.clientRedirectUri));
     redirectUrl.searchParams.set("code", String(appState.googleFallbackAuthCode));
     if (appState.clientState) redirectUrl.searchParams.set("state", String(appState.clientState));
-    sendAuthStatusPage(res, { ...partial, redirectUrl: redirectUrl.toString(), continueLabel: "Finish with Google only" });
+    sendAuthStatusPage(res, { ...partial, redirectUrl: redirectUrl.toString(), continueLabel: "Finish setup" });
     return true;
   }
   const successUrl = new URL(String(appState.returnTo || "/"), getBaseUrl(req));
@@ -5954,6 +6007,44 @@ function completeChainWithGoogleOnly(req, res, appState, reason) {
   sendAuthStatusPage(res, { ...partial, redirectUrl: successUrl.toString(), continueLabel: "Continue" });
   return true;
 }
+
+// Lets a user abandon the Meta step and still finish the connection. Facebook's own
+// error screens ("App not active", "not a tester of this app") are terminal and never
+// redirect back to /auth/meta/callback, so without this route someone who hits one has
+// no way back to the Google authorization they already completed.
+app.get("/auth/meta/skip", (req, res) => {
+  let chained = null;
+  try {
+    chained = decryptJson(String(req.query.chain || ""));
+    if (chained.typ !== "meta_chain_state") throw new Error("wrong chain type");
+    if (Date.now() - Number(chained.issuedAt || 0) > OAUTH_STATE_TTL_MS) {
+      throw new Error("chain state expired");
+    }
+  } catch (error) {
+    return res.status(400).json({
+      error: "invalid_chain_state",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  const completed = completeChainWithGoogleOnly(
+    req,
+    res,
+    {
+      googleFallbackAuthCode: chained.googleAuthCode || null,
+      clientRedirectUri: chained.clientRedirectUri || null,
+      clientState: chained.clientState || null,
+      returnTo: chained.returnTo || "/"
+    },
+    "meta_skipped_by_user"
+  );
+  if (completed) return undefined;
+
+  return res.status(400).json({
+    error: "nothing_to_skip",
+    error_description: "This link carries no Google authorization to fall back to. Start again at /auth/google/start."
+  });
+});
 
 app.get("/auth/meta/callback", async (req, res) => {
   try {
@@ -5966,9 +6057,25 @@ app.get("/auth/meta/callback", async (req, res) => {
         // Unreadable state just means no fallback is possible.
       }
       if (completeChainWithGoogleOnly(req, res, deniedState, String(req.query.error))) return undefined;
-      return res.status(400).json({
-        error: String(req.query.error),
-        error_description: String(req.query.error_description || req.query.error_reason || "Meta authorization was denied.")
+      // Standalone /auth/meta run: there is no Google authorization to fall back to,
+      // but this is still not a failure of the server. Meta is optional.
+      logAuthRouteDebug({
+        route: "/auth/meta/callback",
+        meta_denied: String(req.query.error),
+        meta_denied_description: String(req.query.error_description || req.query.error_reason || "")
+      });
+      return sendAuthStatusPage(res, {
+        httpStatus: 200,
+        title: "Meta not connected",
+        heading: "Meta was not connected",
+        message: String(
+          req.query.error_description || req.query.error_reason || "Meta authorization was not completed."
+        ),
+        google: "pending",
+        meta: "failed",
+        footnote: "Meta is optional. Everything else in this server works without it.",
+        secondaryUrl: `${getBaseUrl(req)}/auth/meta`,
+        secondaryLabel: "Try Meta again"
       });
     }
 
@@ -6064,10 +6171,10 @@ app.get("/auth/meta/callback", async (req, res) => {
     });
 
     const googleAlsoConnected = Boolean(appState.linkedGoogle?.refreshToken);
-    const bothHeading = googleAlsoConnected ? "You are all set" : "Meta is connected";
+    const bothHeading = googleAlsoConnected ? "You're all set" : "Meta is connected";
     const bothMessage = googleAlsoConnected
-      ? "Google and Meta are connected. Ads, analytics, search, shopping, calls and social all answer in one place now."
-      : "Facebook and Instagram data is ready to query.";
+      ? "Google and Meta are both connected. Ads, analytics, search, shopping, calls and social now answer in one place."
+      : "Facebook and Instagram are ready to query.";
 
     if (appState.clientRedirectUri) {
       const redirectUrl = new URL(String(appState.clientRedirectUri));
@@ -6083,7 +6190,7 @@ app.get("/auth/meta/callback", async (req, res) => {
         redirectDelayMs: 2100,
         continueLabel: "Finish setup",
         tone: "success",
-        footnote: "Thanks. Meta access lasts about 60 days and renews whenever you reconnect."
+        footnote: "Meta access lasts about 60 days and renews each time you reconnect."
       });
     }
 
@@ -6100,7 +6207,7 @@ app.get("/auth/meta/callback", async (req, res) => {
       redirectDelayMs: 2400,
       continueLabel: "Done",
       tone: "success",
-      footnote: "Thanks. Meta access lasts about 60 days and renews whenever you reconnect."
+      footnote: "Meta access lasts about 60 days and renews each time you reconnect."
     });
   } catch (error) {
     logAuthRouteDebug({
