@@ -9,7 +9,11 @@ const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonl
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const MERCHANT_CENTER_SCOPE = "https://www.googleapis.com/auth/content";
 const GOOGLE_ADS_SCOPE = "https://www.googleapis.com/auth/adwords";
-const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE];
+// Requested purely so the callback can read which account is connecting. Without an
+// identity scope Google returns no email and the allowlist has nothing to check.
+const OPENID_SCOPE = "openid";
+const EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email";
+const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE, OPENID_SCOPE, EMAIL_SCOPE];
 // Meta permissions. All of these require App Review before anyone outside the app's own
 // admins, developers and testers can grant them.
 const META_ADS_SCOPE = "ads_read";
@@ -28,7 +32,13 @@ const META_SCOPES = [
   META_INSTAGRAM_SCOPE,
   META_INSTAGRAM_INSIGHTS_SCOPE
 ];
-const ALL_KNOWN_SCOPES = [...GOOGLE_SCOPES, ...META_SCOPES];
+// CallRail authenticates with a per-user API key rather than OAuth, so there is no
+// real scope to grant. This pseudo-scope lets CallRail tools use the same
+// TOOL_SCOPE_MAP gate as every other provider: it is present only when the session
+// actually carries a CallRail key.
+const CALLRAIL_SCOPE = "callrail:read";
+const CALLRAIL_SCOPES = [CALLRAIL_SCOPE];
+const ALL_KNOWN_SCOPES = [...GOOGLE_SCOPES, ...META_SCOPES, ...CALLRAIL_SCOPES];
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const ACCESS_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -83,6 +93,18 @@ const TOOL_SCOPE_MAP = {
   query_meta_graph: [META_ADS_SCOPE],
   run_meta_preset: [META_ADS_SCOPE]
 };
+const CALLRAIL_TOOL_SCOPES = {
+  list_callrail_accounts: [CALLRAIL_SCOPE],
+  list_callrail_companies: [CALLRAIL_SCOPE],
+  list_callrail_calls: [CALLRAIL_SCOPE],
+  get_callrail_call: [CALLRAIL_SCOPE],
+  get_callrail_call_summary: [CALLRAIL_SCOPE],
+  get_callrail_call_timeseries: [CALLRAIL_SCOPE],
+  list_callrail_trackers: [CALLRAIL_SCOPE],
+  get_callrail_resource: [CALLRAIL_SCOPE],
+  run_callrail_preset: [CALLRAIL_SCOPE],
+  get_callrail_connection: [CALLRAIL_SCOPE]
+};
 const CALLRAIL_TOOL_NAMES = [
   "list_callrail_accounts",
   "list_callrail_companies",
@@ -92,7 +114,8 @@ const CALLRAIL_TOOL_NAMES = [
   "get_callrail_call_timeseries",
   "list_callrail_trackers",
   "get_callrail_resource",
-  "run_callrail_preset"
+  "run_callrail_preset",
+  "get_callrail_connection"
 ];
 const EXPERT_TOOL_NAMES = [
   "list_marketing_presets",
@@ -902,6 +925,13 @@ const AUTH_PAGE_META_MARK = [
   '</svg>'
 ].join("");
 
+const AUTH_PAGE_CALLRAIL_MARK = [
+  '<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">',
+  '<rect width="32" height="32" rx="8" fill="#0A2540"/>',
+  '<path d="M11.4 10.2c.5-.5 1.3-.5 1.8 0l1.7 1.7c.5.5.5 1.3 0 1.8l-1 1c-.3.3-.4.7-.2 1 .8 1.6 2 2.8 3.6 3.6.3.2.7.1 1-.2l1-1c.5-.5 1.3-.5 1.8 0l1.7 1.7c.5.5.5 1.3 0 1.8l-.9.9c-1 1-2.5 1.3-3.8.7-3.6-1.6-6.5-4.5-8.1-8.1-.6-1.3-.3-2.8.7-3.8z" fill="#fff"/>',
+  '</svg>'
+].join("");
+
 function escapeHtml(value) {
   return String(value === undefined || value === null ? "" : value)
     .replace(/&/g, "&amp;")
@@ -915,7 +945,8 @@ function escapeHtml(value) {
 // real choice with known stakes rather than a step the user is failing to complete.
 const AUTH_PROVIDER_DETAIL = {
   Google: "Ads, Analytics, Search Console, Merchant Center",
-  Meta: "Facebook and Instagram"
+  Meta: "Facebook and Instagram",
+  CallRail: "Call tracking, recordings and call attribution"
 };
 
 function renderAuthProviderRow(mark, name, status) {
@@ -948,39 +979,7 @@ function renderAuthProviderRow(mark, name, status) {
 // These pages sit inside the OAuth redirect chain, so they must carry the browser
 // onward without JavaScript too: the meta refresh and the manual link are fallbacks
 // for when script is blocked.
-function renderAuthStatusPage(options = {}) {
-  const {
-    title = "Connecting",
-    heading = "",
-    message = "",
-    google = "connected",
-    meta = "pending",
-    redirectUrl = null,
-    redirectDelayMs = 1800,
-    continueLabel = "Continue",
-    tone = "progress",
-    footnote = "",
-    secondaryUrl = null,
-    secondaryLabel = "",
-    // A screen that asks the user a question must not answer it for them, so any
-    // page offering a genuine choice turns the auto-advance off and waits.
-    autoAdvance = true
-  } = options;
-
-  const delaySeconds = Math.max(0, Math.round(redirectDelayMs / 100) / 10);
-  const safeRedirect = redirectUrl ? escapeHtml(redirectUrl) : null;
-  const safeSecondary = secondaryUrl && secondaryLabel ? escapeHtml(secondaryUrl) : null;
-  const advances = Boolean(safeRedirect && autoAdvance);
-
-  return [
-    "<!doctype html>",
-    '<html lang="en"><head>',
-    '<meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    '<meta name="robots" content="noindex">',
-    advances ? '<meta http-equiv="refresh" content="' + delaySeconds + ';url=' + safeRedirect + '">' : "",
-    "<title>" + escapeHtml(title) + "</title>",
-    "<style>",
+const AUTH_PAGE_STYLES = [
     ":root{color-scheme:light dark;",
     "--bg:#f6f7f9;--card:#fff;--ink:#12141a;--muted:#5b6070;--line:#e4e6ec;",
     "--accent:#1a73e8;--ok:#1a7f4b;--warn:#a8620a;}",
@@ -1021,6 +1020,45 @@ function renderAuthStatusPage(options = {}) {
     "font-weight:500;border:1px solid var(--line)}",
     ".cta--ghost:hover{color:var(--ink)}",
     ".note{margin:16px 0 0;font-size:12.5px;color:var(--muted);text-align:center}",
+    ".cta{width:100%;border:0;cursor:pointer;font:inherit;font-weight:600}",
+    "button.cta{-webkit-appearance:none;appearance:none}",
+].join("");
+
+function renderAuthStatusPage(options = {}) {
+  const {
+    title = "Connecting",
+    heading = "",
+    message = "",
+    google = "connected",
+    meta = "pending",
+    callrail = "hidden",
+    redirectUrl = null,
+    redirectDelayMs = 1800,
+    continueLabel = "Continue",
+    tone = "progress",
+    footnote = "",
+    secondaryUrl = null,
+    secondaryLabel = "",
+    // A screen that asks the user a question must not answer it for them, so any
+    // page offering a genuine choice turns the auto-advance off and waits.
+    autoAdvance = true
+  } = options;
+
+  const delaySeconds = Math.max(0, Math.round(redirectDelayMs / 100) / 10);
+  const safeRedirect = redirectUrl ? escapeHtml(redirectUrl) : null;
+  const safeSecondary = secondaryUrl && secondaryLabel ? escapeHtml(secondaryUrl) : null;
+  const advances = Boolean(safeRedirect && autoAdvance);
+
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="robots" content="noindex">',
+    advances ? '<meta http-equiv="refresh" content="' + delaySeconds + ';url=' + safeRedirect + '">' : "",
+    "<title>" + escapeHtml(title) + "</title>",
+    "<style>",
+    AUTH_PAGE_STYLES,
     "</style></head><body>",
     '<main class="card" role="status" aria-live="polite">',
     "<h1>" + escapeHtml(heading) + "</h1>",
@@ -1028,6 +1066,7 @@ function renderAuthStatusPage(options = {}) {
     "<ul>",
     renderAuthProviderRow(AUTH_PAGE_GOOGLE_MARK, "Google", google),
     renderAuthProviderRow(AUTH_PAGE_META_MARK, "Meta", meta),
+    callrail === "hidden" ? "" : renderAuthProviderRow(AUTH_PAGE_CALLRAIL_MARK, "CallRail", callrail),
     "</ul>",
     safeRedirect ? '<a class="cta" href="' + safeRedirect + '">' + escapeHtml(continueLabel) + "</a>" : "",
     safeSecondary ? '<a class="cta cta--ghost" href="' + safeSecondary + '">' + escapeHtml(secondaryLabel) + "</a>" : "",
@@ -1043,6 +1082,91 @@ function renderAuthStatusPage(options = {}) {
       : "",
     "</body></html>"
   ].filter(Boolean).join("");
+}
+
+// CallRail authenticates with an API key rather than a redirect, so this screen has to
+// collect one. The key is posted straight back to this server over HTTPS, sealed into
+// the session token, and never rendered back to the page.
+function renderCallRailConnectPage(options = {}) {
+  const {
+    chain = "",
+    skipUrl = null,
+    errorMessage = "",
+    google = "connected",
+    meta = "optional",
+    heading = "Connect CallRail",
+    message = "Paste a CallRail API key to query your own call data. Everything else already works without it."
+  } = options;
+
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head>',
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<meta name="robots" content="noindex">',
+    '<meta name="referrer" content="no-referrer">',
+    "<title>" + escapeHtml(heading) + "</title>",
+    "<style>",
+    AUTH_PAGE_STYLES,
+    ".field{display:block;margin:0 0 16px}",
+    ".field label{display:block;font-weight:600;font-size:13.5px;margin:0 0 6px}",
+    ".field input{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);",
+    "background:var(--bg);color:var(--ink);font:inherit;font-size:14px}",
+    ".field input:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}",
+    ".hint{margin:6px 0 0;font-size:12.5px;color:var(--muted)}",
+    ".err{margin:0 0 16px;padding:11px 13px;border-radius:10px;font-size:13.5px;",
+    "background:rgba(200,60,40,.10);border:1px solid rgba(200,60,40,.35);color:var(--warn)}",
+    "</style></head><body>",
+    '<main class="card">',
+    "<h1>" + escapeHtml(heading) + "</h1>",
+    '<p class="sub">' + escapeHtml(message) + "</p>",
+    "<ul>",
+    renderAuthProviderRow(AUTH_PAGE_GOOGLE_MARK, "Google", google),
+    renderAuthProviderRow(AUTH_PAGE_META_MARK, "Meta", meta),
+    renderAuthProviderRow(AUTH_PAGE_CALLRAIL_MARK, "CallRail", "optional"),
+    "</ul>",
+    errorMessage ? '<p class="err" role="alert">' + escapeHtml(errorMessage) + "</p>" : "",
+    '<form method="post" action="/auth/callrail" autocomplete="off">',
+    '<input type="hidden" name="chain" value="' + escapeHtml(chain) + '">',
+    '<span class="field">',
+    '<label for="apiKey">CallRail API key</label>',
+    '<input id="apiKey" name="apiKey" type="password" required autocomplete="off" ',
+    'spellcheck="false" autocapitalize="off" placeholder="Paste your API key">',
+    '<span class="hint">CallRail: Account &rarr; Integrations &rarr; API Keys. Stored encrypted in this connection only. It stays until you remove or reconnect the connector, and is never shown again.</span>',
+    "</span>",
+    '<button class="cta" type="submit">Connect CallRail</button>',
+    "</form>",
+    skipUrl ? '<a class="cta cta--ghost" href="' + escapeHtml(skipUrl) + '">Skip &mdash; finish without CallRail</a>' : "",
+    '<p class="note">CallRail is optional. Without it the CallRail tools stay switched off and nothing else changes.</p>',
+    "</main></body></html>"
+  ].filter(Boolean).join("");
+}
+
+function sendCallRailConnectPage(res, options = {}) {
+  res.set("Content-Type", "text/html; charset=utf-8");
+  res.set("Cache-Control", "no-store");
+  // The key is typed on this page, so keep it out of referrers and out of any cache.
+  res.set("Referrer-Policy", "no-referrer");
+  return res.status(options.httpStatus || 200).send(renderCallRailConnectPage(options));
+}
+
+// Validating against a cheap endpoint proves the key works and names the account, so
+// a typo is caught here rather than surfacing later as a confusing tool failure.
+async function verifyCallRailKey(apiKey) {
+  const response = await callCallRailApi("/a.json", {}, apiKey);
+  if (!response.ok) {
+    const detail = response.status === 401 || response.status === 403
+      ? "CallRail rejected that key. Check it was copied whole and is still active."
+      : `CallRail returned HTTP ${response.status}.`;
+    return { ok: false, message: detail };
+  }
+  const accounts = response.body?.accounts || [];
+  return {
+    ok: true,
+    accountId: accounts[0]?.id ? String(accounts[0].id) : null,
+    accountName: accounts[0]?.name || null,
+    accountCount: accounts.length
+  };
 }
 
 function sendAuthStatusPage(res, options) {
@@ -1335,10 +1459,11 @@ function normalizeScopes(scopeValue) {
 // only ever reports its own scopes. Deriving the union from the credentials actually
 // present stops one provider's scope string from overwriting the other's, which would
 // silently strip the second provider's permissions from the minted token.
-function buildSessionScope({ googleScope, metaScope, fallbackScope } = {}) {
+function buildSessionScope({ googleScope, metaScope, hasCallRail, fallbackScope } = {}) {
   const google = googleScope ? normalizeGoogleAuthScopes(googleScope) : [];
   const meta = metaScope ? normalizeMetaScopes(metaScope) : [];
-  const combined = Array.from(new Set([...google, ...meta]));
+  const callrail = hasCallRail ? [CALLRAIL_SCOPE] : [];
+  const combined = Array.from(new Set([...google, ...meta, ...callrail]));
   return combined.length ? combined.join(" ") : String(fallbackScope || "");
 }
 
@@ -1419,8 +1544,132 @@ function extractBearerToken(req) {
   return authHeader.slice("Bearer ".length);
 }
 
-function requireCallRailApiToken() {
-  return requireEnv("CALLRAIL_API_TOKEN");
+// The shared environment token is every user of this server querying the deployer's
+// own CallRail account, so it is off unless someone deliberately turns it on for a
+// single-tenant deployment.
+// This server hands every user the same Google Ads developer token and, optionally, the
+// same CallRail key. Those are metered and owned centrally, so who may connect has to be
+// controlled here rather than left to whoever finds the URL.
+const DEFAULT_ALLOWED_DOMAINS = ["cibirix.com"];
+// Partner domains are shared with people who are not on the team, so an address there
+// must also identify itself as one of ours.
+const DEFAULT_PARTNER_DOMAINS = ["sensei.com", "senseidigita.com", "shelterscore.com"];
+const DEFAULT_EMAIL_MARKERS = ["cibirix", "cbx"];
+
+function parseListEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  return String(raw).split(/[,\s]+/).map((v) => v.trim().toLowerCase()).filter(Boolean);
+}
+
+function getAllowedDomains() {
+  return parseListEnv("ALLOWED_EMAIL_DOMAINS", DEFAULT_ALLOWED_DOMAINS);
+}
+
+function getPartnerDomains() {
+  return parseListEnv("ALLOWED_PARTNER_DOMAINS", DEFAULT_PARTNER_DOMAINS);
+}
+
+function getEmailMarkers() {
+  return parseListEnv("ALLOWED_EMAIL_MARKERS", DEFAULT_EMAIL_MARKERS);
+}
+
+// Named addresses, for people on mailboxes no rule covers.
+function getAllowedEmails() {
+  return parseListEnv("ALLOWED_EMAILS", []);
+}
+
+function isAllowlistEnforced() {
+  if (["1", "true", "yes"].includes(String(process.env.ACCESS_ALLOWLIST_DISABLED || "").toLowerCase())) {
+    return false;
+  }
+  return getAllowedDomains().length > 0
+    || getPartnerDomains().length > 0
+    || getEmailMarkers().length > 0
+    || getAllowedEmails().length > 0;
+}
+
+const EMAIL_SHAPE = /^[^\s@]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+
+function splitEmail(email) {
+  const value = String(email || "").trim().toLowerCase();
+  // Exactly one @ and a hostname-shaped domain. Splitting on the last @ alone would let
+  // "x@evil.com?@cibirix.com" read as the cibirix.com domain.
+  if (!EMAIL_SHAPE.test(value)) return null;
+  const at = value.lastIndexOf("@");
+  return { local: value.slice(0, at), domain: value.slice(at + 1), email: value };
+}
+
+// Any one of these is enough on its own: an exact address, a domain we own, a partner
+// domain, or a marker in the local part.
+//
+// The marker rule deliberately accepts personal mailboxes such as
+// jayant.cibirix@gmail.com, which means it also accepts any address a stranger chooses
+// to put "cibirix" or "cbx" in. It is a convenience rule, not a security boundary. Use
+// ALLOWED_EMAILS for named personal accounts if that matters more than the convenience.
+function isEmailAllowed(email) {
+  if (!isAllowlistEnforced()) return { allowed: true, reason: "allowlist_disabled" };
+  const parts = splitEmail(email);
+  if (!parts) return { allowed: false, reason: "no_email" };
+  if (getAllowedEmails().includes(parts.email)) {
+    return { allowed: true, reason: "exact_address", email: parts.email };
+  }
+  if (getAllowedDomains().includes(parts.domain)) {
+    return { allowed: true, reason: "allowed_domain", domain: parts.domain };
+  }
+  if (getPartnerDomains().includes(parts.domain)) {
+    return { allowed: true, reason: "partner_domain", domain: parts.domain };
+  }
+  const marker = getEmailMarkers().find((m) => parts.local.includes(m));
+  if (marker) return { allowed: true, reason: "email_marker", domain: parts.domain, marker };
+  return { allowed: false, reason: "no_matching_rule", domain: parts.domain };
+}
+
+// The id_token comes straight back from Google's token endpoint over TLS in response to
+// a request carrying our client secret, so the payload is read directly.
+function readEmailFromIdToken(idToken) {
+  const parts = String(idToken || "").split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return payload?.email ? String(payload.email).toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function describeAllowlist() {
+  return {
+    enforced: isAllowlistEnforced(),
+    allowedDomains: getAllowedDomains(),
+    partnerDomains: getPartnerDomains(),
+    emailMarkers: getEmailMarkers(),
+    allowedEmails: getAllowedEmails(),
+    markerRuleAcceptsAnyDomain: getEmailMarkers().length > 0
+  };
+}
+
+function allowsSharedCallRailToken() {
+  return ["1", "true", "yes"].includes(String(process.env.CALLRAIL_ALLOW_SHARED_TOKEN || "").toLowerCase());
+}
+
+function getSharedCallRailToken() {
+  return allowsSharedCallRailToken() ? (process.env.CALLRAIL_API_TOKEN || null) : null;
+}
+
+function requireCallRailKey(apiKey) {
+  const key = apiKey || getSharedCallRailToken();
+  if (!key) {
+    throw new Error("No CallRail API key on this session. Connect one at /auth/callrail.");
+  }
+  return key;
+}
+
+// Only ever show enough of a key to recognise it.
+function maskCallRailKey(apiKey) {
+  const value = String(apiKey || "");
+  if (value.length <= 8) return value ? "*".repeat(value.length) : "";
+  return `${value.slice(0, 4)}${"*".repeat(Math.max(4, value.length - 8))}${value.slice(-4)}`;
 }
 
 function requireGoogleAdsDeveloperToken() {
@@ -1585,7 +1834,10 @@ function sealGoogleSection(google) {
   return {
     refreshToken: google.refreshToken,
     scope: google.scope,
-    tokenType: google.tokenType || "Bearer"
+    tokenType: google.tokenType || "Bearer",
+    // Kept so access can be re-checked on every call, which is what makes removing
+    // someone from the allowlist take effect immediately rather than in 30 days.
+    email: google.email || null
   };
 }
 
@@ -1600,6 +1852,16 @@ function sealMetaSection(meta) {
   };
 }
 
+function sealCallRailSection(callrail) {
+  if (!callrail?.apiKey) return undefined;
+  return {
+    apiKey: callrail.apiKey,
+    accountId: callrail.accountId || null,
+    accountName: callrail.accountName || null,
+    connectedAt: callrail.connectedAt || null
+  };
+}
+
 function mintAccessToken(req, payload) {
   return encryptJson({
     typ: "mcp_access_token",
@@ -1611,7 +1873,8 @@ function mintAccessToken(req, payload) {
     iat: Date.now(),
     exp: Date.now() + ACCESS_TOKEN_TTL_MS,
     google: sealGoogleSection(payload.google),
-    meta: sealMetaSection(payload.meta)
+    meta: sealMetaSection(payload.meta),
+    callrail: sealCallRailSection(payload.callrail)
   });
 }
 
@@ -1626,7 +1889,8 @@ function mintRefreshToken(req, payload) {
     iat: Date.now(),
     exp: Date.now() + REFRESH_TOKEN_TTL_MS,
     google: sealGoogleSection(payload.google),
-    meta: sealMetaSection(payload.meta)
+    meta: sealMetaSection(payload.meta),
+    callrail: sealCallRailSection(payload.callrail)
   });
 }
 
@@ -1743,7 +2007,7 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
   let session = sessionId ? getSession(sessionId) : null;
   // Serverless instances do not share the in-memory session cache, so rebuild the
   // session from the credentials sealed inside the access token when it is missing.
-  if (sessionId && (payload.google?.refreshToken || payload.meta?.accessToken)) {
+  if (sessionId && (payload.google?.refreshToken || payload.meta?.accessToken || payload.callrail?.apiKey)) {
     session = saveSession(sessionId, {
       ...(session || {}),
       sessionId,
@@ -1753,10 +2017,13 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       scope: session?.scope || buildSessionScope({
         googleScope: payload.google?.scope,
         metaScope: payload.meta?.scope,
+          hasCallRail: Boolean(session?.callrail?.apiKey || payload.callrail?.apiKey),
         fallbackScope: payload.scope
       }),
       tokenType: payload.google?.tokenType || "Bearer",
+      email: session?.email || payload.google?.email || null,
       meta: session?.meta || (payload.meta?.accessToken ? payload.meta : null),
+      callrail: session?.callrail || (payload.callrail?.apiKey ? payload.callrail : null),
       sessionExpiresAt: Date.now() + SESSION_TTL_MS
     });
   }
@@ -1768,6 +2035,22 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       details: { debug: "no_valid_session" }
     });
   }
+  // Re-checked per request rather than only at connect, so taking someone off the
+  // allowlist cuts them off now instead of when their token eventually expires.
+  const sessionEmail = session.email || payload.google?.email || null;
+  const sessionAccess = isEmailAllowed(sessionEmail);
+  if (!sessionAccess.allowed) {
+    if (sessionId) deleteSession(sessionId);
+    throw buildAuthError({
+      httpStatus: 403,
+      error: "access_denied",
+      errorDescription: sessionAccess.reason === "no_email"
+        ? "This connection predates access control. Reconnect to continue."
+        : "This account is not permitted to use this server.",
+      details: { debug: "not_on_allowlist", reason: sessionAccess.reason }
+    });
+  }
+
   const grantedScopes = normalizeScopes(session.scope || payload.scope);
   if (!hasScopes(grantedScopes, requiredScopes)) {
     throw buildAuthError({
@@ -1782,6 +2065,25 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
   // rejected for having no Google refresh token and vice versa.
   const needsGoogle = scopesInclude(requiredScopes, GOOGLE_SCOPES);
   const needsMeta = scopesInclude(requiredScopes, META_SCOPES);
+  const needsCallRail = scopesInclude(requiredScopes, CALLRAIL_SCOPES);
+
+  // A shared environment key would hand every user of this server the deployer's own
+  // call records, so it stands in only when someone has explicitly opted into it.
+  const sessionCallRail = session.callrail || (payload.callrail?.apiKey ? payload.callrail : null);
+  const sharedCallRailToken = getSharedCallRailToken();
+  const callRailCredentials = sessionCallRail?.apiKey
+    ? { ...sessionCallRail, source: "session" }
+    : sharedCallRailToken
+      ? { apiKey: sharedCallRailToken, accountId: null, accountName: null, source: "shared_environment" }
+      : null;
+  if (needsCallRail && !callRailCredentials?.apiKey) {
+    throw buildAuthError({
+      httpStatus: 401,
+      error: "invalid_token",
+      errorDescription: "No CallRail API key on this session. Connect one at /auth/callrail.",
+      details: { debug: "no_callrail_credentials" }
+    });
+  }
 
   const metaCredentials = session.meta || (payload.meta?.accessToken ? payload.meta : null);
   if (needsMeta) {
@@ -1814,6 +2116,7 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
     scopes: grantedScopes,
     googleCredentials,
     metaCredentials,
+    callRailCredentials,
     sessionId,
     verifiedScopesKey: requiredScopes.join(" ")
   };
@@ -1845,7 +2148,7 @@ async function callGoogleApi(url, accessToken, options = {}) {
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
-async function callCallRailApi(pathOrUrl, query = {}) {
+async function callCallRailApi(pathOrUrl, query = {}, apiKey) {
   const url = pathOrUrl.startsWith("http")
     ? new URL(pathOrUrl)
     : new URL(`${getCallRailBaseUrl()}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`);
@@ -1853,7 +2156,7 @@ async function callCallRailApi(pathOrUrl, query = {}) {
   const response = await fetch(url.toString(), {
     method: "GET",
     headers: {
-      Authorization: `Token token="${requireCallRailApiToken()}"`,
+      Authorization: `Token token="${requireCallRailKey(apiKey)}"`,
       Accept: "application/json"
     }
   });
@@ -1923,12 +2226,21 @@ async function withVerifiedToolAuth(req, requiredScopes, handler) {
   }
 }
 
-async function withCallRailTool(handler) {
-  try {
-    return await handler();
-  } catch (error) {
-    return buildToolResult(toToolErrorPayload(error), true);
-  }
+// CallRail tools used to run with no auth check at all, against a shared environment
+// key, which meant any holder of any valid MCP token could read the deployer's own call
+// records. They now verify the token like every other provider and use the key that
+// belongs to the calling session.
+async function withCallRailTool(req, toolName, handler) {
+  return withVerifiedToolAuth(req, CALLRAIL_TOOL_SCOPES[toolName] || [CALLRAIL_SCOPE], async ({ callRailCredentials }) => {
+    try {
+      return await handler({
+        apiKey: callRailCredentials.apiKey,
+        credentials: callRailCredentials
+      });
+    } catch (error) {
+      return buildToolResult(toToolErrorPayload(error), true);
+    }
+  });
 }
 
 const GOOGLE_ADS_MAX_PAGE_SIZE = 10000;
@@ -3452,6 +3764,9 @@ function getEnvironmentPresence() {
     META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
     META_LOGIN_CONFIG_ID: Boolean(process.env.META_LOGIN_CONFIG_ID),
     CALLRAIL_API_TOKEN: Boolean(process.env.CALLRAIL_API_TOKEN),
+    CALLRAIL_ALLOW_SHARED_TOKEN: allowsSharedCallRailToken(),
+    ACCESS_ALLOWLIST: describeAllowlist(),
+    CALLRAIL_OFFER_STEP: shouldOfferCallRail(),
     CALLRAIL_API_BASE_URL: Boolean(process.env.CALLRAIL_API_BASE_URL)
   };
 }
@@ -3814,38 +4129,38 @@ async function searchGoogleAdsFields(accessToken, params) {
 }
 
 async function listCallRailAccounts(params = {}) {
-  return callCallRailApi("/a.json", params.query);
+  return callCallRailApi("/a.json", params.query, params.apiKey);
 }
 
 async function listCallRailCompanies(params) {
-  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/companies.json`, params.query);
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/companies.json`, params.query, params.apiKey);
 }
 
 async function listCallRailCalls(params) {
   if (params.nextPageUrl) {
-    return callCallRailApi(params.nextPageUrl);
+    return callCallRailApi(params.nextPageUrl, {}, params.apiKey);
   }
-  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls.json`, params.query);
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls.json`, params.query, params.apiKey);
 }
 
 async function getCallRailCall(params) {
-  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls/${encodeURIComponent(params.callId)}.json`, params.query);
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls/${encodeURIComponent(params.callId)}.json`, params.query, params.apiKey);
 }
 
 async function getCallRailCallSummary(params) {
-  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls/summary.json`, params.query);
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls/summary.json`, params.query, params.apiKey);
 }
 
 async function getCallRailCallTimeseries(params) {
-  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls/timeseries.json`, params.query);
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/calls/timeseries.json`, params.query, params.apiKey);
 }
 
 async function listCallRailTrackers(params) {
-  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/trackers.json`, params.query);
+  return callCallRailApi(`/a/${encodeURIComponent(params.accountId)}/trackers.json`, params.query, params.apiKey);
 }
 
 async function getCallRailResource(params) {
-  return callCallRailApi(normalizeCallRailPath(params.path), params.query);
+  return callCallRailApi(normalizeCallRailPath(params.path), params.query, params.apiKey);
 }
 
 function isToolCall(body) {
@@ -5119,8 +5434,8 @@ function createServer(req) {
     const parsed = z.object({
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await listCallRailAccounts(parsed);
+    return withCallRailTool(req, "list_callrail_accounts", async ({ apiKey }) => {
+      const response = await listCallRailAccounts({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
@@ -5137,8 +5452,8 @@ function createServer(req) {
       accountId: z.string().min(1),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await listCallRailCompanies(parsed);
+    return withCallRailTool(req, "list_callrail_companies", async ({ apiKey }) => {
+      const response = await listCallRailCompanies({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
@@ -5163,8 +5478,8 @@ function createServer(req) {
         error_description: "Provide accountId or nextPageUrl."
       }, true);
     }
-    return withCallRailTool(async () => {
-      const response = await listCallRailCalls(parsed);
+    return withCallRailTool(req, "list_callrail_calls", async ({ apiKey }) => {
+      const response = await listCallRailCalls({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
@@ -5183,8 +5498,8 @@ function createServer(req) {
       callId: z.string().min(1),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await getCallRailCall(parsed);
+    return withCallRailTool(req, "get_callrail_call", async ({ apiKey }) => {
+      const response = await getCallRailCall({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
@@ -5201,8 +5516,8 @@ function createServer(req) {
       accountId: z.string().min(1),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await getCallRailCallSummary(parsed);
+    return withCallRailTool(req, "get_callrail_call_summary", async ({ apiKey }) => {
+      const response = await getCallRailCallSummary({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
@@ -5219,8 +5534,8 @@ function createServer(req) {
       accountId: z.string().min(1),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await getCallRailCallTimeseries(parsed);
+    return withCallRailTool(req, "get_callrail_call_timeseries", async ({ apiKey }) => {
+      const response = await getCallRailCallTimeseries({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
@@ -5237,11 +5552,36 @@ function createServer(req) {
       accountId: z.string().min(1),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await listCallRailTrackers(parsed);
+    return withCallRailTool(req, "list_callrail_trackers", async ({ apiKey }) => {
+      const response = await listCallRailTrackers({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
+  server.registerTool("get_callrail_connection", {
+    title: "Get CallRail Connection",
+    description: "Show which CallRail account this session is connected to, whether the key came from the session or a shared server key, and how many accounts it can reach. The API key itself is never returned, only a masked fingerprint.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true }
+  }, async () => withCallRailTool(req, "get_callrail_connection", async ({ apiKey, credentials }) => {
+    const response = await listCallRailAccounts({ apiKey });
+    const accounts = response.ok ? (response.body?.accounts || []) : [];
+    return buildToolResult({
+      connected: response.ok,
+      // A fingerprint is enough to tell two keys apart without exposing either.
+      keyFingerprint: maskCallRailKey(apiKey),
+      keySource: credentials.source === "shared_environment"
+        ? "shared_environment"
+        : "session",
+      sharedKeyWarning: credentials.source === "shared_environment"
+        ? "This server is using its own CALLRAIL_API_TOKEN, so every user of this deployment shares one CallRail account. Connect a personal key at /auth/callrail."
+        : undefined,
+      connectedAt: credentials.connectedAt || null,
+      accountCount: accounts.length,
+      accounts: accounts.map((account) => ({ id: account.id, name: account.name })),
+      guardrails: PLATFORM_GUARDRAILS.callrail,
+      raw: response.ok ? { accountCount: accounts.length } : toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
   server.registerTool("list_meta_ad_accounts", {
     title: "List Meta Ad Accounts",
     description: "List the Meta ad accounts the authorized user can access, with id, name, currency, timezone and account status.",
@@ -5554,7 +5894,7 @@ function createServer(req) {
       minDurationSeconds: z.number().int().min(0).optional(),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
+    return withCallRailTool(req, "run_callrail_preset", async ({ apiKey }) => {
       const definition = CALLRAIL_PRESET_DEFINITIONS[parsed.preset];
       if (!definition) {
         return buildToolResult({
@@ -5566,6 +5906,7 @@ function createServer(req) {
       const dateRange = resolveDateWindow(parsed);
       const perPage = parsed.perPage || 250;
       const response = await listCallRailCalls({
+        apiKey,
         accountId: parsed.accountId,
         query: {
           start_date: dateRange.startDate,
@@ -5639,12 +5980,121 @@ function createServer(req) {
       path: z.string().min(1),
       query: z.record(z.any()).optional()
     }).parse(params);
-    return withCallRailTool(async () => {
-      const response = await getCallRailResource(parsed);
+    return withCallRailTool(req, "get_callrail_resource", async ({ apiKey }) => {
+      const response = await getCallRailResource({ ...parsed, apiKey });
       return buildToolResult(toGoogleDebugPayload(response), !response.ok);
     });
   });
   return server;
+}
+
+// Unlike Meta, CallRail needs nothing configured server-side, so the step is offered
+// by default. Turn it off for deployments that deliberately share one key.
+function shouldOfferCallRail() {
+  return !["0", "false", "no"].includes(String(process.env.CALLRAIL_OFFER_STEP || "true").toLowerCase());
+}
+
+function buildCallRailStepUrl(req, parts) {
+  const url = new URL(`${getBaseUrl(req)}/auth/callrail`);
+  url.searchParams.set("chain", buildCallRailChainState(parts));
+  return url.toString();
+}
+
+function buildCallRailChainState(parts) {
+  return encryptJson({
+    typ: "callrail_chain_state",
+    sessionId: parts.sessionId,
+    google: parts.google || null,
+    meta: parts.meta || null,
+    scope: parts.scope || "",
+    resource: parts.resource,
+    clientRedirectUri: parts.clientRedirectUri || null,
+    clientState: parts.clientState || null,
+    codeChallenge: parts.codeChallenge || null,
+    codeChallengeMethod: parts.codeChallengeMethod || "S256",
+    returnTo: parts.returnTo || "/",
+    issuedAt: Date.now()
+  });
+}
+
+function readCallRailChainState(value) {
+  const chain = decryptJson(String(value));
+  if (chain.typ !== "callrail_chain_state") throw new Error("wrong chain type");
+  if (Date.now() - Number(chain.issuedAt || 0) > OAUTH_STATE_TTL_MS) {
+    throw new Error("This page expired. Start again from /auth/google/start.");
+  }
+  return chain;
+}
+
+// Mints the final authorization code and sends the browser wherever it was headed.
+function finishCallRailChain(req, res, chain, callRailCredentials) {
+  const scope = buildSessionScope({
+    googleScope: chain.google?.scope,
+    metaScope: chain.meta?.scope,
+    hasCallRail: Boolean(callRailCredentials?.apiKey),
+    fallbackScope: chain.scope
+  });
+
+  saveSession(chain.sessionId, {
+    sessionId: chain.sessionId,
+    refreshToken: chain.google?.refreshToken || null,
+    accessToken: null,
+    expiryDate: 0,
+    scope,
+    tokenType: "Bearer",
+    meta: chain.meta || null,
+    callrail: callRailCredentials || null,
+    sessionExpiresAt: Date.now() + SESSION_TTL_MS
+  });
+
+  const authCode = encryptJson({
+    typ: "mcp_authorization_code",
+    iss: getBaseUrl(req),
+    aud: chain.resource,
+    resource: chain.resource,
+    sessionId: chain.sessionId,
+    scope,
+    codeChallenge: chain.codeChallenge,
+    codeChallengeMethod: chain.codeChallengeMethod,
+    exp: Date.now() + AUTH_CODE_TTL_MS,
+    google: chain.google || undefined,
+    meta: chain.meta || undefined,
+    callrail: callRailCredentials || undefined
+  });
+
+  const connected = Boolean(callRailCredentials?.apiKey);
+  const googleConnected = Boolean(chain.google?.refreshToken);
+  const metaConnected = Boolean(chain.meta?.accessToken);
+
+  let target;
+  if (chain.clientRedirectUri) {
+    const redirectUrl = new URL(String(chain.clientRedirectUri));
+    redirectUrl.searchParams.set("code", authCode);
+    if (chain.clientState) redirectUrl.searchParams.set("state", String(chain.clientState));
+    target = redirectUrl.toString();
+  } else {
+    const successUrl = new URL(String(chain.returnTo || "/"), getBaseUrl(req));
+    successUrl.searchParams.set("auth", "success");
+    target = successUrl.toString();
+  }
+
+  return sendAuthStatusPage(res, {
+    title: "You're all set",
+    heading: "You're all set",
+    message: connected
+      ? "CallRail is connected with your own API key. Calls, trackers and attribution are ready to query alongside everything else."
+      : "Your connection is ready. CallRail was skipped, so its tools stay switched off.",
+    google: googleConnected ? "connected" : "pending",
+    meta: metaConnected ? "connected" : "optional",
+    callrail: connected ? "connected" : "optional",
+    redirectUrl: target,
+    redirectDelayMs: 2000,
+    continueLabel: chain.clientRedirectUri ? "Finish setup" : "Done",
+    tone: "success",
+    footnote: connected
+      ? "Your key is sealed into your own session. Nobody else using this server can see or use it."
+      : `You can connect CallRail any time at ${getBaseUrl(req)}/auth/callrail.`
+  });
 }
 
 const app = express();
@@ -5782,9 +6232,39 @@ app.get("/auth/google/callback", async (req, res) => {
       });
     }
 
+    // Check who this is before issuing anything. The Google Ads developer token and any
+    // shared CallRail key are central resources handed to whoever connects, so the gate
+    // belongs here rather than at the tools.
+    const connectingEmail = readEmailFromIdToken(tokens.id_token);
+    const access = isEmailAllowed(connectingEmail);
+    if (!access.allowed) {
+      logAuthRouteDebug({
+        route: "/auth/google/callback",
+        access_denied: true,
+        reason: access.reason,
+        domain: access.domain || null
+      });
+      return sendAuthStatusPage(res, {
+        httpStatus: 403,
+        title: "Access not available",
+        heading: "This account can't connect",
+        message: access.reason === "no_email"
+          ? "Google did not return an email address for this account, so access could not be checked. Reconnect and allow the email permission."
+          : "This server is limited to the team. Sign in again with your work account, or ask an admin to add your address.",
+        google: "failed",
+        meta: "pending",
+        callrail: "hidden",
+        autoAdvance: false,
+        redirectUrl: `${getBaseUrl(req)}/auth/google/start`,
+        continueLabel: "Try a different account",
+        footnote: connectingEmail ? `Signed in as ${connectingEmail}` : ""
+      });
+    }
+
     const grantedScopes = normalizeGoogleAuthScopes(tokens.scope || appState.scope);
     const sessionId = crypto.randomUUID();
     saveSession(sessionId, {
+      email: connectingEmail,
       sessionId,
       refreshToken: tokens.refresh_token,
       accessToken: tokens.access_token,
@@ -5822,6 +6302,7 @@ app.get("/auth/google/callback", async (req, res) => {
         sessionId,
         googleAuthCode: authCode,
         google: {
+          email: connectingEmail,
           refreshToken: tokens.refresh_token,
           accessToken: tokens.access_token,
           expiryDate: tokens.expiry_date,
@@ -5843,6 +6324,29 @@ app.get("/auth/google/callback", async (req, res) => {
     // Where "finish on Google alone" sends the browser: back to the connector with the
     // code if one is waiting, otherwise to the app's own success page.
     const buildGoogleOnlyUrl = () => {
+      // CallRail is the last optional step, so "finish on Google" still passes through
+      // it rather than ending the connection early.
+      if (shouldOfferCallRail()) {
+        return buildCallRailStepUrl(req, {
+          sessionId,
+          google: {
+            email: connectingEmail,
+            refreshToken: tokens.refresh_token,
+            accessToken: tokens.access_token,
+            expiryDate: tokens.expiry_date,
+            scope: tokens.scope || grantedScopes.join(" "),
+            tokenType: tokens.token_type || "Bearer"
+          },
+          meta: null,
+          scope: grantedScopes.join(" "),
+          resource: appState.resource,
+          clientRedirectUri: appState.clientRedirectUri || null,
+          clientState: appState.clientState || null,
+          codeChallenge: appState.codeChallenge || null,
+          codeChallengeMethod: appState.codeChallengeMethod || "S256",
+          returnTo: appState.returnTo || "/"
+        });
+      }
       if (appState.clientRedirectUri) {
         const redirectUrl = new URL(String(appState.clientRedirectUri));
         redirectUrl.searchParams.set("code", authCode);
@@ -5867,6 +6371,7 @@ app.get("/auth/google/callback", async (req, res) => {
         message: "Ads, Analytics, Search Console and Merchant Center are ready to query. Add Facebook and Instagram too, or carry on with Google on its own.",
         google: "connected",
         meta: "optional",
+        callrail: shouldOfferCallRail() ? "optional" : "hidden",
         autoAdvance: false,
         redirectUrl: buildMetaChainUrl(),
         continueLabel: "Connect Meta",
@@ -5883,6 +6388,7 @@ app.get("/auth/google/callback", async (req, res) => {
       message: "Ads, Analytics, Search Console and Merchant Center are ready to query.",
       google: "connected",
       meta: isMetaConfigured() ? "optional" : "pending",
+      callrail: shouldOfferCallRail() ? "optional" : "hidden",
       redirectUrl: buildGoogleOnlyUrl(),
       redirectDelayMs: 1800,
       continueLabel: appState.clientRedirectUri ? "Finish setup" : "Done",
@@ -6216,8 +6722,27 @@ app.get("/auth/meta/callback", async (req, res) => {
       codeChallengeMethod: appState.codeChallengeMethod,
       exp: Date.now() + AUTH_CODE_TTL_MS,
       google: appState.linkedGoogle || undefined,
-      meta: metaCredentials
+      meta: metaCredentials,
+      // CallRail is offered after Meta, so nothing is connected yet here; carry through
+      // whatever an earlier step already collected.
+      callrail: appState.linkedCallRail || undefined
     });
+
+    // Meta is done; CallRail is the remaining optional step.
+    if (shouldOfferCallRail()) {
+      return res.redirect(302, buildCallRailStepUrl(req, {
+        sessionId,
+        google: appState.linkedGoogle || null,
+        meta: metaCredentials,
+        scope: combinedScope,
+        resource: appState.resource,
+        clientRedirectUri: appState.clientRedirectUri || null,
+        clientState: appState.clientState || null,
+        codeChallenge: appState.codeChallenge || null,
+        codeChallengeMethod: appState.codeChallengeMethod || "S256",
+        returnTo: appState.returnTo || "/"
+      }));
+    }
 
     const googleAlsoConnected = Boolean(appState.linkedGoogle?.refreshToken);
     const bothHeading = googleAlsoConnected ? "You're all set" : "Meta is connected";
@@ -6269,6 +6794,132 @@ app.get("/auth/meta/callback", async (req, res) => {
       details: error instanceof Error ? error.message : String(error)
     });
   }
+});
+
+// Everything needed to finish a connection once CallRail has been answered. The
+// authorization code is re-minted at the end because it has to carry whatever the
+// user actually connected, which is not known until the last step.
+app.get("/auth/callrail", (req, res) => {
+  try {
+    if (!req.query.chain) {
+      // Reached directly rather than through a connection, so there is no session to
+      // attach a key to. Say so instead of collecting a credential that goes nowhere.
+      return sendAuthStatusPage(res, {
+        title: "Connect CallRail",
+        heading: "Start from your connector",
+        message: "CallRail is connected as the last step of setting up this server, so that the key can be sealed into your session. Add the connector again and the CallRail screen will appear after Google.",
+        google: "pending",
+        meta: "optional",
+        callrail: "optional",
+        redirectUrl: `${getBaseUrl(req)}/auth/google/start`,
+        autoAdvance: false,
+        continueLabel: "Start connecting",
+        footnote: "CallRail is optional. Everything else in this server works without it."
+      });
+    }
+    const chain = readCallRailChainState(req.query.chain);
+    return sendCallRailConnectPage(res, {
+      chain: String(req.query.chain),
+      skipUrl: `${getBaseUrl(req)}/auth/callrail/skip?chain=${encodeURIComponent(String(req.query.chain))}`,
+      google: chain.google?.refreshToken ? "connected" : "pending",
+      meta: chain.meta?.accessToken ? "connected" : "optional"
+    });
+  } catch (error) {
+    return res.status(400).json({
+      error: "invalid_chain_state",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/auth/callrail", async (req, res) => {
+  let chain;
+  try {
+    chain = readCallRailChainState(req.body?.chain);
+  } catch (error) {
+    return res.status(400).json({
+      error: "invalid_chain_state",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  const apiKey = String(req.body?.apiKey || "").trim();
+  const rerender = (message) => sendCallRailConnectPage(res, {
+    chain: String(req.body?.chain || ""),
+    skipUrl: `${getBaseUrl(req)}/auth/callrail/skip?chain=${encodeURIComponent(String(req.body?.chain || ""))}`,
+    google: chain.google?.refreshToken ? "connected" : "pending",
+    meta: chain.meta?.accessToken ? "connected" : "optional",
+    errorMessage: message,
+    httpStatus: 400
+  });
+
+  if (!apiKey) return rerender("Enter a CallRail API key, or skip this step.");
+
+  let verification;
+  try {
+    verification = await verifyCallRailKey(apiKey);
+  } catch (error) {
+    // Never echo the failure verbatim: it can contain the key that was just sent.
+    logAuthRouteDebug({ route: "/auth/callrail", verify_failed: true });
+    return rerender("Could not reach CallRail to check that key. Try again in a moment.");
+  }
+  if (!verification.ok) return rerender(verification.message);
+
+  logAuthRouteDebug({
+    route: "/auth/callrail",
+    connected: true,
+    account_count: verification.accountCount
+  });
+
+  return finishCallRailChain(req, res, chain, {
+    apiKey,
+    accountId: verification.accountId,
+    accountName: verification.accountName,
+    connectedAt: new Date().toISOString()
+  });
+});
+
+app.get("/auth/callrail/skip", (req, res) => {
+  try {
+    const chain = readCallRailChainState(req.query.chain);
+    logAuthRouteDebug({ route: "/auth/callrail/skip", skipped: true });
+    return finishCallRailChain(req, res, chain, null);
+  } catch (error) {
+    return res.status(400).json({
+      error: "invalid_chain_state",
+      error_description: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+// RFC 7009. Clients call this when a connector is removed. Tokens are self-contained so
+// that any serverless instance can serve them, which means a token the client still
+// holds keeps working; what this does is drop the stored session, so the CallRail key
+// and Meta token held server-side stop existing. The real protection when someone
+// removes a connector is that the client destroys the token, and the key lives nowhere
+// else.
+app.post("/oauth/revoke", (req, res) => {
+  // The spec requires 200 for an invalid or already-revoked token, so nothing here
+  // distinguishes a bad token from a good one.
+  try {
+    const token = req.body?.token;
+    if (token) {
+      const payload = decryptJson(String(token));
+      if (payload?.sessionId) {
+        const existed = Boolean(getSession(payload.sessionId));
+        deleteSession(payload.sessionId);
+        logAuthRouteDebug({
+          route: "/oauth/revoke",
+          session_found: existed,
+          had_callrail: Boolean(payload.callrail?.apiKey),
+          had_meta: Boolean(payload.meta?.accessToken)
+        });
+      }
+    }
+  } catch {
+    // Undecryptable token: nothing to revoke, and the spec still wants a 200.
+  }
+  return res.status(200).end();
 });
 
 app.post("/oauth/token", async (req, res) => {
@@ -6328,10 +6979,12 @@ app.post("/oauth/token", async (req, res) => {
         scope: buildSessionScope({
           googleScope: payload.google?.scope,
           metaScope: payload.meta?.scope,
+          hasCallRail: Boolean(session?.callrail?.apiKey || payload.callrail?.apiKey),
           fallbackScope: payload.scope
         }),
         tokenType: payload.google?.tokenType || "Bearer",
         meta: payload.meta?.accessToken ? payload.meta : null,
+        callrail: payload.callrail?.apiKey ? payload.callrail : null,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
       });
 
@@ -6340,14 +6993,16 @@ app.post("/oauth/token", async (req, res) => {
         resource: payload.resource,
         scope: payload.scope,
         google: session.refreshToken ? session : null,
-        meta: session.meta
+        meta: session.meta,
+        callrail: session.callrail
       });
       const newRefreshToken = mintRefreshToken(req, {
         sessionId,
         resource: payload.resource,
         scope: payload.scope,
         google: session.refreshToken ? session : null,
-        meta: session.meta
+        meta: session.meta,
+        callrail: session.callrail
       });
 
       return res.json({
@@ -6408,12 +7063,17 @@ app.post("/oauth/token", async (req, res) => {
         scope: buildSessionScope({
           googleScope: payload.google?.scope,
           metaScope: payload.meta?.scope,
+          hasCallRail: Boolean(session?.callrail?.apiKey || payload.callrail?.apiKey),
           fallbackScope: payload.scope
         }),
         tokenType: payload.google?.tokenType || "Bearer",
         meta: payload.meta?.accessToken ? payload.meta : null,
+        callrail: payload.callrail?.apiKey ? payload.callrail : null,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
       });
+
+      // The API key does not expire and needs no exchange, so it just rides along.
+      const callRailCredentials = session.callrail || (payload.callrail?.apiKey ? payload.callrail : null);
 
       let googleCredentials = null;
       let refreshedScope = null;
@@ -6480,12 +7140,14 @@ app.post("/oauth/token", async (req, res) => {
       const grantedScopes = normalizeScopes(buildSessionScope({
         googleScope: refreshedScope || googleCredentials?.scope || payload.google?.scope,
         metaScope: metaCredentials?.scope || payload.meta?.scope,
+        hasCallRail: Boolean(callRailCredentials?.apiKey || payload.callrail?.apiKey),
         fallbackScope: session.scope || payload.scope
       }));
       saveSession(sessionId, {
         ...(googleCredentials || session),
         sessionId,
         meta: metaCredentials,
+        callrail: callRailCredentials,
         sessionExpiresAt: Date.now() + SESSION_TTL_MS
       });
 
@@ -6494,14 +7156,16 @@ app.post("/oauth/token", async (req, res) => {
         resource: payload.resource,
         scope: grantedScopes.join(" "),
         google: googleCredentials,
-        meta: metaCredentials
+        meta: metaCredentials,
+        callrail: callRailCredentials
       });
       const newRefreshToken = mintRefreshToken(req, {
         sessionId,
         resource: payload.resource,
         scope: grantedScopes.join(" "),
         google: googleCredentials,
-        meta: metaCredentials
+        meta: metaCredentials,
+        callrail: callRailCredentials
       });
 
       return res.json({
@@ -6533,6 +7197,7 @@ function buildAuthorizationServerMetadata(req) {
     authorization_endpoint: `${baseUrl}/auth/google/start`,
     token_endpoint: `${baseUrl}/oauth/token`,
     registration_endpoint: `${baseUrl}/register`,
+    revocation_endpoint: `${baseUrl}/oauth/revoke`,
     scopes_supported: GOOGLE_SCOPES,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
