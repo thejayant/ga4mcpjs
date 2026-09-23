@@ -3713,8 +3713,7 @@ const GA4_ADMIN_SINGLETONS = {
 
 const GA4_ADMIN_RESOURCE_NAMES = [
   ...Object.keys(GA4_ADMIN_COLLECTIONS),
-  ...Object.keys(GA4_ADMIN_SINGLETONS),
-  "change_history"
+  ...Object.keys(GA4_ADMIN_SINGLETONS)
 ];
 
 async function getGa4AdminResource(accessToken, propertyId, resource, params = {}) {
@@ -3728,30 +3727,6 @@ async function getGa4AdminResource(accessToken, propertyId, resource, params = {
   const url = new URL(`${GA4_ADMIN_BASE}/${property}/${collection}`);
   appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
   return callGoogleApi(url.toString(), accessToken, { method: "GET" });
-}
-
-// Change history is searched on the account, not the property, so the property is
-// read first to learn which account owns it.
-async function searchGa4ChangeHistory(accessToken, propertyId, params = {}) {
-  const property = normalizePropertyName(propertyId);
-  const propertyResponse = await callGoogleApi(`${GA4_ADMIN_BASE}/${property}`, accessToken, { method: "GET" });
-  if (!propertyResponse.ok) return { response: propertyResponse, requestCount: 1 };
-  const account = propertyResponse.body?.parent;
-  if (!account) {
-    return { response: { ok: false, status: 404, body: { error: "Property has no parent account." } }, requestCount: 1 };
-  }
-  const range = resolveDateWindow(params);
-  const response = await callGoogleApi(`${GA4_ADMIN_BASE}/${account}:searchChangeHistoryEvents`, accessToken, {
-    method: "POST",
-    body: JSON.stringify({
-      property,
-      earliestChangeTime: `${range.startDate}T00:00:00Z`,
-      latestChangeTime: `${range.endDate}T23:59:59Z`,
-      pageSize: params.pageSize,
-      pageToken: params.pageToken
-    })
-  });
-  return { response, requestCount: 2, account };
 }
 
 const GA4_ACCESS_DEFAULT_DIMENSIONS = ["userEmail", "accessMechanism", "reportType", "date"];
@@ -4055,25 +4030,39 @@ async function listManagedGoogleAdsAccounts(accessToken, { managerCustomerId, lo
 
 /* ---------------- Search Console: paging and multiple sites ---------------- */
 
+// Pulls Google's own reason out of a failed response, so a hint reflects what Google
+// actually said rather than a guess at the likely cause.
+function describeGoogleError(response) {
+  const body = response?.body;
+  const error = body?.error || (Array.isArray(body) ? body[0]?.error : null) || {};
+  const text = JSON.stringify(body ?? "");
+  const codes = [...new Set([...text.matchAll(/"([A-Z][A-Z0-9_]{3,})"/g)].map((match) => match[1]))];
+  return { status: response?.status ?? null, message: error.message || null, codes };
+}
+
 const SEARCH_CONSOLE_PAGE_SIZE = 25000;
 
 // Keeps asking for the next 25,000 rows until the API runs dry or the caller's
 // ceiling is reached. The fetcher is injected so the paging logic can be tested.
+//
+// One row past the ceiling is requested, so "cut off" is reported only when Search
+// Console really had more. Filling the ceiling exactly is not the same thing.
 async function collectPagedRows(fetchPage, { maxRows, startRow = 0, pageSize = SEARCH_CONSOLE_PAGE_SIZE }) {
+  const target = maxRows + 1;
   const rows = [];
   let cursor = startRow;
   let requests = 0;
-  while (rows.length < maxRows) {
-    const size = Math.min(pageSize, maxRows - rows.length);
+  while (rows.length < target) {
+    const size = Math.min(pageSize, target - rows.length);
     const response = await fetchPage({ startRow: cursor, rowLimit: size });
     requests += 1;
-    if (!response.ok) return { ok: false, response, rows, requests, truncated: false };
+    if (!response.ok) return { ok: false, response, rows: rows.slice(0, maxRows), requests, truncated: false };
     const page = response.body?.rows || [];
     rows.push(...page);
-    if (page.length < size) return { ok: true, rows, requests, truncated: false };
+    if (page.length < size) break;
     cursor += page.length;
   }
-  return { ok: true, rows, requests, truncated: true };
+  return { ok: true, rows: rows.slice(0, maxRows), requests, truncated: rows.length > maxRows };
 }
 
 /* ---------------- Merchant Center ---------------- */
@@ -6575,27 +6564,15 @@ function createServer(req) {
   /* ---------------- GA4: admin, access, audience exports, many properties ---------------- */
   server.registerTool("get_ga4_admin_resource", {
     title: "Get GA4 Admin Resource",
-    description: "Read GA4 property configuration: audiences, Google Ads links, BigQuery links, annotations, Firebase / SA360 / DV360 links, key events, custom and calculated metrics, channel groups, data streams, data retention, attribution settings, Google signals, the property itself, or its change history for a date range.",
+    description: "Read GA4 property configuration: audiences, Google Ads links, BigQuery links, annotations, Firebase / SA360 / DV360 links, key events, custom and calculated metrics, channel groups, data streams, data retention, attribution settings, Google signals, or the property itself. Change history is not available: Google only serves it to connections with edit access to GA4, and this server connects read-only.",
     inputSchema: {
       propertyId: z.string().min(1),
       resource: z.enum(GA4_ADMIN_RESOURCE_NAMES),
-      startDate: z.string().optional(),
-      endDate: z.string().optional(),
       pageSize: z.number().int().min(1).max(200).optional(),
       pageToken: z.string().optional()
     },
     annotations: { readOnlyHint: true }
   }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_ga4_admin_resource, async ({ googleCredentials }) => {
-    if (params.resource === "change_history") {
-      const result = await searchGa4ChangeHistory(googleCredentials.accessToken, params.propertyId, params);
-      return buildToolResult({
-        propertyId: normalizePropertyName(params.propertyId),
-        resource: "change_history",
-        account: result.account || null,
-        requestCount: result.requestCount,
-        raw: toGoogleDebugPayload(result.response)
-      }, !result.response.ok);
-    }
     const response = await getGa4AdminResource(googleCredentials.accessToken, params.propertyId, params.resource, params);
     return buildToolResult({
       propertyId: normalizePropertyName(params.propertyId),
@@ -6626,7 +6603,14 @@ function createServer(req) {
       propertyId: normalizePropertyName(params.propertyId),
       rows: response.ok ? mapGa4AccessReportRows(response.body) : [],
       rowCount: response.ok ? toNumber(response.body?.rowCount) ?? null : null,
-      hint: response.ok ? undefined : "The access report needs the Administrator role on the property.",
+      hint: response.ok ? undefined : (() => {
+        const error = describeGoogleError(response);
+        if (/scope/i.test(error.message || "")) return `This connection lacks the OAuth permission the access report needs: ${error.message}`;
+        if (error.status === 403 || error.codes.includes("PERMISSION_DENIED")) {
+          return `Google refused access${error.message ? `: ${error.message}` : ""}. Data access reports are only shown to users with the Administrator role on the property.`;
+        }
+        return `Google returned ${error.status}${error.message ? `: ${error.message}` : ""}.`;
+      })(),
       raw: response.ok ? { quota: response.body?.quota || null } : toGoogleDebugPayload(response)
     }, !response.ok);
   }));
@@ -6763,7 +6747,16 @@ function createServer(req) {
       forecast: params.action === "forecast" && response.ok ? mapKeywordForecast(response.body) : undefined,
       nextPageToken: response.body?.nextPageToken || null,
       request: request.body,
-      hint: response.ok ? undefined : "Keyword planning can be limited on test accounts and on some developer token access levels.",
+      hint: response.ok ? undefined : (() => {
+        const error = describeGoogleError(response);
+        if (error.codes.includes("CUSTOMER_NOT_ENABLED")) {
+          return "This Google Ads account is not enabled: it is cancelled, suspended or never finished setup. Use an active account. If you manage clients through a manager account, list_google_ads_customer_clients shows which client accounts are enabled.";
+        }
+        if (error.codes.includes("USER_PERMISSION_DENIED")) {
+          return "The connected Google user cannot access this account. If it sits under a manager account, pass that manager as loginCustomerId.";
+        }
+        return `Google returned ${error.status}${error.message ? `: ${error.message}` : ""}. Keyword planning can also be limited on test accounts.`;
+      })(),
       raw: response.ok ? undefined : toGoogleDebugPayload(response)
     }, !response.ok);
   }));
