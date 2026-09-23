@@ -161,6 +161,103 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 - `https://www.googleapis.com/auth/content`
 - `https://www.googleapis.com/auth/adwords`
 
+## Extended coverage
+
+| Area | Tool | What it adds |
+|---|---|---|
+| GA4 | `get_ga4_admin_resource` | Audiences, Google Ads / BigQuery / Firebase / SA360 / DV360 links, annotations, key events, custom and calculated metrics, channel groups, data streams, data retention, attribution settings, Google signals, the property, and its change history |
+| GA4 | `run_ga4_access_report` | Who accessed the property's data, how and when. Needs the Administrator role. |
+| GA4 | `run_ga4_audience_export` | List, create, check and read audience exports |
+| GA4 | `run_ga4_multi_property_report` | One report across up to 10 properties, rows tagged by property |
+| Google Ads | `google_ads_keyword_planner` | Keyword ideas from keywords, a URL or a site; historical volume and bids; forecasts |
+| Google Ads | `google_ads_reach_planner` | Plannable locations and products, and reach forecasts. Google must approve the account. |
+| Google Ads | `run_google_ads_across_accounts` | One GAQL query across every client under a manager account |
+| Search Console | `query_search_console_advanced` | Up to 10 sites at once, paging past 25,000 rows up to `maxRows` |
+| Merchant Center | `describe_merchant_report_fields` | Report tables with their dimensions and metrics, with no API request |
+| Merchant Center | `get_merchant_resource` | Promotions, shipping, return policies, conversion sources, regions, business info, homepage, programs, local and regional inventory |
+| Meta | `describe_meta_insights_fields` | Insights fields, breakdowns, date presets and attribution windows, plus a live node's field list |
+| Meta | `run_meta_insights` | Any insights query, sync or async for large pulls, with custom attribution windows |
+| Meta | `get_meta_assets` | Creatives, ads, previews, custom audiences, pixels and pixel stats, including browser vs Conversions API splits |
+| Meta | `search_meta_ad_library` | Competitor ads from the public Ad Library |
+| Tag Manager | `get_gtm_container`, `audit_gtm_container` | Browse containers, and a scored tracking audit cross-checked against GA4 and Google Ads |
+| BigQuery | `list_bigquery_ga4_exports`, `run_bigquery_ga4_query`, `run_bigquery_ga4_preset` | Raw GA4 export data in SQL, with 11 ready-made analyses |
+
+### Request cost
+
+These tools tell you what they spend. Fan-out tools return `requestCount`.
+
+- `run_google_ads_across_accounts` costs **one request per account**. It defaults to 10 accounts, caps at 50, and has a `dryRun` that lists the accounts and the request count without querying. On a Basic Access developer token, check with `dryRun` first.
+- `query_search_console_advanced` costs one request per 25,000 rows per site.
+- `run_ga4_multi_property_report` costs one request per property. GA4 quota is per property, so this does not concentrate cost.
+
+### Meta notes
+
+- Rows flatten action arrays to names like `actions.purchase` and `purchase_roas.omni_purchase`, so a formula such as `spend / actions.purchase` works directly.
+- Long ranges or large accounts can time out in `sync` mode. Use `async_start`, then `async_status` until it reports `Job Completed`, then `async_results`.
+- For ordinary commercial ads, Meta's Ad Library API only returns ads delivered in the EU and UK. Political and issue ads are available everywhere. It also needs identity confirmation on the Meta account and Ad Library API access for the app.
+- Custom audiences and pixels may need `ads_management` or `business_management` in addition to `ads_read`.
+
+## Tag Manager and BigQuery
+
+Both are **off by default** and switched on with environment variables. Until then their scopes are not requested and their tools are not listed, so deploying this code changes nothing for anyone.
+
+| Variable | Effect |
+|---|---|
+| `ENABLE_GTM=true` | Requests `tagmanager.readonly` and lists the Tag Manager tools |
+| `ENABLE_BIGQUERY=true` | Requests `bigquery.readonly` and lists the BigQuery tools |
+| `BIGQUERY_MAX_BYTES_BILLED` | Default per-query scan limit in bytes. Default 5 GiB. |
+| `BIGQUERY_MAX_BYTES_CEILING` | Highest limit a caller may ask for. Default 100 GiB. |
+| `BIGQUERY_PRICE_PER_TIB` | Used for cost estimates. Default 6.25 USD. |
+| `MERCHANT_API_VERSION` | Merchant sub-API version for `get_merchant_resource`. Default `v1`. |
+
+Users who connected before a flag was switched on must reconnect to grant the new scope. Every other tool keeps working in the meantime; only the new tools ask for the reconnect.
+
+### Tag Manager audit
+
+`audit_gtm_container` reads the published version once and scores it out of 100. It flags:
+
+- dead Universal Analytics tags
+- missing or multiple GA4 measurement IDs
+- Google Ads conversion tags missing an ID or label, or published without a Conversion Linker
+- purchase events that send no ecommerce data
+- tags that never fire, and references to triggers that do not exist
+- unused triggers and variables
+- Custom HTML using `document.write`, `eval` or external scripts
+- identical tags on identical triggers, which double-count
+- non-Google tags with no consent settings
+
+Optional cross-checks:
+
+- `checkWorkspace` reports unpublished changes.
+- `ga4PropertyId` compares the container's measurement IDs against the property's web streams.
+- `googleAdsCustomerId` compares conversion tags against the account's enabled conversion actions, matched on their `send_to` ID and label.
+
+### BigQuery safety
+
+- Only a single `SELECT` or `WITH` statement is accepted. Comments and string literals are stripped before checking, so a keyword inside a string is harmless, and no statement that changes data is allowed. The read-only OAuth scope blocks writes too.
+- Every query is dry-run first. It is refused if it would scan more than the byte limit, and the byte count and cost estimate are returned either way.
+- The real run also carries `maximumBytesBilled`, which BigQuery enforces itself, so the limit holds even if the estimate is wrong.
+- Presets filter the `events_*` wildcard by table suffix, so only the requested days are scanned. Intraday tables are included only when asked for.
+
+### Google Cloud setup
+
+In the Google Cloud project that owns `GOOGLE_CLIENT_ID`:
+
+1. **APIs & Services → Library**, enable:
+   - **Tag Manager API** (`tagmanager.googleapis.com`)
+   - **BigQuery API** (`bigquery.googleapis.com`)
+   - **Google Analytics Admin API** (`analyticsadmin.googleapis.com`), if not already on
+   - The Data API, Google Ads API, Merchant API and Search Console API are already in use.
+2. **Google Auth Platform → Data Access**, add the scopes `https://www.googleapis.com/auth/tagmanager.readonly` and `https://www.googleapis.com/auth/bigquery.readonly`.
+3. If the app is **published**, new sensitive scopes need Google's verification. Until it is granted, users see an unverified-app warning. If the app is in **Testing**, only listed test users can connect, and their refresh tokens expire after 7 days.
+
+For BigQuery data to exist:
+
+1. In GA4, **Admin → Product links → BigQuery links**, link the property to a Cloud project. The export starts from the day it is linked; there is no backfill.
+2. Each person querying needs **BigQuery Data Viewer** on the `analytics_*` dataset, and **BigQuery Job User** on the project that pays for queries (`billingProjectId`).
+
+Keyword Planner is part of the Google Ads API and needs nothing extra to enable. Reach Planner needs Google to approve the account.
+
 ## Coverage notes
 
 - Google Ads access is both preset-driven and query-driven. `run_google_ads_preset` covers 34 expert reports end to end, while `query_google_ads` and `search_stream_google_ads` remain available for arbitrary GAQL when a report falls outside the catalogue.

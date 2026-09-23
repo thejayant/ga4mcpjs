@@ -9,7 +9,21 @@ const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonl
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const MERCHANT_CENTER_SCOPE = "https://www.googleapis.com/auth/content";
 const GOOGLE_ADS_SCOPE = "https://www.googleapis.com/auth/adwords";
-const GOOGLE_SCOPES = [SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE];
+const TAG_MANAGER_SCOPE = "https://www.googleapis.com/auth/tagmanager.readonly";
+const BIGQUERY_SCOPE = "https://www.googleapis.com/auth/bigquery.readonly";
+// Each extra Google product widens the consent screen, and a published app needs
+// Google's verification for new sensitive scopes. These stay out of the request until
+// they are switched on deliberately, so deploying the code changes nothing for anyone.
+function isFeatureEnabled(name) {
+  return ["1", "true", "yes"].includes(String(process.env[name] || "").toLowerCase());
+}
+const GTM_ENABLED = isFeatureEnabled("ENABLE_GTM");
+const BIGQUERY_ENABLED = isFeatureEnabled("ENABLE_BIGQUERY");
+const GOOGLE_SCOPES = [
+  SEARCH_CONSOLE_SCOPE, GA4_SCOPE, MERCHANT_CENTER_SCOPE, GOOGLE_ADS_SCOPE,
+  ...(GTM_ENABLED ? [TAG_MANAGER_SCOPE] : []),
+  ...(BIGQUERY_ENABLED ? [BIGQUERY_SCOPE] : [])
+];
 // Meta permissions. All of these require App Review before anyone outside the app's own
 // admins, developers and testers can grant them.
 const META_ADS_SCOPE = "ads_read";
@@ -81,7 +95,26 @@ const TOOL_SCOPE_MAP = {
   list_meta_instagram_accounts: [META_INSTAGRAM_SCOPE],
   get_meta_token_info: [META_ADS_SCOPE],
   query_meta_graph: [META_ADS_SCOPE],
-  run_meta_preset: [META_ADS_SCOPE]
+  run_meta_preset: [META_ADS_SCOPE],
+  get_ga4_admin_resource: [GA4_SCOPE],
+  run_ga4_access_report: [GA4_SCOPE],
+  run_ga4_audience_export: [GA4_SCOPE],
+  run_ga4_multi_property_report: [GA4_SCOPE],
+  google_ads_keyword_planner: [GOOGLE_ADS_SCOPE],
+  google_ads_reach_planner: [GOOGLE_ADS_SCOPE],
+  run_google_ads_across_accounts: [GOOGLE_ADS_SCOPE],
+  query_search_console_advanced: [SEARCH_CONSOLE_SCOPE],
+  describe_merchant_report_fields: [],
+  get_merchant_resource: [MERCHANT_CENTER_SCOPE],
+  describe_meta_insights_fields: [],
+  run_meta_insights: [META_ADS_SCOPE],
+  get_meta_assets: [META_ADS_SCOPE],
+  search_meta_ad_library: [META_ADS_SCOPE],
+  get_gtm_container: [TAG_MANAGER_SCOPE],
+  audit_gtm_container: [TAG_MANAGER_SCOPE],
+  list_bigquery_ga4_exports: [BIGQUERY_SCOPE],
+  run_bigquery_ga4_query: [BIGQUERY_SCOPE],
+  run_bigquery_ga4_preset: [BIGQUERY_SCOPE]
 };
 const CALLRAIL_TOOL_NAMES = [
   "list_callrail_accounts",
@@ -3418,6 +3451,1437 @@ async function resolveMetaPageAccessToken(userAccessToken, pageId) {
   return response.body.access_token;
 }
 
+/* ------------------------------------------------------------------ *
+ * Row shaping shared by the extended tools: derived metrics from a
+ * formula, filtering and sorting on them, top-N, and field-name checks
+ * made before any request is spent.
+ * ------------------------------------------------------------------ */
+
+function tokenizeFormula(expression) {
+  const tokens = [];
+  const text = String(expression || "");
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (/\s/.test(character)) { index += 1; continue; }
+    if ("+-*/()".includes(character)) { tokens.push({ type: character }); index += 1; continue; }
+    const numberMatch = /^\d+(?:\.\d+)?/.exec(text.slice(index));
+    if (numberMatch) { tokens.push({ type: "number", value: Number(numberMatch[0]) }); index += numberMatch[0].length; continue; }
+    const nameMatch = /^[A-Za-z_][A-Za-z0-9_.]*/.exec(text.slice(index));
+    if (nameMatch) { tokens.push({ type: "name", value: nameMatch[0] }); index += nameMatch[0].length; continue; }
+    throw new Error(`Unexpected character "${character}" in formula.`);
+  }
+  return tokens;
+}
+
+function parseFormula(expression) {
+  const tokens = tokenizeFormula(expression);
+  let position = 0;
+  const peek = () => tokens[position];
+  const take = (type) => {
+    const token = tokens[position];
+    if (!token || token.type !== type) throw new Error(`Expected ${type} in formula.`);
+    position += 1;
+    return token;
+  };
+  function parseExpression() {
+    let node = parseTerm();
+    while (peek() && (peek().type === "+" || peek().type === "-")) {
+      const operator = take(peek().type).type;
+      node = { op: operator, left: node, right: parseTerm() };
+    }
+    return node;
+  }
+  function parseTerm() {
+    let node = parseFactor();
+    while (peek() && (peek().type === "*" || peek().type === "/")) {
+      const operator = take(peek().type).type;
+      node = { op: operator, left: node, right: parseFactor() };
+    }
+    return node;
+  }
+  function parseFactor() {
+    const token = peek();
+    if (!token) throw new Error("Formula ended unexpectedly.");
+    if (token.type === "-") { take("-"); return { op: "neg", left: parseFactor() }; }
+    if (token.type === "number") { take("number"); return { value: token.value }; }
+    if (token.type === "name") { take("name"); return { name: token.value }; }
+    if (token.type === "(") { take("("); const inner = parseExpression(); take(")"); return inner; }
+    throw new Error(`Unexpected token in formula.`);
+  }
+  const tree = parseExpression();
+  if (position !== tokens.length) throw new Error("Trailing input in formula.");
+  return tree;
+}
+
+function evaluateFormulaTree(tree, values) {
+  if (tree.value !== undefined) return tree.value;
+  if (tree.name !== undefined) {
+    const value = toNumber(values[tree.name]);
+    return value === undefined ? null : value;
+  }
+  if (tree.op === "neg") {
+    const inner = evaluateFormulaTree(tree.left, values);
+    return inner === null ? null : -inner;
+  }
+  const left = evaluateFormulaTree(tree.left, values);
+  const right = evaluateFormulaTree(tree.right, values);
+  if (left === null || right === null) return null;
+  if (tree.op === "+") return left + right;
+  if (tree.op === "-") return left - right;
+  if (tree.op === "*") return left * right;
+  // A zero denominator is a real answer of "undefined", not an error to throw.
+  if (tree.op === "/") return right === 0 ? null : left / right;
+  return null;
+}
+
+function applyComputedMetrics(rows, computed = []) {
+  if (!computed.length) return { rows, errors: [] };
+  const errors = [];
+  const compiled = [];
+  for (const definition of computed) {
+    try {
+      compiled.push({ name: definition.name, tree: parseFormula(definition.formula) });
+    } catch (error) {
+      errors.push({ name: definition.name, formula: definition.formula, error: error.message });
+    }
+  }
+  const next = rows.map((row) => {
+    const values = { ...row.metrics, ...row.dimensions };
+    const extra = {};
+    for (const item of compiled) {
+      const result = evaluateFormulaTree(item.tree, values);
+      if (result !== null && Number.isFinite(result)) extra[item.name] = result;
+    }
+    return { ...row, metrics: { ...row.metrics, ...extra } };
+  });
+  return { rows: next, errors };
+}
+
+function compareValues(actual, operator, expected) {
+  const left = toNumber(actual);
+  const right = toNumber(expected);
+  const numeric = left !== undefined && right !== undefined;
+  switch (operator) {
+    case "eq": return String(actual) === String(expected);
+    case "ne": return String(actual) !== String(expected);
+    case "gt": return numeric && left > right;
+    case "gte": return numeric && left >= right;
+    case "lt": return numeric && left < right;
+    case "lte": return numeric && left <= right;
+    case "contains": return String(actual ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
+    case "not_contains": return !String(actual ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
+    case "starts_with": return String(actual ?? "").toLowerCase().startsWith(String(expected ?? "").toLowerCase());
+    case "in": return Array.isArray(expected) && expected.map(String).includes(String(actual));
+    case "not_in": return Array.isArray(expected) && !expected.map(String).includes(String(actual));
+    case "is_null": return actual === undefined || actual === null || actual === "";
+    case "not_null": return !(actual === undefined || actual === null || actual === "");
+    default: return true;
+  }
+}
+
+function applyHaving(rows, conditions = []) {
+  if (!conditions.length) return rows;
+  return rows.filter((row) => conditions.every((condition) => {
+    const source = { ...row.metrics, ...row.dimensions };
+    return compareValues(source[condition.field], condition.op || "eq", condition.value);
+  }));
+}
+
+function applySorting(rows, sort = []) {
+  if (!sort.length) return rows;
+  const copy = [...rows];
+  copy.sort((a, b) => {
+    for (const rule of sort) {
+      const direction = String(rule.direction || "desc").toLowerCase() === "asc" ? 1 : -1;
+      const left = { ...a.metrics, ...a.dimensions }[rule.field];
+      const right = { ...b.metrics, ...b.dimensions }[rule.field];
+      const leftNumber = toNumber(left);
+      const rightNumber = toNumber(right);
+      let result;
+      if (leftNumber !== undefined && rightNumber !== undefined) {
+        result = leftNumber === rightNumber ? 0 : leftNumber < rightNumber ? -1 : 1;
+      } else {
+        result = String(left ?? "").localeCompare(String(right ?? ""));
+      }
+      if (result !== 0) return result * direction;
+    }
+    return 0;
+  });
+  return copy;
+}
+
+function summariseMetrics(rows) {
+  const totals = {};
+  for (const row of rows) {
+    for (const [name, value] of Object.entries(row.metrics || {})) {
+      const numeric = toNumber(value);
+      if (numeric === undefined) continue;
+      totals[name] = (totals[name] || 0) + numeric;
+    }
+  }
+  return totals;
+}
+
+function shapeAdvancedRows(rows, options = {}) {
+  const computed = applyComputedMetrics(rows, options.computedMetrics || []);
+  let shaped = computed.rows;
+  shaped = applyHaving(shaped, options.having || []);
+  shaped = applySorting(shaped, options.sort || []);
+  const limited = options.topN ? shaped.slice(0, Math.max(1, Number(options.topN))) : shaped;
+  return {
+    rows: limited,
+    formulaErrors: computed.errors,
+    rowsBeforeShaping: rows.length,
+    rowsAfterShaping: limited.length
+  };
+}
+
+const GA4_FIELD_SHAPE = /^(?:[a-zA-Z][a-zA-Z0-9_]*|custom(?:Event|User|Item):[A-Za-z0-9_]+)$/;
+
+function validateFieldNames(names, shape, label) {
+  const invalid = (names || []).filter((name) => !shape.test(String(name)));
+  if (invalid.length) {
+    throw new Error(
+      label + " contains names that cannot be valid: " + invalid.join(", ") +
+      ". Nothing was requested, so no quota was spent."
+    );
+  }
+  return names || [];
+}
+
+function toAdvancedRecord(platform, dimensions, metrics, sourceContext) {
+  return {
+    schemaVersion: NORMALIZED_MARKETING_SCHEMA.version,
+    platform,
+    preset: "advanced",
+    entityType: "custom",
+    sourcePrimaryKey: Object.values(dimensions)[0] ?? null,
+    dimensions: compactObject(dimensions),
+    metrics: compactObject(metrics),
+    sourceContext: sourceContext || {}
+  };
+}
+
+function buildGa4AdvancedRows(body) {
+  return mapGa4ReportRows(body).map((row) => {
+    const metrics = {};
+    for (const [name, value] of Object.entries(row.metrics || {})) {
+      const numeric = toNumber(value);
+      metrics[name] = numeric === undefined ? value : numeric;
+    }
+    return toAdvancedRecord("ga4", row.dimensions || {}, metrics, { raw: row });
+  });
+}
+
+
+/* ================================================================== *
+ * Platform gap coverage: GA4 admin, Ads planning and fan-out, GSC
+ * paging, Merchant resources, Meta insights and assets, Tag Manager
+ * audits and BigQuery (GA4 export).
+ * ================================================================== */
+
+/* ---------------- GA4 Admin ---------------- */
+
+// v1alpha is a superset of v1beta for reads and is the only surface that has
+// annotations and BigQuery links, so every admin read goes through it.
+const GA4_ADMIN_BASE = "https://analyticsadmin.googleapis.com/v1alpha";
+const GA4_DATA_BASE = "https://analyticsdata.googleapis.com/v1beta";
+
+const GA4_ADMIN_COLLECTIONS = {
+  audiences: "audiences",
+  google_ads_links: "googleAdsLinks",
+  bigquery_links: "bigQueryLinks",
+  annotations: "reportingDataAnnotations",
+  firebase_links: "firebaseLinks",
+  search_ads_360_links: "searchAds360Links",
+  display_video_360_links: "displayVideo360AdvertiserLinks",
+  key_events: "keyEvents",
+  custom_dimensions: "customDimensions",
+  custom_metrics: "customMetrics",
+  calculated_metrics: "calculatedMetrics",
+  channel_groups: "channelGroups",
+  data_streams: "dataStreams"
+};
+
+const GA4_ADMIN_SINGLETONS = {
+  property: "",
+  data_retention: "dataRetentionSettings",
+  attribution_settings: "attributionSettings",
+  google_signals: "googleSignalsSettings"
+};
+
+const GA4_ADMIN_RESOURCE_NAMES = [
+  ...Object.keys(GA4_ADMIN_COLLECTIONS),
+  ...Object.keys(GA4_ADMIN_SINGLETONS),
+  "change_history"
+];
+
+async function getGa4AdminResource(accessToken, propertyId, resource, params = {}) {
+  const property = normalizePropertyName(propertyId);
+  if (Object.prototype.hasOwnProperty.call(GA4_ADMIN_SINGLETONS, resource)) {
+    const suffix = GA4_ADMIN_SINGLETONS[resource];
+    return callGoogleApi(`${GA4_ADMIN_BASE}/${property}${suffix ? `/${suffix}` : ""}`, accessToken, { method: "GET" });
+  }
+  const collection = GA4_ADMIN_COLLECTIONS[resource];
+  if (!collection) throw new Error(`Unsupported GA4 admin resource: ${resource}`);
+  const url = new URL(`${GA4_ADMIN_BASE}/${property}/${collection}`);
+  appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+// Change history is searched on the account, not the property, so the property is
+// read first to learn which account owns it.
+async function searchGa4ChangeHistory(accessToken, propertyId, params = {}) {
+  const property = normalizePropertyName(propertyId);
+  const propertyResponse = await callGoogleApi(`${GA4_ADMIN_BASE}/${property}`, accessToken, { method: "GET" });
+  if (!propertyResponse.ok) return { response: propertyResponse, requestCount: 1 };
+  const account = propertyResponse.body?.parent;
+  if (!account) {
+    return { response: { ok: false, status: 404, body: { error: "Property has no parent account." } }, requestCount: 1 };
+  }
+  const range = resolveDateWindow(params);
+  const response = await callGoogleApi(`${GA4_ADMIN_BASE}/${account}:searchChangeHistoryEvents`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      property,
+      earliestChangeTime: `${range.startDate}T00:00:00Z`,
+      latestChangeTime: `${range.endDate}T23:59:59Z`,
+      pageSize: params.pageSize,
+      pageToken: params.pageToken
+    })
+  });
+  return { response, requestCount: 2, account };
+}
+
+const GA4_ACCESS_DEFAULT_DIMENSIONS = ["userEmail", "accessMechanism", "reportType", "date"];
+const GA4_ACCESS_DEFAULT_METRICS = ["accessCount"];
+
+async function runGa4AccessReport(accessToken, params) {
+  const range = resolveDateWindow(params);
+  return callGoogleApi(`https://analyticsadmin.googleapis.com/v1beta/${normalizePropertyName(params.propertyId)}:runAccessReport`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      dateRanges: [{ startDate: range.startDate, endDate: range.endDate }],
+      dimensions: (params.dimensions?.length ? params.dimensions : GA4_ACCESS_DEFAULT_DIMENSIONS).map((dimensionName) => ({ dimensionName })),
+      metrics: (params.metrics?.length ? params.metrics : GA4_ACCESS_DEFAULT_METRICS).map((metricName) => ({ metricName })),
+      limit: params.limit ? String(params.limit) : undefined,
+      offset: params.offset ? String(params.offset) : undefined,
+      dimensionFilter: params.dimensionFilter,
+      metricFilter: params.metricFilter,
+      returnEntityQuota: true
+    })
+  });
+}
+
+function mapGa4AccessReportRows(body) {
+  const dimensions = (body?.dimensionHeaders || []).map((header) => header.dimensionName);
+  const metrics = (body?.metricHeaders || []).map((header) => header.metricName);
+  return (body?.rows || []).map((row) => {
+    const record = {};
+    dimensions.forEach((name, index) => { record[name] = row.dimensionValues?.[index]?.value ?? null; });
+    metrics.forEach((name, index) => {
+      const value = row.metricValues?.[index]?.value;
+      record[name] = toNumber(value) ?? value ?? null;
+    });
+    return record;
+  });
+}
+
+function normalizeGa4ChildName(property, collection, value) {
+  const text = String(value || "").trim();
+  if (text.startsWith("properties/")) return text;
+  return `${property}/${collection}/${text.replace(/[^0-9A-Za-z_-]/g, "")}`;
+}
+
+async function runGa4AudienceExportAction(accessToken, params) {
+  const property = normalizePropertyName(params.propertyId);
+  if (params.action === "list") {
+    const url = new URL(`${GA4_DATA_BASE}/${property}/audienceExports`);
+    appendQueryParams(url, { pageSize: params.limit, pageToken: params.pageToken });
+    return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+  }
+  if (params.action === "create") {
+    if (!params.audience) throw new Error("audience is required to create an export.");
+    return callGoogleApi(`${GA4_DATA_BASE}/${property}/audienceExports`, accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        audience: normalizeGa4ChildName(property, "audiences", params.audience),
+        dimensions: (params.dimensions?.length ? params.dimensions : ["deviceId"]).map((dimensionName) => ({ dimensionName }))
+      })
+    });
+  }
+  if (!params.audienceExport) throw new Error(`audienceExport is required for ${params.action}.`);
+  const name = normalizeGa4ChildName(property, "audienceExports", params.audienceExport);
+  if (params.action === "get") return callGoogleApi(`${GA4_DATA_BASE}/${name}`, accessToken, { method: "GET" });
+  if (params.action === "query") {
+    return callGoogleApi(`${GA4_DATA_BASE}/${name}:query`, accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        offset: params.offset ? String(params.offset) : undefined,
+        limit: params.limit ? String(params.limit) : undefined
+      })
+    });
+  }
+  throw new Error(`Unsupported audience export action: ${params.action}`);
+}
+
+/* ---------------- Shared fan-out ---------------- */
+
+// Runs tasks with a small ceiling on how many are in flight, so a fan-out cannot
+// open dozens of connections at once or outlive the function's time budget.
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(lanes);
+  return results;
+}
+
+/* ---------------- Google Ads: Keyword Planner and Reach Planner ---------------- */
+
+function toAdsResourceList(values, prefix, fallback) {
+  const list = (values && values.length ? values : fallback).map((value) => {
+    const text = String(value).trim();
+    return text.startsWith(`${prefix}/`) ? text : `${prefix}/${text.replace(/[^0-9]/g, "")}`;
+  });
+  return list.filter((value) => /\/\d+$/.test(value));
+}
+
+function toMicros(amount) {
+  const numeric = toNumber(amount);
+  return numeric === undefined ? undefined : String(Math.round(numeric * 1_000_000));
+}
+
+function mapKeywordPlannerRow(row) {
+  const metrics = row.keywordIdeaMetrics || row.keywordMetrics || {};
+  return {
+    keyword: row.text,
+    closeVariants: row.closeVariants,
+    avgMonthlySearches: toNumber(metrics.avgMonthlySearches) ?? null,
+    competition: metrics.competition || null,
+    competitionIndex: toNumber(metrics.competitionIndex) ?? null,
+    lowTopOfPageBid: microsToStandardCurrency(metrics.lowTopOfPageBidMicros) ?? null,
+    highTopOfPageBid: microsToStandardCurrency(metrics.highTopOfPageBidMicros) ?? null,
+    averageCpc: microsToStandardCurrency(metrics.averageCpcMicros) ?? null,
+    monthlySearchVolumes: (metrics.monthlySearchVolumes || []).map((entry) => ({
+      year: toNumber(entry.year),
+      month: entry.month,
+      searches: toNumber(entry.monthlySearches) ?? null
+    }))
+  };
+}
+
+function buildKeywordPlannerRequest(params) {
+  const language = toAdsResourceList(params.language ? [params.language] : [], "languageConstants", ["1000"])[0];
+  const geoTargetConstants = toAdsResourceList(params.geoTargets, "geoTargetConstants", ["2840"]);
+  const keywordPlanNetwork = params.network || "GOOGLE_SEARCH";
+  const keywords = (params.keywords || []).map((keyword) => String(keyword).trim()).filter(Boolean);
+
+  if (params.action === "ideas") {
+    const body = {
+      language,
+      geoTargetConstants,
+      keywordPlanNetwork,
+      includeAdultKeywords: Boolean(params.includeAdultKeywords),
+      pageSize: params.pageSize,
+      pageToken: params.pageToken
+    };
+    if (keywords.length && params.url) body.keywordAndUrlSeed = { keywords, url: params.url };
+    else if (keywords.length) body.keywordSeed = { keywords };
+    else if (params.url) body.urlSeed = { url: params.url };
+    else if (params.site) body.siteSeed = { site: params.site };
+    else throw new Error("Keyword ideas need at least one of keywords, url or site.");
+    return { path: "generateKeywordIdeas", body };
+  }
+
+  if (params.action === "historical_metrics") {
+    if (!keywords.length) throw new Error("historical_metrics needs keywords.");
+    return {
+      path: "generateKeywordHistoricalMetrics",
+      body: {
+        keywords,
+        language,
+        geoTargetConstants,
+        keywordPlanNetwork,
+        includeAdultKeywords: Boolean(params.includeAdultKeywords),
+        historicalMetricsOptions: { includeAverageCpc: true }
+      }
+    };
+  }
+
+  if (params.action === "forecast") {
+    if (!keywords.length) throw new Error("forecast needs keywords.");
+    const bid = toMicros(params.maxCpcBid ?? 1);
+    // Forecasts only look forward, so the default window starts tomorrow.
+    const today = formatDateForApi(new Date());
+    const startDate = params.forecastStartDate || shiftDays(today, 1);
+    const endDate = params.forecastEndDate || shiftDays(startDate, 29);
+    return {
+      path: "generateKeywordForecastMetrics",
+      body: {
+        currencyCode: params.currencyCode,
+        forecastPeriod: { startDate, endDate },
+        campaign: {
+          languageConstants: [language],
+          geoModifiers: geoTargetConstants.map((geoTargetConstant) => ({ geoTargetConstant })),
+          keywordPlanNetwork,
+          biddingStrategy: { manualCpcBiddingStrategy: { maxCpcBidMicros: bid } },
+          adGroups: [{
+            biddableKeywords: keywords.map((text) => ({
+              keyword: { text, matchType: params.matchType || "PHRASE" },
+              maxCpcBidMicros: bid
+            }))
+          }]
+        }
+      }
+    };
+  }
+
+  throw new Error(`Unsupported keyword planner action: ${params.action}`);
+}
+
+function mapKeywordForecast(body) {
+  const metrics = body?.campaignForecastMetrics || {};
+  return {
+    impressions: toNumber(metrics.impressions) ?? null,
+    clicks: toNumber(metrics.clicks) ?? null,
+    cost: microsToStandardCurrency(metrics.costMicros) ?? null,
+    conversions: toNumber(metrics.conversions) ?? null,
+    conversionRate: toNumber(metrics.conversionRate) ?? null,
+    averageCpc: microsToStandardCurrency(metrics.averageCpcMicros) ?? null,
+    ctr: toNumber(metrics.clickThroughRate) ?? null
+  };
+}
+
+async function runGoogleAdsReachPlanner(accessToken, params) {
+  const version = getGoogleAdsApiVersion();
+  const loginCustomerId = params.loginCustomerId;
+  if (params.action === "locations") {
+    return callGoogleAdsApi(`https://googleads.googleapis.com/${version}:listPlannableLocations`, accessToken, {
+      method: "POST", loginCustomerId, body: {}
+    });
+  }
+  if (params.action === "products") {
+    if (!params.plannableLocationId) throw new Error("products needs plannableLocationId (get one from action locations).");
+    return callGoogleAdsApi(`https://googleads.googleapis.com/${version}:listPlannableProducts`, accessToken, {
+      method: "POST", loginCustomerId, body: { plannableLocationId: String(params.plannableLocationId) }
+    });
+  }
+  if (params.action === "forecast") {
+    if (!params.customerId) throw new Error("forecast needs customerId.");
+    if (!params.plannableLocationId) throw new Error("forecast needs plannableLocationId.");
+    if (!params.products?.length) throw new Error("forecast needs products, each with a code and budget.");
+    return callGoogleAdsApi(`customers/${normalizeGoogleAdsCustomerId(params.customerId)}:generateReachForecast`, accessToken, {
+      method: "POST",
+      loginCustomerId,
+      body: {
+        currencyCode: params.currencyCode,
+        campaignDuration: { durationInDays: params.durationInDays || 28 },
+        plannableLocationId: String(params.plannableLocationId),
+        targeting: params.targeting,
+        plannedProducts: params.products.map((product) => ({
+          plannableProductCode: product.code,
+          budgetMicros: toMicros(product.budget)
+        }))
+      }
+    });
+  }
+  throw new Error(`Unsupported reach planner action: ${params.action}`);
+}
+
+/* ---------------- Google Ads: across every account under a manager ---------------- */
+
+function camelToSnakeSegment(segment) {
+  return String(segment).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+}
+
+// Turns a nested camelCase GAQL result into flat snake_case field paths, the same
+// spelling the query used, so any selection comes back readable.
+function flattenGoogleAdsResult(value, prefix = "", out = {}) {
+  for (const [key, entry] of Object.entries(value || {})) {
+    if (key === "resourceName") continue;
+    const path = prefix ? `${prefix}.${camelToSnakeSegment(key)}` : camelToSnakeSegment(key);
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) flattenGoogleAdsResult(entry, path, out);
+    else out[path] = entry;
+  }
+  return out;
+}
+
+function googleAdsResultToRecord(row, account) {
+  const flat = flattenGoogleAdsResult(row);
+  const dimensions = { customer_id: account.customerId, customer_name: account.name };
+  const metrics = {};
+  for (const [path, value] of Object.entries(flat)) {
+    if (path.startsWith("metrics.")) {
+      const name = path.slice("metrics.".length);
+      if (name.endsWith("_micros")) metrics[name.replace(/_micros$/, "")] = microsToStandardCurrency(value);
+      else metrics[name] = toNumber(value) ?? value;
+    } else if (path.endsWith("_micros")) {
+      dimensions[path.replace(/_micros$/, "")] = microsToStandardCurrency(value);
+    } else {
+      dimensions[path] = Array.isArray(value) ? JSON.stringify(value) : value;
+    }
+  }
+  return toAdvancedRecord("google_ads", dimensions, metrics, { customerId: account.customerId });
+}
+
+async function listManagedGoogleAdsAccounts(accessToken, { managerCustomerId, loginCustomerId, maxLevel = 1 }) {
+  const query = "SELECT customer_client.id, customer_client.descriptive_name, customer_client.currency_code, "
+    + "customer_client.level, customer_client.manager, customer_client.status FROM customer_client "
+    + `WHERE customer_client.status = 'ENABLED' AND customer_client.manager = FALSE AND customer_client.level <= ${Number(maxLevel) || 1} `
+    + "ORDER BY customer_client.descriptive_name LIMIT 1000";
+  const response = await queryGoogleAds(accessToken, {
+    customerId: managerCustomerId,
+    loginCustomerId: loginCustomerId || managerCustomerId,
+    query,
+    pageSize: 1000
+  });
+  const accounts = response.ok
+    ? (response.body?.results || []).map((row) => ({
+        customerId: String(getGoogleAdsValue(row, "customer_client.id")),
+        name: getGoogleAdsValue(row, "customer_client.descriptive_name") || null,
+        currency: getGoogleAdsValue(row, "customer_client.currency_code") || null
+      }))
+    : [];
+  return { response, accounts };
+}
+
+/* ---------------- Search Console: paging and multiple sites ---------------- */
+
+const SEARCH_CONSOLE_PAGE_SIZE = 25000;
+
+// Keeps asking for the next 25,000 rows until the API runs dry or the caller's
+// ceiling is reached. The fetcher is injected so the paging logic can be tested.
+async function collectPagedRows(fetchPage, { maxRows, startRow = 0, pageSize = SEARCH_CONSOLE_PAGE_SIZE }) {
+  const rows = [];
+  let cursor = startRow;
+  let requests = 0;
+  while (rows.length < maxRows) {
+    const size = Math.min(pageSize, maxRows - rows.length);
+    const response = await fetchPage({ startRow: cursor, rowLimit: size });
+    requests += 1;
+    if (!response.ok) return { ok: false, response, rows, requests, truncated: false };
+    const page = response.body?.rows || [];
+    rows.push(...page);
+    if (page.length < size) return { ok: true, rows, requests, truncated: false };
+    cursor += page.length;
+  }
+  return { ok: true, rows, requests, truncated: true };
+}
+
+/* ---------------- Merchant Center ---------------- */
+
+function getMerchantApiVersion() {
+  return String(process.env.MERCHANT_API_VERSION || "v1").trim();
+}
+
+const MERCHANT_RESOURCES = {
+  promotions: { api: "promotions", path: (account) => `${account}/promotions`, list: true },
+  shipping_settings: { api: "accounts", path: (account) => `${account}/shippingSettings` },
+  return_policies: { api: "accounts", path: (account) => `${account}/onlineReturnPolicies`, list: true },
+  conversion_sources: { api: "conversions", path: (account) => `${account}/conversionSources`, list: true },
+  regions: { api: "accounts", path: (account) => `${account}/regions`, list: true },
+  business_info: { api: "accounts", path: (account) => `${account}/businessInfo` },
+  homepage: { api: "accounts", path: (account) => `${account}/homepage` },
+  programs: { api: "accounts", path: (account) => `${account}/programs`, list: true },
+  local_inventories: {
+    api: "inventories",
+    path: (account, productId) => `${account}/products/${encodeURIComponent(productId)}/localInventories`,
+    list: true,
+    needsProduct: true
+  },
+  regional_inventories: {
+    api: "inventories",
+    path: (account, productId) => `${account}/products/${encodeURIComponent(productId)}/regionalInventories`,
+    list: true,
+    needsProduct: true
+  }
+};
+
+async function getMerchantResource(accessToken, params) {
+  const definition = MERCHANT_RESOURCES[params.resource];
+  if (!definition) throw new Error(`Unsupported Merchant resource: ${params.resource}`);
+  if (definition.needsProduct && !params.productId) {
+    throw new Error(`${params.resource} needs productId, for example en~US~SKU123.`);
+  }
+  const account = normalizeMerchantAccountName(params.accountId);
+  const url = new URL(`https://merchantapi.googleapis.com/${definition.api}/${getMerchantApiVersion()}/${definition.path(account, params.productId)}`);
+  if (definition.list) appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+// The Reports API has no metadata endpoint, so this is compiled from its reference.
+// It covers the fields in common use rather than claiming to be exhaustive.
+const MERCHANT_REPORT_FIELD_CATALOG = {
+  product_performance_view: {
+    dimensions: ["date", "week", "customer_country_code", "marketing_method", "offer_id", "title", "brand",
+      "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
+      "product_type_l1", "product_type_l2", "product_type_l3", "product_type_l4", "product_type_l5",
+      "custom_label0", "custom_label1", "custom_label2", "custom_label3", "custom_label4"],
+    metrics: ["clicks", "impressions", "click_through_rate", "conversions", "conversion_value", "conversion_rate"],
+    notes: "Time series; filter on date. marketing_method is ORGANIC (free listings) or ADS."
+  },
+  product_view: {
+    dimensions: ["id", "offer_id", "feed_label", "language_code", "title", "brand", "condition", "availability",
+      "gtin", "item_group_id", "shipping_label", "thumbnail_link", "creation_time", "expiration_date",
+      "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
+      "product_type_l1", "product_type_l2", "product_type_l3", "product_type_l4", "product_type_l5",
+      "aggregated_reporting_context_status", "item_issues", "click_potential"],
+    metrics: ["price", "click_potential_rank"],
+    notes: "Current snapshot of the feed, not a time series."
+  },
+  price_competitiveness_product_view: {
+    dimensions: ["report_country_code", "id", "offer_id", "title", "brand",
+      "category_l1", "category_l2", "category_l3", "product_type_l1", "product_type_l2", "product_type_l3"],
+    metrics: ["price", "benchmark_price"],
+    notes: "Needs report_country_code in the filter."
+  },
+  price_insights_product_view: {
+    dimensions: ["id", "offer_id", "title", "brand", "category_l1", "category_l2", "category_l3",
+      "product_type_l1", "product_type_l2", "product_type_l3", "effectiveness"],
+    metrics: ["price", "suggested_price", "predicted_impressions_change_fraction",
+      "predicted_clicks_change_fraction", "predicted_conversions_change_fraction"],
+    notes: "Suggested price with predicted impact."
+  },
+  best_sellers_product_cluster_view: {
+    dimensions: ["report_date", "report_granularity", "report_country_code", "report_category_id", "title", "brand",
+      "category_l1", "category_l2", "category_l3", "category_l4", "category_l5", "variant_gtins",
+      "inventory_status", "brand_inventory_status", "relative_demand", "previous_relative_demand", "relative_demand_change"],
+    metrics: ["rank", "previous_rank"],
+    notes: "Needs report_date, report_granularity and report_country_code."
+  },
+  best_sellers_brand_view: {
+    dimensions: ["report_date", "report_granularity", "report_country_code", "report_category_id", "brand",
+      "relative_demand", "previous_relative_demand", "relative_demand_change"],
+    metrics: ["rank", "previous_rank"],
+    notes: "Needs report_date, report_granularity and report_country_code."
+  },
+  competitive_visibility_competitor_view: {
+    dimensions: ["date", "domain", "is_your_domain", "report_country_code", "report_category_id", "traffic_source"],
+    metrics: ["rank", "ads_organic_ratio", "page_overlap_rate", "higher_position_rate", "relative_visibility"],
+    notes: "Needs report_country_code, report_category_id and traffic_source."
+  },
+  competitive_visibility_top_merchant_view: {
+    dimensions: ["date", "domain", "is_your_domain", "report_country_code", "report_category_id", "traffic_source"],
+    metrics: ["rank", "ads_organic_ratio", "page_overlap_rate", "higher_position_rate"],
+    notes: "Needs report_country_code, report_category_id and traffic_source."
+  },
+  competitive_visibility_benchmark_view: {
+    dimensions: ["date", "report_country_code", "report_category_id", "traffic_source"],
+    metrics: ["your_domain_visibility_trend", "category_benchmark_visibility_trend"],
+    notes: "Needs report_country_code, report_category_id and traffic_source."
+  },
+  non_product_performance_view: {
+    dimensions: ["date", "week"],
+    metrics: ["clicks", "impressions", "click_through_rate"],
+    notes: "Traffic to pages that are not product pages, such as the store page."
+  }
+};
+
+/* ---------------- Meta ---------------- */
+
+// Meta publishes no field-metadata endpoint for insights, so this is compiled from the
+// Marketing API reference. describe_meta_insights_fields can also ask a live node for
+// its own field list with metadata=1.
+const META_INSIGHTS_CATALOG = {
+  levels: ["account", "campaign", "adset", "ad"],
+  fields: [
+    "account_id", "account_name", "account_currency", "campaign_id", "campaign_name", "adset_id", "adset_name",
+    "ad_id", "ad_name", "objective", "optimization_goal", "buying_type", "date_start", "date_stop",
+    "impressions", "reach", "frequency", "spend", "clicks", "unique_clicks", "ctr", "unique_ctr", "cpc", "cpm", "cpp",
+    "inline_link_clicks", "inline_link_click_ctr", "cost_per_inline_link_click", "outbound_clicks",
+    "outbound_clicks_ctr", "cost_per_outbound_click", "actions", "action_values", "conversions",
+    "conversion_values", "cost_per_action_type", "cost_per_conversion", "purchase_roas", "website_purchase_roas",
+    "video_play_actions", "video_thruplay_watched_actions", "video_p25_watched_actions", "video_p50_watched_actions",
+    "video_p75_watched_actions", "video_p95_watched_actions", "video_p100_watched_actions",
+    "video_avg_time_watched_actions", "quality_ranking", "engagement_rate_ranking", "conversion_rate_ranking"
+  ],
+  breakdowns: [
+    "age", "gender", "country", "region", "dma", "publisher_platform", "platform_position", "device_platform",
+    "impression_device", "product_id", "frequency_value",
+    "hourly_stats_aggregated_by_advertiser_time_zone", "hourly_stats_aggregated_by_audience_time_zone",
+    "image_asset", "video_asset", "body_asset", "title_asset", "description_asset", "link_url_asset",
+    "call_to_action_asset", "ad_format_asset"
+  ],
+  actionBreakdowns: [
+    "action_type", "action_device", "action_destination", "action_target_id", "action_reaction",
+    "action_video_sound", "action_video_type", "action_carousel_card_id", "action_carousel_card_name"
+  ],
+  datePresets: [
+    "today", "yesterday", "this_month", "last_month", "this_quarter", "last_quarter", "this_year", "last_year",
+    "last_3d", "last_7d", "last_14d", "last_28d", "last_30d", "last_90d", "this_week_mon_today",
+    "last_week_mon_sun", "maximum"
+  ],
+  attributionWindows: ["1d_click", "7d_click", "28d_click", "1d_view", "dda", "default"],
+  notes: [
+    "Fields holding arrays of {action_type, value}, such as actions, action_values, cost_per_action_type and purchase_roas, are flattened to names like actions.purchase so formulas can use them.",
+    "Meta has retired 7-day and 28-day view-through windows for most accounts; 1d_view is the reliable view window.",
+    "Some breakdown combinations are not allowed together. Meta rejects them with an error naming the conflict."
+  ]
+};
+
+const META_NAME_SHAPE = /^[a-z0-9_]+$/;
+
+function toMetaObjectPath(params) {
+  if (params.objectId) return String(params.objectId).replace(/[^0-9A-Za-z_]/g, "");
+  if (!params.adAccountId) throw new Error("Provide adAccountId, or objectId for a campaign, ad set or ad.");
+  const raw = String(params.adAccountId).trim();
+  return raw.startsWith("act_") ? raw : `act_${raw.replace(/[^0-9]/g, "")}`;
+}
+
+function buildMetaInsightsParams(params) {
+  for (const [label, list] of [["fields", params.fields], ["breakdowns", params.breakdowns], ["actionBreakdowns", params.actionBreakdowns]]) {
+    const bad = (list || []).filter((name) => !META_NAME_SHAPE.test(String(name)));
+    if (bad.length) throw new Error(`${label} contains names that cannot be valid: ${bad.join(", ")}. Nothing was requested.`);
+  }
+  const query = {
+    level: params.level,
+    fields: (params.fields?.length ? params.fields : ["impressions", "reach", "clicks", "spend", "ctr", "cpc", "cpm", "actions", "action_values"]).join(","),
+    breakdowns: params.breakdowns?.length ? params.breakdowns.join(",") : undefined,
+    action_breakdowns: params.actionBreakdowns?.length ? params.actionBreakdowns.join(",") : undefined,
+    time_increment: params.timeIncrement,
+    filtering: params.filtering ? JSON.stringify(params.filtering) : undefined,
+    action_attribution_windows: params.attributionWindows?.length ? JSON.stringify(params.attributionWindows) : undefined,
+    use_unified_attribution_setting: params.useUnifiedAttributionSetting === undefined ? undefined : String(params.useUnifiedAttributionSetting),
+    action_report_time: params.actionReportTime,
+    sort: params.sort ? String(params.sort) : undefined,
+    limit: params.limit,
+    after: params.after
+  };
+  if (params.datePreset) {
+    query.date_preset = params.datePreset;
+  } else {
+    const range = resolveDateWindow(params);
+    query.time_range = JSON.stringify({ since: range.startDate, until: range.endDate });
+  }
+  return query;
+}
+
+// Arrays of {action_type, value} become one named metric per action type, which is
+// what lets a formula say "spend / actions.purchase".
+function flattenMetaInsightsRow(row) {
+  const dimensions = {};
+  const metrics = {};
+  for (const [key, value] of Object.entries(row || {})) {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const kind = entry?.action_type || entry?.action_destination || entry?.action_device || "value";
+        const numeric = toNumber(entry?.value);
+        if (numeric !== undefined) metrics[`${key}.${kind}`] = numeric;
+      }
+      continue;
+    }
+    const numeric = toNumber(value);
+    const isIdentifier = /(^|_)(id|name)$/.test(key) || ["date_start", "date_stop", "account_currency", "objective", "optimization_goal", "buying_type"].includes(key);
+    if (numeric !== undefined && !isIdentifier) metrics[key] = numeric;
+    else dimensions[key] = value;
+  }
+  return toAdvancedRecord("meta", dimensions, metrics, {});
+}
+
+async function callMetaGraphApiPost(pathOrUrl, accessToken, params = {}) {
+  const url = pathOrUrl.startsWith("http")
+    ? new URL(pathOrUrl)
+    : new URL(`${getMetaGraphBaseUrl()}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`);
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    form.set(key, typeof value === "object" ? JSON.stringify(value) : String(value));
+  }
+  if (accessToken) {
+    form.set("access_token", String(accessToken));
+    try {
+      form.set("appsecret_proof", buildMetaAppSecretProof(accessToken));
+    } catch {
+      // META_APP_SECRET missing; the call fails on its own with a clearer error.
+    }
+  }
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString()
+  });
+  const rawBody = await response.text();
+  let parsedBody = rawBody;
+  try {
+    parsedBody = rawBody ? JSON.parse(rawBody) : null;
+  } catch {}
+  // The token travels in the body, so the logged URL carries no credential.
+  console.log(JSON.stringify({ type: "meta_api_debug", method: "POST", url: url.toString(), status: response.status, body: parsedBody }));
+  return { ok: response.ok, status: response.status, body: parsedBody };
+}
+
+const META_ASSET_DEFAULT_FIELDS = {
+  creatives: "id,name,title,body,object_type,status,thumbnail_url,image_url,video_id,call_to_action_type,link_url,object_story_spec,asset_feed_spec",
+  ads: "id,name,status,effective_status,created_time,updated_time,creative{id,name},adset_id,campaign_id",
+  custom_audiences: "id,name,subtype,description,approximate_count_lower_bound,approximate_count_upper_bound,delivery_status,operation_status,retention_days,time_created,time_updated",
+  pixels: "id,name,last_fired_time,is_unavailable,creation_time,data_use_setting,automatic_matching_fields,first_party_cookie_status"
+};
+
+const META_PIXEL_AGGREGATIONS = [
+  "event", "event_source", "event_detection_method", "event_processing_results", "match_keys",
+  "had_pii", "device_type", "device_os", "browser_type", "host", "url", "pixel_fire", "event_total_counts"
+];
+
+/* ---------------- Google Tag Manager ---------------- */
+
+const GTM_BASE = "https://tagmanager.googleapis.com/tagmanager/v2";
+const GTM_ALL_PAGES_TRIGGER_ID = "2147479553";
+const GTM_GA4_CONFIG_TYPES = ["googtag", "gaawc"];
+const GTM_GOOGLE_TAG_TYPES = ["googtag", "gaawc", "gaawe", "awct", "sp", "gclidw", "flc", "fls", "awcc", "awud"];
+
+async function gtmGet(accessToken, path, query = {}) {
+  const url = new URL(`${GTM_BASE}/${path.replace(/^\/+/, "")}`);
+  appendQueryParams(url, query);
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+async function findGtmContainer(accessToken, { accountId, containerId, containerPublicId }) {
+  if (accountId && containerId) return { accountId: String(accountId), containerId: String(containerId), requestCount: 0 };
+  const accounts = await gtmGet(accessToken, "accounts");
+  let requestCount = 1;
+  if (!accounts.ok) return { error: accounts, requestCount };
+  const wanted = String(containerPublicId || "").toUpperCase();
+  // Capped so a lookup by public ID cannot walk an unbounded number of accounts.
+  for (const account of (accounts.body?.account || []).slice(0, 20)) {
+    if (accountId && String(account.accountId) !== String(accountId)) continue;
+    const containers = await gtmGet(accessToken, `accounts/${account.accountId}/containers`);
+    requestCount += 1;
+    const match = (containers.body?.container || []).find((container) =>
+      (wanted && String(container.publicId || "").toUpperCase() === wanted) ||
+      (containerId && String(container.containerId) === String(containerId)));
+    if (match) return { accountId: String(account.accountId), containerId: String(match.containerId), container: match, requestCount };
+  }
+  return { error: { ok: false, status: 404, body: { error: "Container not found for this Google account." } }, requestCount };
+}
+
+function gtmParam(parameters, key) {
+  return (parameters || []).find((parameter) => parameter?.key === key);
+}
+
+function gtmParamValue(parameters, key) {
+  const parameter = gtmParam(parameters, key);
+  return parameter?.value ?? null;
+}
+
+// Every string anywhere inside a tag, trigger or variable, used both to spot IDs and to
+// see which variables are referenced.
+function collectStrings(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) value.forEach((entry) => collectStrings(entry, out));
+  else if (value && typeof value === "object") Object.values(value).forEach((entry) => collectStrings(entry, out));
+  return out;
+}
+
+function buildGtmConstantResolver(variables) {
+  const constants = new Map();
+  for (const variable of variables || []) {
+    if (variable.type === "c") constants.set(variable.name, gtmParamValue(variable.parameter, "value"));
+  }
+  return (text) => String(text || "").replace(/\{\{([^}]+)\}\}/g, (match, name) => (constants.has(name) ? constants.get(name) : match));
+}
+
+function extractIds(strings, pattern) {
+  const found = new Set();
+  for (const text of strings) for (const match of String(text).matchAll(pattern)) found.add(match[0].toUpperCase());
+  return [...found];
+}
+
+const GTM_SEVERITY_WEIGHT = { high: 15, medium: 6, low: 2, info: 0 };
+
+// Audits a published container version without any further requests. Cross-checks
+// against GA4 and Google Ads are passed in already fetched, so this stays pure.
+function auditGtmContainerVersion(version, context = {}) {
+  const tags = version?.tag || [];
+  const triggers = version?.trigger || [];
+  const variables = version?.variable || [];
+  const isServer = (version?.container?.usageContext || []).some((usage) => String(usage).toLowerCase() === "server");
+  const resolve = buildGtmConstantResolver(variables);
+  const findings = [];
+  const add = (severity, rule, message, items) => findings.push({ severity, rule, message, items: items && items.length ? items : undefined });
+  const tagLabel = (tag) => `${tag.name} (${tag.type})`;
+
+  const tagStrings = (tag) => collectStrings(tag.parameter).map(resolve);
+  const measurementIds = extractIds(tags.flatMap(tagStrings), /\bG-[A-Z0-9]{4,}\b/gi);
+  const adsIds = extractIds(tags.flatMap(tagStrings), /\bAW-\d{6,}\b/gi);
+
+  const triggerIds = new Set(triggers.map((trigger) => String(trigger.triggerId)));
+  const usedTriggerIds = new Set();
+  tags.forEach((tag) => [...(tag.firingTriggerId || []), ...(tag.blockingTriggerId || [])].forEach((id) => usedTriggerIds.add(String(id))));
+  const sequencedTagNames = new Set();
+  tags.forEach((tag) => [...(tag.setupTag || []), ...(tag.teardownTag || [])].forEach((entry) => entry?.tagName && sequencedTagNames.add(entry.tagName)));
+
+  if (!tags.length) add("info", "empty_container", "The published version has no tags.");
+
+  const uaTags = tags.filter((tag) => tag.type === "ua");
+  if (uaTags.length) add("high", "universal_analytics_tags", "Universal Analytics no longer processes data (standard properties stopped in July 2023, 360 in July 2024). These tags do nothing but add page weight.", uaTags.map(tagLabel));
+
+  if (!isServer) {
+    const ga4Tags = tags.filter((tag) => GTM_GA4_CONFIG_TYPES.includes(tag.type) || tag.type === "gaawe");
+    if (!ga4Tags.length && !measurementIds.length) add("high", "no_ga4", "No Google tag or GA4 event tag is published, so this container sends nothing to GA4.");
+    if (measurementIds.length > 1) add("medium", "multiple_measurement_ids", "More than one GA4 measurement ID is in use. That is right for deliberate dual tracking, and a double-count otherwise.", measurementIds);
+    const legacy = tags.filter((tag) => tag.type === "gaawc");
+    if (legacy.length) add("low", "legacy_ga4_config_tag", "GA4 Configuration tags still work but have been superseded by the Google tag.", legacy.map(tagLabel));
+
+    const conversionTags = tags.filter((tag) => tag.type === "awct" && !tag.paused);
+    if (conversionTags.length && !tags.some((tag) => tag.type === "gclidw" && !tag.paused)) {
+      add("medium", "ads_conversion_without_linker", "Google Ads conversion tags are published without a Conversion Linker tag, which can lose click IDs and under-report conversions.", conversionTags.map(tagLabel));
+    }
+    const incomplete = conversionTags.filter((tag) => !resolve(gtmParamValue(tag.parameter, "conversionId") || "") || !resolve(gtmParamValue(tag.parameter, "conversionLabel") || ""));
+    if (incomplete.length) add("high", "ads_conversion_incomplete", "Google Ads conversion tags missing a conversion ID or label cannot record anything.", incomplete.map(tagLabel));
+
+    const eventsWithoutId = tags.filter((tag) => tag.type === "gaawe" && !tag.paused && !/G-[A-Z0-9]{4,}|\{\{/i.test(tagStrings(tag).join(" ")));
+    if (eventsWithoutId.length) add("medium", "ga4_event_without_measurement_id", "GA4 event tags with no measurement ID set.", eventsWithoutId.map(tagLabel));
+
+    const purchaseNoEcommerce = tags.filter((tag) => tag.type === "gaawe"
+      && String(resolve(gtmParamValue(tag.parameter, "eventName") || "")).toLowerCase() === "purchase"
+      && String(gtmParamValue(tag.parameter, "sendEcommerceData") || "").toLowerCase() !== "true"
+      && !/items|transaction_id|value/i.test(JSON.stringify(gtmParam(tag.parameter, "eventParameters") || gtmParam(tag.parameter, "eventSettingsTable") || "")));
+    if (purchaseNoEcommerce.length) add("medium", "purchase_without_ecommerce", "Purchase events that send neither ecommerce data nor items, value or transaction_id will record purchases with no revenue.", purchaseNoEcommerce.map(tagLabel));
+
+    const riskyConsent = tags.filter((tag) => !GTM_GOOGLE_TAG_TYPES.includes(tag.type) && !tag.paused
+      && (!tag.consentSettings || !tag.consentSettings.consentStatus || tag.consentSettings.consentStatus === "notSet"));
+    if (riskyConsent.length) add("medium", "consent_not_configured", "Non-Google tags with no consent settings fire regardless of consent. Google tags carry built-in consent checks; these do not.", riskyConsent.map(tagLabel));
+  }
+
+  const noTrigger = tags.filter((tag) => !tag.paused && !(tag.firingTriggerId || []).length && !sequencedTagNames.has(tag.name));
+  if (noTrigger.length) add("medium", "tags_without_firing_trigger", "Active tags with no firing trigger never run.", noTrigger.map(tagLabel));
+
+  const danglingTrigger = tags.filter((tag) => (tag.firingTriggerId || []).some((id) => Number(id) < 2147479000 && !triggerIds.has(String(id))));
+  if (danglingTrigger.length) add("high", "missing_trigger_reference", "Tags reference triggers that do not exist in this version.", danglingTrigger.map(tagLabel));
+
+  const paused = tags.filter((tag) => tag.paused);
+  if (paused.length) add("info", "paused_tags", "Paused tags are published but never fire.", paused.map(tagLabel));
+
+  const unusedTriggers = triggers.filter((trigger) => !usedTriggerIds.has(String(trigger.triggerId)));
+  if (unusedTriggers.length) add("low", "unused_triggers", "Triggers not used by any tag.", unusedTriggers.map((trigger) => `${trigger.name} (${trigger.type})`));
+
+  const references = collectStrings([tags, triggers, variables, version?.client || [], version?.transformation || []]).join("\n");
+  const unusedVariables = variables.filter((variable) => {
+    const token = `{{${variable.name}}}`;
+    const occurrences = references.split(token).length - 1;
+    return occurrences === 0;
+  });
+  if (unusedVariables.length) add("low", "unused_variables", "Variables not referenced anywhere in the container.", unusedVariables.map((variable) => `${variable.name} (${variable.type})`));
+
+  const htmlTags = tags.filter((tag) => tag.type === "html");
+  const risky = [];
+  for (const tag of htmlTags) {
+    const html = String(gtmParamValue(tag.parameter, "html") || "");
+    const patterns = [];
+    if (/document\.write\s*\(/i.test(html)) patterns.push("document.write");
+    if (/\beval\s*\(|new\s+Function\s*\(/i.test(html)) patterns.push("eval");
+    if (/<script[^>]+src\s*=/i.test(html)) patterns.push("external script");
+    if (patterns.length) risky.push(`${tag.name}: ${patterns.join(", ")}`);
+  }
+  if (risky.length) add("medium", "risky_custom_html", "Custom HTML using document.write, eval or externally loaded scripts slows pages and runs third-party code with full page access.", risky);
+  else if (htmlTags.length) add("info", "custom_html_tags", `${htmlTags.length} Custom HTML tag(s). Consider templates, which run sandboxed.`, htmlTags.map(tagLabel));
+
+  const signature = (tag) => JSON.stringify([tag.type, (tag.firingTriggerId || []).slice().sort(), tag.parameter || []]);
+  const seen = new Map();
+  for (const tag of tags.filter((entry) => !entry.paused)) {
+    const key = signature(tag);
+    if (!seen.has(key)) seen.set(key, []);
+    seen.get(key).push(tag.name);
+  }
+  const duplicates = [...seen.values()].filter((names) => names.length > 1).map((names) => names.join(" = "));
+  if (duplicates.length) add("medium", "duplicate_tags", "Identical tags on identical triggers fire twice and double-count.", duplicates);
+
+  const hardcoded = tags.filter((tag) => /\b(G-[A-Z0-9]{4,}|AW-\d{6,})\b/i.test(collectStrings(tag.parameter).join(" ")));
+  if (hardcoded.length >= 3) add("low", "hardcoded_ids", "Measurement or conversion IDs are typed into several tags instead of held in a constant variable, so changing one means editing each tag.", hardcoded.map(tagLabel));
+
+  const allPages = tags.filter((tag) => !tag.paused && (tag.firingTriggerId || []).map(String).includes(GTM_ALL_PAGES_TRIGGER_ID));
+  if (allPages.length > 15) add("info", "heavy_all_pages", `${allPages.length} tags fire on every page view.`);
+
+  if (context.workspaceChanges?.total) {
+    add("info", "unpublished_changes", `${context.workspaceChanges.total} change(s) in the workspace are not published, so they are not live.`, Object.entries(context.workspaceChanges.byStatus || {}).map(([status, count]) => `${status}: ${count}`));
+  }
+
+  if (context.ga4MeasurementIds) {
+    const propertyIds = context.ga4MeasurementIds.map((id) => id.toUpperCase());
+    const foreign = measurementIds.filter((id) => !propertyIds.includes(id));
+    const untagged = propertyIds.filter((id) => !measurementIds.includes(id));
+    if (foreign.length) add("high", "measurement_id_not_in_property", "The container sends to measurement IDs that are not web streams of the GA4 property you named.", foreign);
+    if (untagged.length) add("medium", "stream_not_tagged_here", "Web streams of that GA4 property receive nothing from this container. They may be tagged elsewhere.", untagged);
+  }
+
+  if (context.adsConversions) {
+    const containerLabels = new Set(tags.filter((tag) => tag.type === "awct").map((tag) =>
+      `${String(resolve(gtmParamValue(tag.parameter, "conversionId") || "")).replace(/\D/g, "")}/${resolve(gtmParamValue(tag.parameter, "conversionLabel") || "")}`));
+    const adsLabels = new Map(context.adsConversions.map((action) => [action.sendTo, action.name]));
+    // A tag missing its ID or label is already reported as incomplete; counting it again
+    // here as pointing at a missing action would report one problem twice.
+    const orphanTags = [...containerLabels].filter((label) => /^\d+\/.+$/.test(label) && !adsLabels.has(label));
+    const untracked = [...adsLabels.entries()].filter(([label]) => !containerLabels.has(label)).map(([label, name]) => `${name} (${label})`);
+    if (orphanTags.length) add("high", "conversion_tag_without_action", "Conversion tags point at IDs and labels that match no enabled conversion action in the Google Ads account.", orphanTags);
+    if (untracked.length) add("medium", "conversion_action_without_tag", "Enabled website conversion actions with no matching tag in this container. They may be tracked elsewhere.", untracked);
+  }
+
+  const score = Math.max(0, 100 - findings.reduce((total, finding) => total + (GTM_SEVERITY_WEIGHT[finding.severity] || 0), 0));
+  const tagsByType = {};
+  tags.forEach((tag) => { tagsByType[tag.type] = (tagsByType[tag.type] || 0) + 1; });
+  const order = ["high", "medium", "low", "info"];
+  findings.sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
+
+  return {
+    score,
+    containerType: isServer ? "server" : "web",
+    summary: {
+      tags: tags.length,
+      triggers: triggers.length,
+      variables: variables.length,
+      pausedTags: paused.length,
+      high: findings.filter((finding) => finding.severity === "high").length,
+      medium: findings.filter((finding) => finding.severity === "medium").length,
+      low: findings.filter((finding) => finding.severity === "low").length
+    },
+    inventory: { tagsByType, measurementIds, adsConversionIds: adsIds },
+    findings
+  };
+}
+
+// Google Ads event snippets carry the send_to target, which is the join key to GTM.
+function extractAdsSendTargets(results) {
+  const actions = [];
+  for (const row of results || []) {
+    const name = getGoogleAdsValue(row, "conversion_action.name");
+    const snippets = getGoogleAdsValue(row, "conversion_action.tag_snippets") || [];
+    for (const snippet of snippets) {
+      const text = String(snippet?.eventSnippet || "");
+      for (const match of text.matchAll(/AW-(\d+)\/([A-Za-z0-9_-]+)/g)) actions.push({ name, sendTo: `${match[1]}/${match[2]}` });
+    }
+  }
+  const unique = new Map(actions.map((action) => [action.sendTo, action]));
+  return [...unique.values()];
+}
+
+/* ---------------- BigQuery (GA4 export) ---------------- */
+
+const BIGQUERY_BASE = "https://bigquery.googleapis.com/bigquery/v2";
+const GIBIBYTE = 1024 ** 3;
+const TEBIBYTE = 1024 ** 4;
+
+function getBigQueryDefaultMaxBytes() {
+  return toNumber(process.env.BIGQUERY_MAX_BYTES_BILLED) || 5 * GIBIBYTE;
+}
+
+function getBigQueryMaxBytesCeiling() {
+  return toNumber(process.env.BIGQUERY_MAX_BYTES_CEILING) || 100 * GIBIBYTE;
+}
+
+function getBigQueryPricePerTib() {
+  return toNumber(process.env.BIGQUERY_PRICE_PER_TIB) || 6.25;
+}
+
+function estimateBigQueryCost(bytes) {
+  const numeric = toNumber(bytes) || 0;
+  return {
+    bytesProcessed: numeric,
+    gibibytes: Number((numeric / GIBIBYTE).toFixed(3)),
+    estimatedUsd: Number(((numeric / TEBIBYTE) * getBigQueryPricePerTib()).toFixed(4)),
+    pricePerTibUsd: getBigQueryPricePerTib(),
+    note: "On-demand estimate. The first TiB each month is free, and flat-rate or edition billing is priced differently."
+  };
+}
+
+const BIGQUERY_FORBIDDEN_KEYWORDS = [
+  "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE",
+  "EXPORT", "LOAD", "CALL", "DECLARE", "SET", "BEGIN", "EXECUTE", "COMMIT", "ROLLBACK", "ASSERT", "RAISE"
+];
+
+// Strips comments and literals, then insists on one SELECT or WITH statement with no
+// data-changing keyword. The read-only OAuth scope already stops writes; this also
+// stops them if someone widens the scope later.
+function assertReadOnlySql(sql) {
+  const text = String(sql || "");
+  let stripped = "";
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    const next = text[index + 1];
+    if (character === "-" && next === "-") { while (index < text.length && text[index] !== "\n") index += 1; stripped += " "; continue; }
+    if (character === "#") { while (index < text.length && text[index] !== "\n") index += 1; stripped += " "; continue; }
+    if (character === "/" && next === "*") { index += 2; while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index += 1; index += 1; stripped += " "; continue; }
+    if (character === "'" || character === "\"" || character === "`") {
+      const quote = character;
+      index += 1;
+      while (index < text.length && text[index] !== quote) { if (text[index] === "\\") index += 1; index += 1; }
+      stripped += quote === "`" ? " _identifier_ " : " '' ";
+      continue;
+    }
+    stripped += character;
+  }
+  const body = stripped.trim().replace(/;\s*$/, "");
+  if (!body) throw new Error("The query is empty.");
+  if (body.includes(";")) throw new Error("Only one statement is allowed.");
+  if (!/^\(*\s*(SELECT|WITH)\b/i.test(body)) throw new Error("Only SELECT or WITH queries are allowed.");
+  const forbidden = BIGQUERY_FORBIDDEN_KEYWORDS.find((keyword) => new RegExp(`\\b${keyword}\\b`, "i").test(body));
+  if (forbidden) throw new Error(`${forbidden} is not allowed. This tool only reads.`);
+  return true;
+}
+
+function decodeBigQueryValue(field, value) {
+  if (value === null || value === undefined) return null;
+  if (field.mode === "REPEATED") {
+    return (value || []).map((entry) => decodeBigQueryValue({ ...field, mode: "NULLABLE" }, entry?.v));
+  }
+  const type = String(field.type || "").toUpperCase();
+  if (type === "RECORD" || type === "STRUCT") {
+    const record = {};
+    (field.fields || []).forEach((child, index) => { record[child.name] = decodeBigQueryValue(child, value?.f?.[index]?.v); });
+    return record;
+  }
+  if (type === "INTEGER" || type === "INT64") {
+    const numeric = Number(value);
+    return Number.isSafeInteger(numeric) ? numeric : String(value);
+  }
+  if (["FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"].includes(type)) return Number(value);
+  if (type === "BOOLEAN" || type === "BOOL") return value === true || value === "true";
+  if (type === "TIMESTAMP") {
+    const seconds = Number(value);
+    return Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : String(value);
+  }
+  return String(value);
+}
+
+function decodeBigQueryRows(schema, rows) {
+  const fields = schema?.fields || [];
+  return (rows || []).map((row) => {
+    const record = {};
+    fields.forEach((field, index) => { record[field.name] = decodeBigQueryValue(field, row?.f?.[index]?.v); });
+    return record;
+  });
+}
+
+async function runBigQueryJob(accessToken, projectId, body) {
+  return callGoogleApi(`${BIGQUERY_BASE}/projects/${encodeURIComponent(projectId)}/queries`, accessToken, {
+    method: "POST",
+    body: JSON.stringify({ useLegacySql: false, labels: { source: "marketing_data_mcp" }, ...body })
+  });
+}
+
+async function getBigQueryResults(accessToken, projectId, jobId, params = {}) {
+  const url = new URL(`${BIGQUERY_BASE}/projects/${encodeURIComponent(projectId)}/queries/${encodeURIComponent(jobId)}`);
+  appendQueryParams(url, { location: params.location, pageToken: params.pageToken, maxResults: params.maxResults, timeoutMs: params.timeoutMs });
+  return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+const BIGQUERY_PROJECT_SHAPE = /^[a-z][a-z0-9.:-]{4,61}[a-z0-9]$/;
+const BIGQUERY_DATASET_SHAPE = /^[A-Za-z0-9_]{1,1024}$/;
+const GA4_EVENT_NAME_SHAPE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+
+function toTableSuffix(date) {
+  return String(date).replace(/-/g, "");
+}
+
+const BIGQUERY_GA4_PRESET_DEFINITIONS = {
+  daily_overview: "Users, sessions, page views, purchases and revenue per day.",
+  events_by_name: "Every event name with event count and users.",
+  event_parameters: "Which parameters an event actually carries, with value types and an example. Needs eventName.",
+  session_sources: "Sessions and users by session source, medium and campaign, from the session_start event.",
+  first_user_sources: "Users by the source, medium and campaign that first acquired them.",
+  landing_pages: "Sessions and users by landing page.",
+  top_pages: "Page views and users by page and title.",
+  ecommerce_items: "Quantity, revenue and transactions per purchased item.",
+  purchase_funnel: "Sessions reaching each step from session start to purchase.",
+  tracking_quality: "Data health: missing session IDs, missing page locations, duplicate and missing transaction IDs.",
+  duplicate_transactions: "Transaction IDs recorded by more than one purchase event, which inflates revenue."
+};
+const BIGQUERY_GA4_PRESET_NAMES = Object.keys(BIGQUERY_GA4_PRESET_DEFINITIONS);
+
+function buildBigQueryGa4PresetSql(params) {
+  const { preset, projectId, datasetId } = params;
+  if (!BIGQUERY_GA4_PRESET_DEFINITIONS[preset]) throw new Error(`Unsupported BigQuery GA4 preset: ${preset}`);
+  if (!BIGQUERY_PROJECT_SHAPE.test(String(projectId || ""))) throw new Error(`Invalid projectId: ${projectId}`);
+  if (!BIGQUERY_DATASET_SHAPE.test(String(datasetId || ""))) throw new Error(`Invalid datasetId: ${datasetId}`);
+  const range = resolveDateWindow(params);
+  const from = toTableSuffix(range.startDate);
+  const to = toTableSuffix(range.endDate);
+  const limit = Math.min(Math.max(Number(params.limit) || 100, 1), 10000);
+  const table = `\`${projectId}.${datasetId}.events_*\``;
+  // The date range is applied to the table suffix, which is what limits the bytes
+  // scanned and therefore the cost. Intraday tables sort after dates, so they are
+  // excluded unless asked for.
+  const suffix = params.includeIntraday
+    ? `(_TABLE_SUFFIX BETWEEN '${from}' AND '${to}' OR _TABLE_SUFFIX BETWEEN 'intraday_${from}' AND 'intraday_${to}')`
+    : `_TABLE_SUFFIX BETWEEN '${from}' AND '${to}'`;
+  const param = (key, kind = "string_value") => `(SELECT value.${kind} FROM UNNEST(event_params) WHERE key = '${key}')`;
+  const sessionKey = `CONCAT(user_pseudo_id, '.', CAST(${param("ga_session_id", "int_value")} AS STRING))`;
+
+  switch (preset) {
+    case "daily_overview":
+      return `SELECT event_date,
+  COUNT(DISTINCT user_pseudo_id) AS users,
+  COUNT(DISTINCT ${sessionKey}) AS sessions,
+  COUNTIF(event_name = 'page_view') AS page_views,
+  COUNTIF(event_name = 'purchase') AS purchases,
+  SUM(ecommerce.purchase_revenue) AS revenue
+FROM ${table}
+WHERE ${suffix}
+GROUP BY event_date
+ORDER BY event_date`;
+    case "events_by_name":
+      return `SELECT event_name, COUNT(*) AS events, COUNT(DISTINCT user_pseudo_id) AS users
+FROM ${table}
+WHERE ${suffix}
+GROUP BY event_name
+ORDER BY events DESC
+LIMIT ${limit}`;
+    case "event_parameters": {
+      const eventName = String(params.eventName || "");
+      if (!GA4_EVENT_NAME_SHAPE.test(eventName)) throw new Error("event_parameters needs a valid eventName, such as purchase.");
+      return `SELECT p.key AS parameter,
+  COUNT(*) AS occurrences,
+  COUNTIF(p.value.string_value IS NOT NULL) AS string_values,
+  COUNTIF(p.value.int_value IS NOT NULL) AS int_values,
+  COUNTIF(p.value.double_value IS NOT NULL OR p.value.float_value IS NOT NULL) AS decimal_values,
+  ANY_VALUE(COALESCE(p.value.string_value, CAST(p.value.int_value AS STRING), CAST(p.value.double_value AS STRING))) AS example
+FROM ${table}, UNNEST(event_params) AS p
+WHERE ${suffix} AND event_name = '${eventName}'
+GROUP BY parameter
+ORDER BY occurrences DESC
+LIMIT ${limit}`;
+    }
+    case "session_sources":
+      return `SELECT
+  COALESCE(collected_traffic_source.manual_source, '(direct)') AS source,
+  COALESCE(collected_traffic_source.manual_medium, '(none)') AS medium,
+  COALESCE(collected_traffic_source.manual_campaign_name, '(not set)') AS campaign,
+  COUNTIF(collected_traffic_source.gclid IS NOT NULL) AS sessions_with_gclid,
+  COUNT(DISTINCT ${sessionKey}) AS sessions,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM ${table}
+WHERE ${suffix} AND event_name = 'session_start'
+GROUP BY source, medium, campaign
+ORDER BY sessions DESC
+LIMIT ${limit}`;
+    case "first_user_sources":
+      return `SELECT traffic_source.source AS source, traffic_source.medium AS medium, traffic_source.name AS campaign,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM ${table}
+WHERE ${suffix}
+GROUP BY source, medium, campaign
+ORDER BY users DESC
+LIMIT ${limit}`;
+    case "landing_pages":
+      return `SELECT ${param("page_location")} AS landing_page,
+  COUNT(DISTINCT ${sessionKey}) AS sessions,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM ${table}
+WHERE ${suffix} AND event_name = 'session_start'
+GROUP BY landing_page
+ORDER BY sessions DESC
+LIMIT ${limit}`;
+    case "top_pages":
+      return `SELECT ${param("page_location")} AS page, ${param("page_title")} AS title,
+  COUNT(*) AS views,
+  COUNT(DISTINCT user_pseudo_id) AS users
+FROM ${table}
+WHERE ${suffix} AND event_name = 'page_view'
+GROUP BY page, title
+ORDER BY views DESC
+LIMIT ${limit}`;
+    case "ecommerce_items":
+      return `SELECT item.item_id, item.item_name, item.item_brand, item.item_category,
+  SUM(item.quantity) AS quantity,
+  SUM(item.item_revenue) AS revenue,
+  COUNT(DISTINCT ecommerce.transaction_id) AS transactions
+FROM ${table}, UNNEST(items) AS item
+WHERE ${suffix} AND event_name = 'purchase'
+GROUP BY item.item_id, item.item_name, item.item_brand, item.item_category
+ORDER BY revenue DESC
+LIMIT ${limit}`;
+    case "purchase_funnel":
+      return `WITH sessions AS (
+  SELECT ${sessionKey} AS session_key,
+    MAX(IF(event_name = 'session_start', 1, 0)) AS session_start,
+    MAX(IF(event_name = 'view_item', 1, 0)) AS view_item,
+    MAX(IF(event_name = 'add_to_cart', 1, 0)) AS add_to_cart,
+    MAX(IF(event_name = 'begin_checkout', 1, 0)) AS begin_checkout,
+    MAX(IF(event_name = 'add_payment_info', 1, 0)) AS add_payment_info,
+    MAX(IF(event_name = 'purchase', 1, 0)) AS purchase
+  FROM ${table}
+  WHERE ${suffix}
+  GROUP BY session_key
+)
+SELECT SUM(session_start) AS session_start, SUM(view_item) AS view_item, SUM(add_to_cart) AS add_to_cart,
+  SUM(begin_checkout) AS begin_checkout, SUM(add_payment_info) AS add_payment_info, SUM(purchase) AS purchase
+FROM sessions`;
+    case "tracking_quality":
+      return `SELECT
+  COUNT(*) AS events,
+  SAFE_DIVIDE(COUNTIF(${param("ga_session_id", "int_value")} IS NULL), COUNT(*)) AS share_missing_session_id,
+  SAFE_DIVIDE(COUNTIF(event_name = 'page_view' AND ${param("page_location")} IS NULL), NULLIF(COUNTIF(event_name = 'page_view'), 0)) AS share_page_views_missing_location,
+  SAFE_DIVIDE(COUNTIF(user_id IS NOT NULL), COUNT(*)) AS share_with_user_id,
+  COUNTIF(event_name = 'purchase') AS purchase_events,
+  COUNT(DISTINCT IF(event_name = 'purchase', ecommerce.transaction_id, NULL)) AS distinct_transactions,
+  COUNTIF(event_name = 'purchase' AND ecommerce.transaction_id IS NULL) AS purchases_missing_transaction_id,
+  SAFE_DIVIDE(COUNTIF(geo.country IS NULL OR geo.country = '(not set)'), COUNT(*)) AS share_country_not_set
+FROM ${table}
+WHERE ${suffix}`;
+    case "duplicate_transactions":
+      return `SELECT ecommerce.transaction_id AS transaction_id,
+  COUNT(*) AS purchase_events,
+  SUM(ecommerce.purchase_revenue) AS recorded_revenue,
+  MIN(event_date) AS first_date,
+  MAX(event_date) AS last_date
+FROM ${table}
+WHERE ${suffix} AND event_name = 'purchase' AND ecommerce.transaction_id IS NOT NULL
+GROUP BY transaction_id
+HAVING COUNT(*) > 1
+ORDER BY purchase_events DESC
+LIMIT ${limit}`;
+    default:
+      throw new Error(`Unsupported BigQuery GA4 preset: ${preset}`);
+  }
+}
+
+// Every query is dry-run first, so the byte count is known and refused before any cost
+// is incurred. The real run also carries maximumBytesBilled, which BigQuery enforces
+// itself, so the ceiling holds even if the estimate is wrong.
+async function executeBigQuerySql(accessToken, params) {
+  assertReadOnlySql(params.sql);
+  const ceiling = getBigQueryMaxBytesCeiling();
+  const maxBytes = Math.min(toNumber(params.maxBytesBilled) || getBigQueryDefaultMaxBytes(), ceiling);
+  const dryRun = await runBigQueryJob(accessToken, params.billingProjectId, {
+    query: params.sql, dryRun: true, location: params.location
+  });
+  if (!dryRun.ok) return { stage: "dry_run", response: dryRun, requestCount: 1 };
+  const cost = estimateBigQueryCost(dryRun.body?.totalBytesProcessed);
+  if (params.dryRun) return { stage: "dry_run_only", cost, maxBytes, requestCount: 1 };
+  if (cost.bytesProcessed > maxBytes) {
+    return { stage: "refused", cost, maxBytes, requestCount: 1 };
+  }
+  const run = await runBigQueryJob(accessToken, params.billingProjectId, {
+    query: params.sql,
+    location: params.location,
+    maximumBytesBilled: String(Math.floor(maxBytes)),
+    maxResults: params.maxResults || 1000,
+    timeoutMs: 45000
+  });
+  return { stage: "ran", cost, maxBytes, response: run, requestCount: 2 };
+}
+
+function summariseBigQueryRun(result) {
+  const body = result.response?.body || {};
+  return {
+    jobComplete: body.jobComplete !== false,
+    jobId: body.jobReference?.jobId || null,
+    location: body.jobReference?.location || null,
+    totalRows: toNumber(body.totalRows) ?? null,
+    bytesBilled: toNumber(body.totalBytesBilled) ?? null,
+    cacheHit: body.cacheHit ?? null,
+    pageToken: body.pageToken || null,
+    rows: body.schema ? decodeBigQueryRows(body.schema, body.rows) : []
+  };
+}
+
 function buildMarketingGuardrailsPayload() {
   return {
     expertVersion: EXPERT_VERSION,
@@ -5108,6 +6572,909 @@ function createServer(req) {
       }, !response.ok);
     });
   });
+  /* ---------------- GA4: admin, access, audience exports, many properties ---------------- */
+  server.registerTool("get_ga4_admin_resource", {
+    title: "Get GA4 Admin Resource",
+    description: "Read GA4 property configuration: audiences, Google Ads links, BigQuery links, annotations, Firebase / SA360 / DV360 links, key events, custom and calculated metrics, channel groups, data streams, data retention, attribution settings, Google signals, the property itself, or its change history for a date range.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      resource: z.enum(GA4_ADMIN_RESOURCE_NAMES),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      pageSize: z.number().int().min(1).max(200).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_ga4_admin_resource, async ({ googleCredentials }) => {
+    if (params.resource === "change_history") {
+      const result = await searchGa4ChangeHistory(googleCredentials.accessToken, params.propertyId, params);
+      return buildToolResult({
+        propertyId: normalizePropertyName(params.propertyId),
+        resource: "change_history",
+        account: result.account || null,
+        requestCount: result.requestCount,
+        raw: toGoogleDebugPayload(result.response)
+      }, !result.response.ok);
+    }
+    const response = await getGa4AdminResource(googleCredentials.accessToken, params.propertyId, params.resource, params);
+    return buildToolResult({
+      propertyId: normalizePropertyName(params.propertyId),
+      resource: params.resource,
+      apiSurface: "analyticsadmin v1alpha",
+      raw: toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("run_ga4_access_report", {
+    title: "Run GA4 Data Access Report",
+    description: "Who accessed this GA4 property's data, when and how: users, API or UI access, report types and quota consumed. Requires the Administrator role on the property.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      dimensions: z.array(z.string().min(1)).max(9).optional(),
+      metrics: z.array(z.string().min(1)).max(10).optional(),
+      dimensionFilter: z.record(z.any()).optional(),
+      metricFilter: z.record(z.any()).optional(),
+      limit: z.number().int().min(1).max(100000).optional(),
+      offset: z.number().int().min(0).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_ga4_access_report, async ({ googleCredentials }) => {
+    const response = await runGa4AccessReport(googleCredentials.accessToken, params);
+    return buildToolResult({
+      propertyId: normalizePropertyName(params.propertyId),
+      rows: response.ok ? mapGa4AccessReportRows(response.body) : [],
+      rowCount: response.ok ? toNumber(response.body?.rowCount) ?? null : null,
+      hint: response.ok ? undefined : "The access report needs the Administrator role on the property.",
+      raw: response.ok ? { quota: response.body?.quota || null } : toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("run_ga4_audience_export", {
+    title: "Run GA4 Audience Export",
+    description: "List, create, check or read GA4 audience exports: the users who belong to an audience right now. Create starts an export that takes minutes to build; use get to check its state and query to read it once ACTIVE.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      action: z.enum(["list", "get", "create", "query"]),
+      audience: z.string().optional(),
+      audienceExport: z.string().optional(),
+      dimensions: z.array(z.string().min(1)).optional(),
+      offset: z.number().int().min(0).optional(),
+      limit: z.number().int().min(1).max(250000).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: false }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_ga4_audience_export, async ({ googleCredentials }) => {
+    let response;
+    try {
+      response = await runGa4AudienceExportAction(googleCredentials.accessToken, params);
+    } catch (error) {
+      return buildToolResult({ error: "invalid_audience_export_request", error_description: error.message }, true);
+    }
+    return buildToolResult({
+      propertyId: normalizePropertyName(params.propertyId),
+      action: params.action,
+      hint: params.action === "create" ? "The export builds in the background. Call again with action get until state is ACTIVE, then action query." : undefined,
+      raw: toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("run_ga4_multi_property_report", {
+    title: "Run GA4 Report Across Properties",
+    description: "Run one GA4 report across up to 10 properties in a single call and get the rows back side by side, each tagged with its property, with per-property totals. Supports derived metrics, filtering and sorting on them, and top-N.",
+    inputSchema: {
+      propertyIds: z.array(z.string().min(1)).min(1).max(10),
+      dimensions: z.array(z.string()).max(8).optional(),
+      metrics: z.array(z.string().min(1)).min(1).max(10),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      dimensionFilter: z.record(z.any()).optional(),
+      metricFilter: z.record(z.any()).optional(),
+      limit: z.number().int().min(1).max(100000).optional(),
+      computedMetrics: z.array(z.object({ name: z.string().min(1), formula: z.string().min(1) })).optional(),
+      having: z.array(z.object({ field: z.string().min(1), op: z.string().optional(), value: z.any().optional() })).optional(),
+      sort: z.array(z.object({ field: z.string().min(1), direction: z.enum(["asc", "desc"]).optional() })).optional(),
+      topN: z.number().int().min(1).max(10000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_ga4_multi_property_report, async ({ googleCredentials }) => {
+    try {
+      validateFieldNames(params.dimensions, GA4_FIELD_SHAPE, "dimensions");
+      validateFieldNames(params.metrics, GA4_FIELD_SHAPE, "metrics");
+    } catch (error) {
+      return buildToolResult({ error: "invalid_ga4_request", error_description: error.message }, true);
+    }
+    const range = resolveDateWindow(params);
+    const outcomes = await runWithConcurrency(params.propertyIds, 4, async (propertyId) => {
+      const response = await runGa4Report(googleCredentials.accessToken, {
+        propertyId,
+        dateRanges: [{ startDate: range.startDate, endDate: range.endDate }],
+        dimensions: (params.dimensions || []).map((name) => ({ name })),
+        metrics: params.metrics.map((name) => ({ name })),
+        dimensionFilter: params.dimensionFilter,
+        metricFilter: params.metricFilter,
+        limit: params.limit ? String(params.limit) : undefined
+      });
+      const rows = response.ok
+        ? buildGa4AdvancedRows(response.body).map((row) => ({ ...row, dimensions: { property: normalizePropertyName(propertyId), ...row.dimensions } }))
+        : [];
+      return { propertyId: normalizePropertyName(propertyId), ok: response.ok, rows, error: response.ok ? null : toGoogleDebugPayload(response) };
+    });
+    const allRows = outcomes.flatMap((outcome) => outcome.rows);
+    const shaped = shapeAdvancedRows(allRows, params);
+    return buildToolResult({
+      platform: "ga4",
+      dateRange: range,
+      requestCount: params.propertyIds.length,
+      properties: outcomes.map((outcome) => ({
+        propertyId: outcome.propertyId,
+        ok: outcome.ok,
+        rows: outcome.rows.length,
+        totals: summariseMetrics(outcome.rows),
+        error: outcome.error || undefined
+      })),
+      formulaErrors: shaped.formulaErrors,
+      normalizedRows: shaped.rows
+    }, outcomes.every((outcome) => !outcome.ok));
+  }));
+
+  /* ---------------- Google Ads: planning and every account under a manager ---------------- */
+  server.registerTool("google_ads_keyword_planner", {
+    title: "Google Ads Keyword Planner",
+    description: "Keyword research from Google Ads. ideas: new keywords from seed keywords, a URL or a whole site, with monthly search volume, competition and top-of-page bid ranges. historical_metrics: 12-month volume and bids for keywords you already have. forecast: projected clicks, impressions, cost and conversions for a keyword set at a max CPC. Language and location use Google's constant IDs (1000 English, 2840 United States).",
+    inputSchema: {
+      customerId: z.string().min(1),
+      loginCustomerId: z.string().optional(),
+      action: z.enum(["ideas", "historical_metrics", "forecast"]),
+      keywords: z.array(z.string().min(1)).max(20).optional(),
+      url: z.string().optional(),
+      site: z.string().optional(),
+      language: z.string().optional(),
+      geoTargets: z.array(z.string()).max(10).optional(),
+      network: z.enum(["GOOGLE_SEARCH", "GOOGLE_SEARCH_AND_PARTNERS"]).optional(),
+      includeAdultKeywords: z.boolean().optional(),
+      pageSize: z.number().int().min(1).max(10000).optional(),
+      pageToken: z.string().optional(),
+      maxCpcBid: z.number().positive().optional(),
+      matchType: z.enum(["EXACT", "PHRASE", "BROAD"]).optional(),
+      forecastStartDate: z.string().optional(),
+      forecastEndDate: z.string().optional(),
+      currencyCode: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.google_ads_keyword_planner, async ({ googleCredentials }) => {
+    let request;
+    try {
+      request = buildKeywordPlannerRequest(params);
+    } catch (error) {
+      return buildToolResult({ error: "invalid_keyword_planner_request", error_description: error.message }, true);
+    }
+    const response = await callGoogleAdsApi(`customers/${normalizeGoogleAdsCustomerId(params.customerId)}:${request.path}`, googleCredentials.accessToken, {
+      method: "POST",
+      loginCustomerId: params.loginCustomerId,
+      body: request.body
+    });
+    const results = response.ok ? response.body?.results || [] : [];
+    return buildToolResult({
+      action: params.action,
+      requestCount: 1,
+      keywords: params.action === "forecast" ? undefined : results.map(mapKeywordPlannerRow),
+      forecast: params.action === "forecast" && response.ok ? mapKeywordForecast(response.body) : undefined,
+      nextPageToken: response.body?.nextPageToken || null,
+      request: request.body,
+      hint: response.ok ? undefined : "Keyword planning can be limited on test accounts and on some developer token access levels.",
+      raw: response.ok ? undefined : toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("google_ads_reach_planner", {
+    title: "Google Ads Reach Planner",
+    description: "YouTube and video reach planning: list plannable locations, list the products available in a location, or forecast reach, frequency and impressions for a budget split across products. Google has to approve an account before Reach Planner returns data.",
+    inputSchema: {
+      action: z.enum(["locations", "products", "forecast"]),
+      customerId: z.string().optional(),
+      loginCustomerId: z.string().optional(),
+      plannableLocationId: z.string().optional(),
+      currencyCode: z.string().optional(),
+      durationInDays: z.number().int().min(1).max(90).optional(),
+      products: z.array(z.object({ code: z.string().min(1), budget: z.number().positive() })).optional(),
+      targeting: z.record(z.any()).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.google_ads_reach_planner, async ({ googleCredentials }) => {
+    let response;
+    try {
+      response = await runGoogleAdsReachPlanner(googleCredentials.accessToken, params);
+    } catch (error) {
+      return buildToolResult({ error: "invalid_reach_planner_request", error_description: error.message }, true);
+    }
+    return buildToolResult({
+      action: params.action,
+      requestCount: 1,
+      hint: response.ok ? undefined : "Reach Planner only answers for accounts Google has approved for it.",
+      raw: toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("run_google_ads_across_accounts", {
+    title: "Run Google Ads Query Across Accounts",
+    description: "Run one GAQL query against every client account under a manager (MCC) and get the rows back together, each tagged with its account, plus per-account totals. Each account costs one API request, so use dryRun first to see the account list and request count, and keep maxAccounts small on a Basic Access developer token.",
+    inputSchema: {
+      managerCustomerId: z.string().min(1),
+      loginCustomerId: z.string().optional(),
+      customerIds: z.array(z.string().min(1)).max(50).optional(),
+      query: z.string().min(1),
+      maxAccounts: z.number().int().min(1).max(50).optional(),
+      dryRun: z.boolean().optional(),
+      computedMetrics: z.array(z.object({ name: z.string().min(1), formula: z.string().min(1) })).optional(),
+      having: z.array(z.object({ field: z.string().min(1), op: z.string().optional(), value: z.any().optional() })).optional(),
+      sort: z.array(z.object({ field: z.string().min(1), direction: z.enum(["asc", "desc"]).optional() })).optional(),
+      topN: z.number().int().min(1).max(10000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_google_ads_across_accounts, async ({ googleCredentials }) => {
+    if (!/^\s*SELECT\b/i.test(params.query)) {
+      return buildToolResult({ error: "invalid_query", error_description: "query must be a GAQL SELECT statement." }, true);
+    }
+    const maxAccounts = params.maxAccounts || 10;
+    let accounts;
+    let requestCount = 0;
+    if (params.customerIds?.length) {
+      accounts = params.customerIds.map((customerId) => ({ customerId: normalizeGoogleAdsCustomerId(customerId), name: null }));
+    } else {
+      const listing = await listManagedGoogleAdsAccounts(googleCredentials.accessToken, params);
+      requestCount += 1;
+      if (!listing.response.ok) {
+        return buildToolResult({ error: "could_not_list_accounts", raw: toGoogleDebugPayload(listing.response) }, true);
+      }
+      accounts = listing.accounts;
+    }
+    const selected = accounts.slice(0, maxAccounts);
+    const skipped = accounts.length - selected.length;
+    if (params.dryRun) {
+      return buildToolResult({
+        dryRun: true,
+        accountsFound: accounts.length,
+        accountsThatWouldRun: selected,
+        accountsSkippedByMaxAccounts: skipped,
+        requestsSoFar: requestCount,
+        requestsIfRun: selected.length
+      });
+    }
+    const outcomes = await runWithConcurrency(selected, 5, async (account) => {
+      const response = await queryGoogleAds(googleCredentials.accessToken, {
+        customerId: account.customerId,
+        loginCustomerId: params.loginCustomerId || params.managerCustomerId,
+        query: params.query,
+        pageSize: GOOGLE_ADS_MAX_PAGE_SIZE
+      });
+      const rows = response.ok ? (response.body?.results || []).map((row) => googleAdsResultToRecord(row, account)) : [];
+      return { account, ok: response.ok, rows, error: response.ok ? null : toGoogleDebugPayload(response) };
+    });
+    requestCount += selected.length;
+    const shaped = shapeAdvancedRows(outcomes.flatMap((outcome) => outcome.rows), params);
+    return buildToolResult({
+      platform: "google_ads",
+      requestCount,
+      accountsRun: selected.length,
+      accountsSkippedByMaxAccounts: skipped,
+      accounts: outcomes.map((outcome) => ({
+        customerId: outcome.account.customerId,
+        name: outcome.account.name,
+        ok: outcome.ok,
+        rows: outcome.rows.length,
+        totals: summariseMetrics(outcome.rows),
+        error: outcome.error || undefined
+      })),
+      formulaErrors: shaped.formulaErrors,
+      normalizedRows: shaped.rows
+    }, outcomes.length > 0 && outcomes.every((outcome) => !outcome.ok));
+  }));
+
+  /* ---------------- Search Console: many sites, every row ---------------- */
+  server.registerTool("query_search_console_advanced", {
+    title: "Query Search Console (Advanced)",
+    description: "Search Console performance across up to 10 sites at once, paging automatically past the 25,000-row limit up to maxRows, so a 16-month pull of every query and page comes back complete. Rows are tagged with their site and support derived metrics, filtering and sorting on them, and top-N.",
+    inputSchema: {
+      siteUrls: z.array(z.string().min(1)).min(1).max(10),
+      dimensions: z.array(z.enum(["date", "query", "page", "country", "device", "searchAppearance"])).optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      maxRows: z.number().int().min(1).max(250000).optional(),
+      searchType: z.enum(["web", "image", "video", "news", "discover", "googleNews"]).optional(),
+      dataState: z.enum(["all", "final", "hourly_all"]).optional(),
+      aggregationType: z.enum(["auto", "byPage", "byProperty", "byNewsShowcasePanel"]).optional(),
+      dimensionFilterGroups: z.array(z.record(z.any())).optional(),
+      computedMetrics: z.array(z.object({ name: z.string().min(1), formula: z.string().min(1) })).optional(),
+      having: z.array(z.object({ field: z.string().min(1), op: z.string().optional(), value: z.any().optional() })).optional(),
+      sort: z.array(z.object({ field: z.string().min(1), direction: z.enum(["asc", "desc"]).optional() })).optional(),
+      topN: z.number().int().min(1).max(250000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.query_search_console_advanced, async ({ googleCredentials }) => {
+    const range = resolveDateWindow(params);
+    const dimensions = params.dimensions?.length ? params.dimensions : ["query"];
+    const maxRows = params.maxRows || 25000;
+    const outcomes = await runWithConcurrency(params.siteUrls, 3, async (siteUrl) => {
+      const collected = await collectPagedRows((page) => querySearchConsole(googleCredentials.accessToken, {
+        siteUrl,
+        startDate: range.startDate,
+        endDate: range.endDate,
+        dimensions,
+        rowLimit: page.rowLimit,
+        startRow: page.startRow,
+        searchType: params.searchType,
+        dataState: params.dataState,
+        aggregationType: params.aggregationType,
+        dimensionFilterGroups: params.dimensionFilterGroups
+      }), { maxRows });
+      const rows = buildSearchConsoleRowObjects({ rows: collected.rows }, dimensions).map((row) => toAdvancedRecord(
+        "search_console",
+        { site: siteUrl, ...Object.fromEntries(dimensions.map((name) => [name, row[name]])) },
+        { clicks: toNumber(row.clicks), impressions: toNumber(row.impressions), ctr: toNumber(row.ctr), position: toNumber(row.position) },
+        {}
+      ));
+      return { siteUrl, ok: collected.ok, rows, requests: collected.requests, truncated: collected.truncated, error: collected.ok ? null : toGoogleDebugPayload(collected.response) };
+    });
+    const shaped = shapeAdvancedRows(outcomes.flatMap((outcome) => outcome.rows), params);
+    return buildToolResult({
+      platform: "search_console",
+      dateRange: range,
+      dimensions,
+      requestCount: outcomes.reduce((total, outcome) => total + outcome.requests, 0),
+      sites: outcomes.map((outcome) => ({
+        siteUrl: outcome.siteUrl,
+        ok: outcome.ok,
+        rows: outcome.rows.length,
+        requests: outcome.requests,
+        // True when maxRows stopped the pull before Search Console ran out of rows.
+        truncatedAtMaxRows: outcome.truncated,
+        totals: summariseMetrics(outcome.rows),
+        error: outcome.error || undefined
+      })),
+      formulaErrors: shaped.formulaErrors,
+      normalizedRows: shaped.rows
+    }, outcomes.every((outcome) => !outcome.ok));
+  }));
+
+  /* ---------------- Merchant Center: field discovery and account resources ---------------- */
+  server.registerTool("describe_merchant_report_fields", {
+    title: "Describe Merchant Center Report Fields",
+    description: "List the Merchant Center report tables and the dimensions and metrics each one supports, for writing search_merchant_reports queries. Makes no API request.",
+    inputSchema: {
+      table: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.describe_merchant_report_fields, async () => {
+    if (params.table && !MERCHANT_REPORT_FIELD_CATALOG[params.table]) {
+      return buildToolResult({ error: "unknown_table", availableTables: Object.keys(MERCHANT_REPORT_FIELD_CATALOG) }, true);
+    }
+    return buildToolResult({
+      source: "Compiled from the Merchant Reports API reference. It covers the fields in common use and is not exhaustive.",
+      tables: params.table ? { [params.table]: MERCHANT_REPORT_FIELD_CATALOG[params.table] } : MERCHANT_REPORT_FIELD_CATALOG
+    });
+  }));
+
+  server.registerTool("get_merchant_resource", {
+    title: "Get Merchant Center Resource",
+    description: "Read Merchant Center account resources: promotions, shipping settings, return policies, conversion sources, regions, business info, homepage, programs, or a product's local and regional inventory.",
+    inputSchema: {
+      accountId: z.string().min(1),
+      resource: z.enum(Object.keys(MERCHANT_RESOURCES)),
+      productId: z.string().optional(),
+      pageSize: z.number().int().min(1).max(1000).optional(),
+      pageToken: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_merchant_resource, async ({ googleCredentials }) => {
+    let response;
+    try {
+      response = await getMerchantResource(googleCredentials.accessToken, params);
+    } catch (error) {
+      return buildToolResult({ error: "invalid_merchant_request", error_description: error.message }, true);
+    }
+    return buildToolResult({
+      accountId: params.accountId,
+      resource: params.resource,
+      apiVersion: getMerchantApiVersion(),
+      hint: response.ok ? undefined : "If this sub-API is not on v1 for your account yet, set MERCHANT_API_VERSION=v1beta.",
+      raw: toGoogleDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  /* ---------------- Meta: fields, insights, assets, ad library ---------------- */
+  server.registerTool("describe_meta_insights_fields", {
+    title: "Describe Meta Insights Fields",
+    description: "List Meta Ads insights fields, breakdowns, action breakdowns, date presets and attribution windows, for writing run_meta_insights calls. Pass objectId to also ask Meta for that node's own live field list.",
+    inputSchema: {
+      objectId: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.describe_meta_insights_fields, async ({ metaCredentials }) => {
+    let live = null;
+    if (params.objectId) {
+      if (!metaCredentials?.accessToken) {
+        return buildToolResult({ error: "no_meta_credentials", error_description: "Connect Meta to read a live node's fields." }, true);
+      }
+      const response = await callMetaGraphApi(String(params.objectId).replace(/[^0-9A-Za-z_]/g, ""), metaCredentials.accessToken, { metadata: 1 });
+      live = response.ok ? { fields: (response.body?.metadata?.fields || []).map((field) => field.name), connections: Object.keys(response.body?.metadata?.connections || {}) } : toMetaDebugPayload(response);
+    }
+    return buildToolResult({
+      source: "Compiled from the Meta Marketing API reference.",
+      catalog: META_INSIGHTS_CATALOG,
+      live
+    });
+  }));
+
+  server.registerTool("run_meta_insights", {
+    title: "Run Meta Insights",
+    description: "Any Meta Ads insights query: any level, fields, breakdowns and action breakdowns, custom attribution windows, date range or preset. mode sync answers directly. For large accounts or long ranges that time out, use async_start, then async_status until complete, then async_results. Action arrays are flattened to names like actions.purchase so formulas can use them, and derived metrics, filtering, sorting and top-N are supported.",
+    inputSchema: {
+      mode: z.enum(["sync", "async_start", "async_status", "async_results"]).optional(),
+      adAccountId: z.string().optional(),
+      objectId: z.string().optional(),
+      reportRunId: z.string().optional(),
+      level: z.enum(["account", "campaign", "adset", "ad"]).optional(),
+      fields: z.array(z.string().min(1)).max(60).optional(),
+      breakdowns: z.array(z.string().min(1)).max(5).optional(),
+      actionBreakdowns: z.array(z.string().min(1)).max(5).optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      datePreset: z.string().optional(),
+      timeIncrement: z.union([z.number().int().min(1).max(90), z.enum(["monthly", "all_days"])]).optional(),
+      filtering: z.array(z.record(z.any())).optional(),
+      attributionWindows: z.array(z.string().min(1)).max(6).optional(),
+      useUnifiedAttributionSetting: z.boolean().optional(),
+      actionReportTime: z.enum(["impression", "conversion", "mixed"]).optional(),
+      limit: z.number().int().min(1).max(5000).optional(),
+      after: z.string().optional(),
+      computedMetrics: z.array(z.object({ name: z.string().min(1), formula: z.string().min(1) })).optional(),
+      having: z.array(z.object({ field: z.string().min(1), op: z.string().optional(), value: z.any().optional() })).optional(),
+      sort: z.array(z.object({ field: z.string().min(1), direction: z.enum(["asc", "desc"]).optional() })).optional(),
+      topN: z.number().int().min(1).max(10000).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_meta_insights, async ({ metaCredentials }) => {
+    const mode = params.mode || "sync";
+    const token = metaCredentials.accessToken;
+    const shapeRows = (body) => shapeAdvancedRows((body?.data || []).map(flattenMetaInsightsRow), params);
+
+    if (mode === "async_status" || mode === "async_results") {
+      if (!params.reportRunId) return buildToolResult({ error: "missing_report_run_id", error_description: `${mode} needs the reportRunId from async_start.` }, true);
+      const runId = String(params.reportRunId).replace(/[^0-9]/g, "");
+      if (mode === "async_status") {
+        const response = await callMetaGraphApi(runId, token, { fields: "async_status,async_percent_completion,date_start,date_stop,time_completed" });
+        const complete = response.body?.async_status === "Job Completed";
+        return buildToolResult({
+          reportRunId: runId,
+          status: response.body?.async_status || null,
+          percentComplete: response.body?.async_percent_completion ?? null,
+          ready: complete,
+          next: complete ? "Call again with mode async_results." : "Not ready yet. Check again shortly.",
+          raw: response.ok ? undefined : toMetaDebugPayload(response)
+        }, !response.ok);
+      }
+      const response = await callMetaGraphApi(`${runId}/insights`, token, { limit: params.limit || 500, after: params.after });
+      const shaped = response.ok ? shapeRows(response.body) : { rows: [], formulaErrors: [] };
+      return buildToolResult({
+        reportRunId: runId,
+        rowCount: shaped.rows.length,
+        nextCursor: response.body?.paging?.cursors?.after || null,
+        formulaErrors: shaped.formulaErrors,
+        normalizedRows: shaped.rows,
+        raw: response.ok ? undefined : toMetaDebugPayload(response)
+      }, !response.ok);
+    }
+
+    let objectPath;
+    let query;
+    try {
+      objectPath = toMetaObjectPath(params);
+      query = buildMetaInsightsParams(params);
+    } catch (error) {
+      return buildToolResult({ error: "invalid_meta_request", error_description: error.message }, true);
+    }
+
+    if (mode === "async_start") {
+      const response = await callMetaGraphApiPost(`${objectPath}/insights`, token, query);
+      return buildToolResult({
+        reportRunId: response.body?.report_run_id || null,
+        next: response.ok ? "Call with mode async_status and this reportRunId until it reports Job Completed." : undefined,
+        request: { path: `${objectPath}/insights`, query },
+        raw: response.ok ? undefined : toMetaDebugPayload(response)
+      }, !response.ok);
+    }
+
+    const response = await callMetaGraphApi(`${objectPath}/insights`, token, query);
+    const shaped = response.ok ? shapeRows(response.body) : { rows: [], formulaErrors: [] };
+    return buildToolResult({
+      platform: "meta",
+      rowCount: shaped.rows.length,
+      nextCursor: response.body?.paging?.cursors?.after || null,
+      hint: response.ok ? undefined : "If this timed out or Meta asked to reduce the data, rerun with mode async_start.",
+      request: { path: `${objectPath}/insights`, query },
+      formulaErrors: shaped.formulaErrors,
+      normalizedRows: shaped.rows,
+      raw: response.ok ? undefined : toMetaDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("get_meta_assets", {
+    title: "Get Meta Ad Assets",
+    description: "Read Meta ad assets: creatives, ads with their creative, rendered ad previews, custom audiences with size ranges, pixels, and pixel event statistics. Pixel stats can be split by event_source to compare browser pixel against Conversions API events, or by match_keys to see which customer data Conversions API is matching on.",
+    inputSchema: {
+      resource: z.enum(["creatives", "ads", "ad_previews", "custom_audiences", "pixels", "pixel_stats"]),
+      adAccountId: z.string().optional(),
+      adId: z.string().optional(),
+      pixelId: z.string().optional(),
+      fields: z.string().optional(),
+      adFormat: z.string().optional(),
+      aggregation: z.enum(META_PIXEL_AGGREGATIONS).optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_meta_assets, async ({ metaCredentials }) => {
+    const token = metaCredentials.accessToken;
+    let path;
+    let query = { limit: params.limit || 100, after: params.after };
+    try {
+      if (params.resource === "ad_previews") {
+        if (!params.adId) throw new Error("ad_previews needs adId.");
+        path = `${String(params.adId).replace(/[^0-9]/g, "")}/previews`;
+        query = { ad_format: params.adFormat || "DESKTOP_FEED_STANDARD" };
+      } else if (params.resource === "pixel_stats") {
+        if (!params.pixelId) throw new Error("pixel_stats needs pixelId.");
+        const range = resolveDateWindow({ ...params, lookbackDays: 7 });
+        path = `${String(params.pixelId).replace(/[^0-9]/g, "")}/stats`;
+        query = {
+          aggregation: params.aggregation || "event",
+          start_time: Math.floor(new Date(`${range.startDate}T00:00:00Z`).getTime() / 1000),
+          end_time: Math.floor(new Date(`${range.endDate}T23:59:59Z`).getTime() / 1000)
+        };
+      } else {
+        const account = toMetaObjectPath({ adAccountId: params.adAccountId });
+        const edge = { creatives: "adcreatives", ads: "ads", custom_audiences: "customaudiences", pixels: "adspixels" }[params.resource];
+        path = `${account}/${edge}`;
+        query.fields = params.fields || META_ASSET_DEFAULT_FIELDS[params.resource];
+      }
+    } catch (error) {
+      return buildToolResult({ error: "invalid_meta_request", error_description: error.message }, true);
+    }
+    const response = await callMetaGraphApi(path, token, query);
+    return buildToolResult({
+      resource: params.resource,
+      path,
+      nextCursor: response.body?.paging?.cursors?.after || null,
+      hint: response.ok ? undefined : "Custom audiences and pixels may need ads_management or business_management in addition to ads_read.",
+      raw: toMetaDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  server.registerTool("search_meta_ad_library", {
+    title: "Search Meta Ad Library",
+    description: "Search Meta's public Ad Library for competitor ads by keyword or Page ID. For ordinary commercial ads Meta's API only returns ads delivered in the EU and UK; political and issue ads are available globally. Requires an identity-confirmed Meta account and Ad Library API access.",
+    inputSchema: {
+      searchTerms: z.string().optional(),
+      searchPageIds: z.array(z.string().min(1)).max(10).optional(),
+      adReachedCountries: z.array(z.string().length(2)).min(1).max(20),
+      adType: z.enum(["ALL", "POLITICAL_AND_ISSUE_ADS", "HOUSING_ADS", "EMPLOYMENT_ADS", "FINANCIAL_PRODUCTS_AND_SERVICES_ADS"]).optional(),
+      adActiveStatus: z.enum(["ACTIVE", "INACTIVE", "ALL"]).optional(),
+      mediaType: z.enum(["ALL", "IMAGE", "MEME", "VIDEO", "NONE"]).optional(),
+      publisherPlatforms: z.array(z.string()).optional(),
+      languages: z.array(z.string()).optional(),
+      deliveryDateMin: z.string().optional(),
+      deliveryDateMax: z.string().optional(),
+      fields: z.string().optional(),
+      limit: z.number().int().min(1).max(500).optional(),
+      after: z.string().optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.search_meta_ad_library, async ({ metaCredentials }) => {
+    if (!params.searchTerms && !params.searchPageIds?.length) {
+      return buildToolResult({ error: "missing_search", error_description: "Provide searchTerms or searchPageIds." }, true);
+    }
+    const response = await callMetaGraphApi("ads_archive", metaCredentials.accessToken, {
+      search_terms: params.searchTerms,
+      search_page_ids: params.searchPageIds?.length ? JSON.stringify(params.searchPageIds) : undefined,
+      ad_reached_countries: JSON.stringify(params.adReachedCountries.map((code) => code.toUpperCase())),
+      ad_type: params.adType || "ALL",
+      ad_active_status: params.adActiveStatus || "ACTIVE",
+      media_type: params.mediaType,
+      publisher_platforms: params.publisherPlatforms?.length ? JSON.stringify(params.publisherPlatforms) : undefined,
+      languages: params.languages?.length ? JSON.stringify(params.languages) : undefined,
+      ad_delivery_date_min: params.deliveryDateMin,
+      ad_delivery_date_max: params.deliveryDateMax,
+      fields: params.fields || "id,page_id,page_name,ad_creation_time,ad_delivery_start_time,ad_delivery_stop_time,ad_creative_bodies,ad_creative_link_titles,ad_creative_link_captions,ad_snapshot_url,publisher_platforms,languages",
+      limit: params.limit || 50,
+      after: params.after
+    });
+    return buildToolResult({
+      rowCount: response.body?.data?.length || 0,
+      ads: response.ok ? response.body?.data || [] : [],
+      nextCursor: response.body?.paging?.cursors?.after || null,
+      hint: response.ok ? undefined : "The Ad Library API needs identity confirmation on the Meta account and Ad Library API access for the app.",
+      raw: response.ok ? undefined : toMetaDebugPayload(response)
+    }, !response.ok);
+  }));
+
+  /* ---------------- Google Tag Manager ---------------- */
+  if (GTM_ENABLED) {
+    server.registerTool("get_gtm_container", {
+      title: "Get Tag Manager Container",
+      description: "Browse Google Tag Manager. With no IDs, lists accounts; with an accountId, lists its containers; with a container (accountId plus containerId, or a GTM-XXXX public ID), returns the published version: every tag, trigger and variable. Set full to true for the complete raw configuration.",
+      inputSchema: {
+        accountId: z.string().optional(),
+        containerId: z.string().optional(),
+        containerPublicId: z.string().optional(),
+        full: z.boolean().optional()
+      },
+      annotations: { readOnlyHint: true }
+    }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_gtm_container, async ({ googleCredentials }) => {
+      const token = googleCredentials.accessToken;
+      if (!params.accountId && !params.containerPublicId) {
+        const response = await gtmGet(token, "accounts");
+        return buildToolResult({ accounts: response.body?.account || [], raw: response.ok ? undefined : toGoogleDebugPayload(response) }, !response.ok);
+      }
+      if (params.accountId && !params.containerId && !params.containerPublicId) {
+        const response = await gtmGet(token, `accounts/${params.accountId}/containers`);
+        return buildToolResult({ containers: response.body?.container || [], raw: response.ok ? undefined : toGoogleDebugPayload(response) }, !response.ok);
+      }
+      const located = await findGtmContainer(token, params);
+      if (located.error) return buildToolResult({ error: "container_not_found", raw: toGoogleDebugPayload(located.error) }, true);
+      const response = await gtmGet(token, `accounts/${located.accountId}/containers/${located.containerId}/versions:live`);
+      if (!response.ok) return buildToolResult({ error: "no_published_version", raw: toGoogleDebugPayload(response) }, true);
+      const version = response.body;
+      return buildToolResult({
+        accountId: located.accountId,
+        containerId: located.containerId,
+        publicId: version.container?.publicId || null,
+        versionId: version.containerVersionId,
+        versionName: version.name || null,
+        requestCount: located.requestCount + 1,
+        tags: (version.tag || []).map((tag) => ({ id: tag.tagId, name: tag.name, type: tag.type, paused: Boolean(tag.paused), firingTriggerId: tag.firingTriggerId || [], consent: tag.consentSettings?.consentStatus || "notSet" })),
+        triggers: (version.trigger || []).map((trigger) => ({ id: trigger.triggerId, name: trigger.name, type: trigger.type })),
+        variables: (version.variable || []).map((variable) => ({ id: variable.variableId, name: variable.name, type: variable.type })),
+        builtInVariables: (version.builtInVariable || []).map((variable) => variable.name),
+        raw: params.full ? version : undefined
+      });
+    }));
+
+    server.registerTool("audit_gtm_container", {
+      title: "Audit Tag Manager Container",
+      description: "Tracking audit of a published Google Tag Manager container, scored out of 100. Checks for dead Universal Analytics tags, missing or duplicate GA4 measurement IDs, conversion tags without a Conversion Linker or with missing IDs, purchase events without ecommerce data, tags that never fire, broken trigger references, unused triggers and variables, risky Custom HTML, duplicate tags that double-count, non-Google tags with no consent settings, and unpublished workspace changes. Optionally cross-checks against a GA4 property's web streams and a Google Ads account's conversion actions.",
+      inputSchema: {
+        accountId: z.string().optional(),
+        containerId: z.string().optional(),
+        containerPublicId: z.string().optional(),
+        checkWorkspace: z.boolean().optional(),
+        ga4PropertyId: z.string().optional(),
+        googleAdsCustomerId: z.string().optional(),
+        loginCustomerId: z.string().optional()
+      },
+      annotations: { readOnlyHint: true }
+    }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.audit_gtm_container, async ({ googleCredentials, scopes }) => {
+      const token = googleCredentials.accessToken;
+      if (!(params.accountId && params.containerId) && !params.containerPublicId) {
+        return buildToolResult({ error: "missing_container", error_description: "Provide accountId and containerId, or containerPublicId (GTM-XXXX)." }, true);
+      }
+      const located = await findGtmContainer(token, params);
+      if (located.error) return buildToolResult({ error: "container_not_found", raw: toGoogleDebugPayload(located.error) }, true);
+      let requestCount = located.requestCount;
+      const base = `accounts/${located.accountId}/containers/${located.containerId}`;
+      const live = await gtmGet(token, `${base}/versions:live`);
+      requestCount += 1;
+      if (!live.ok) return buildToolResult({ error: "no_published_version", raw: toGoogleDebugPayload(live) }, true);
+
+      const context = {};
+      const crossChecks = {};
+      if (params.checkWorkspace) {
+        const workspaces = await gtmGet(token, `${base}/workspaces`);
+        requestCount += 1;
+        const workspace = (workspaces.body?.workspace || [])[0];
+        if (workspace) {
+          const status = await gtmGet(token, `${base}/workspaces/${workspace.workspaceId}/status`);
+          requestCount += 1;
+          const changes = status.body?.workspaceChange || [];
+          const byStatus = {};
+          changes.forEach((change) => { byStatus[change.changeStatus || "unknown"] = (byStatus[change.changeStatus || "unknown"] || 0) + 1; });
+          context.workspaceChanges = { total: changes.length, byStatus };
+        }
+      }
+      if (params.ga4PropertyId) {
+        const streams = await listGa4AdminResource(token, params.ga4PropertyId, "dataStreams");
+        requestCount += 1;
+        crossChecks.ga4 = streams.ok ? "checked" : "failed";
+        if (streams.ok) {
+          context.ga4MeasurementIds = (streams.body?.dataStreams || []).map((stream) => stream.webStreamData?.measurementId).filter(Boolean);
+        }
+      }
+      if (params.googleAdsCustomerId) {
+        if (!scopes.includes(GOOGLE_ADS_SCOPE)) {
+          crossChecks.googleAds = "skipped: this connection has no Google Ads access";
+        } else {
+          const actions = await queryGoogleAds(token, {
+            customerId: params.googleAdsCustomerId,
+            loginCustomerId: params.loginCustomerId,
+            query: "SELECT conversion_action.id, conversion_action.name, conversion_action.type, conversion_action.status, conversion_action.tag_snippets FROM conversion_action WHERE conversion_action.status = 'ENABLED'",
+            pageSize: 1000
+          });
+          requestCount += 1;
+          crossChecks.googleAds = actions.ok ? "checked" : "failed";
+          if (actions.ok) context.adsConversions = extractAdsSendTargets(actions.body?.results);
+        }
+      }
+
+      const audit = auditGtmContainerVersion(live.body, context);
+      const fingerprint = Number(live.body?.fingerprint);
+      return buildToolResult({
+        accountId: located.accountId,
+        containerId: located.containerId,
+        publicId: live.body?.container?.publicId || null,
+        versionId: live.body?.containerVersionId || null,
+        // GTM fingerprints are millisecond timestamps of the last change.
+        lastChangedApprox: fingerprint > 1.3e12 && fingerprint < Date.now() + 864e5 ? new Date(fingerprint).toISOString() : null,
+        requestCount,
+        crossChecks,
+        ...audit
+      });
+    }));
+  }
+
+  /* ---------------- BigQuery (GA4 export) ---------------- */
+  if (BIGQUERY_ENABLED) {
+    server.registerTool("list_bigquery_ga4_exports", {
+      title: "List BigQuery GA4 Exports",
+      description: "Find GA4 export data in BigQuery. With no projectId, lists projects; with a projectId, lists its GA4 export datasets (analytics_*); with a datasetId too, summarizes the export: date range covered, daily and intraday tables, and whether user tables exist.",
+      inputSchema: {
+        projectId: z.string().optional(),
+        datasetId: z.string().optional(),
+        pageToken: z.string().optional()
+      },
+      annotations: { readOnlyHint: true }
+    }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_bigquery_ga4_exports, async ({ googleCredentials }) => {
+      const token = googleCredentials.accessToken;
+      if (!params.projectId) {
+        const url = new URL(`${BIGQUERY_BASE}/projects`);
+        appendQueryParams(url, { maxResults: 200, pageToken: params.pageToken });
+        const response = await callGoogleApi(url.toString(), token, { method: "GET" });
+        return buildToolResult({
+          projects: (response.body?.projects || []).map((project) => ({ projectId: project.projectReference?.projectId, name: project.friendlyName || null })),
+          nextPageToken: response.body?.nextPageToken || null,
+          raw: response.ok ? undefined : toGoogleDebugPayload(response)
+        }, !response.ok);
+      }
+      if (!BIGQUERY_PROJECT_SHAPE.test(params.projectId)) return buildToolResult({ error: "invalid_project_id" }, true);
+      if (!params.datasetId) {
+        const url = new URL(`${BIGQUERY_BASE}/projects/${encodeURIComponent(params.projectId)}/datasets`);
+        appendQueryParams(url, { maxResults: 1000, pageToken: params.pageToken });
+        const response = await callGoogleApi(url.toString(), token, { method: "GET" });
+        const datasets = (response.body?.datasets || []).map((dataset) => ({ datasetId: dataset.datasetReference?.datasetId, location: dataset.location || null }));
+        return buildToolResult({
+          projectId: params.projectId,
+          ga4ExportDatasets: datasets.filter((dataset) => /^analytics_\d+$/.test(dataset.datasetId || "")),
+          otherDatasets: datasets.filter((dataset) => !/^analytics_\d+$/.test(dataset.datasetId || "")).map((dataset) => dataset.datasetId),
+          raw: response.ok ? undefined : toGoogleDebugPayload(response)
+        }, !response.ok);
+      }
+      if (!BIGQUERY_DATASET_SHAPE.test(params.datasetId)) return buildToolResult({ error: "invalid_dataset_id" }, true);
+      const tables = [];
+      let pageToken = params.pageToken;
+      let requestCount = 0;
+      let lastResponse;
+      // Years of daily tables span several pages; three pages covers about eight years.
+      do {
+        const url = new URL(`${BIGQUERY_BASE}/projects/${encodeURIComponent(params.projectId)}/datasets/${encodeURIComponent(params.datasetId)}/tables`);
+        appendQueryParams(url, { maxResults: 1000, pageToken });
+        lastResponse = await callGoogleApi(url.toString(), token, { method: "GET" });
+        requestCount += 1;
+        if (!lastResponse.ok) break;
+        tables.push(...(lastResponse.body?.tables || []).map((table) => table.tableReference?.tableId));
+        pageToken = lastResponse.body?.nextPageToken;
+      } while (pageToken && requestCount < 3);
+      const daily = tables.filter((id) => /^events_\d{8}$/.test(id)).map((id) => id.slice(7)).sort();
+      const intraday = tables.filter((id) => /^events_intraday_\d{8}$/.test(id));
+      return buildToolResult({
+        projectId: params.projectId,
+        datasetId: params.datasetId,
+        requestCount,
+        dailyTables: daily.length,
+        firstDay: daily[0] || null,
+        lastDay: daily[daily.length - 1] || null,
+        intradayTables: intraday.length,
+        hasUserTables: tables.some((id) => /^(pseudonymous_users|users)_/.test(id)),
+        moreTablesNotListed: Boolean(pageToken),
+        raw: lastResponse?.ok ? undefined : toGoogleDebugPayload(lastResponse)
+      }, !lastResponse?.ok);
+    }));
+
+    const bigQueryResultPayload = (result, extra) => {
+      if (result.stage === "dry_run") return buildToolResult({ ...extra, error: "query_invalid", raw: toGoogleDebugPayload(result.response) }, true);
+      if (result.stage === "dry_run_only") return buildToolResult({ ...extra, dryRun: true, cost: result.cost, maxBytesBilled: result.maxBytes, wouldRun: result.cost.bytesProcessed <= result.maxBytes });
+      if (result.stage === "refused") {
+        return buildToolResult({
+          ...extra,
+          error: "over_byte_limit",
+          error_description: `This query would scan ${result.cost.gibibytes} GiB, above the ${(result.maxBytes / GIBIBYTE).toFixed(1)} GiB limit. Narrow the date range, select fewer columns, or raise maxBytesBilled.`,
+          cost: result.cost
+        }, true);
+      }
+      if (!result.response.ok) return buildToolResult({ ...extra, error: "query_failed", cost: result.cost, raw: toGoogleDebugPayload(result.response) }, true);
+      const summary = summariseBigQueryRun(result);
+      return buildToolResult({
+        ...extra,
+        requestCount: result.requestCount,
+        cost: result.cost,
+        ...summary,
+        next: summary.jobComplete ? undefined : "The job is still running. Call run_bigquery_ga4_query with jobId to collect the results."
+      });
+    };
+
+    server.registerTool("run_bigquery_ga4_query", {
+      title: "Run BigQuery GA4 Query",
+      description: "Run read-only SQL over GA4 export data in BigQuery: raw, event-level and unsampled, for anything the Data API cannot answer. Only single SELECT or WITH statements are accepted. Every query is dry-run first and refused if it would scan more than maxBytesBilled (5 GiB by default), with the byte count and cost estimate returned either way. Filter the events_* wildcard with _TABLE_SUFFIX to keep scans small. Pass jobId to collect results of a long-running query.",
+      inputSchema: {
+        billingProjectId: z.string().min(1),
+        sql: z.string().optional(),
+        location: z.string().optional(),
+        maxBytesBilled: z.number().int().positive().optional(),
+        dryRun: z.boolean().optional(),
+        maxResults: z.number().int().min(1).max(10000).optional(),
+        jobId: z.string().optional(),
+        pageToken: z.string().optional()
+      },
+      annotations: { readOnlyHint: true }
+    }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_bigquery_ga4_query, async ({ googleCredentials }) => {
+      if (!BIGQUERY_PROJECT_SHAPE.test(params.billingProjectId)) return buildToolResult({ error: "invalid_project_id" }, true);
+      if (params.jobId) {
+        const response = await getBigQueryResults(googleCredentials.accessToken, params.billingProjectId, params.jobId, { ...params, timeoutMs: 30000 });
+        if (!response.ok) return buildToolResult({ error: "results_failed", raw: toGoogleDebugPayload(response) }, true);
+        return buildToolResult({ jobId: params.jobId, ...summariseBigQueryRun({ response }) });
+      }
+      if (!params.sql) return buildToolResult({ error: "missing_sql", error_description: "Provide sql, or jobId to collect earlier results." }, true);
+      try {
+        assertReadOnlySql(params.sql);
+      } catch (error) {
+        return buildToolResult({ error: "sql_not_allowed", error_description: error.message }, true);
+      }
+      const result = await executeBigQuerySql(googleCredentials.accessToken, params);
+      return bigQueryResultPayload(result, { billingProjectId: params.billingProjectId });
+    }));
+
+    server.registerTool("run_bigquery_ga4_preset", {
+      title: "Run BigQuery GA4 Preset",
+      description: "Ready-made GA4 export analyses in BigQuery: daily overview, events by name, the parameters an event actually carries, session and first-user sources, landing pages, top pages, ecommerce items, the purchase funnel, a tracking-quality check, and duplicate transaction IDs. Date filters are applied to the table suffix so only the days asked for are scanned, and the same byte limit and dry run apply.",
+      inputSchema: {
+        preset: z.enum(BIGQUERY_GA4_PRESET_NAMES),
+        projectId: z.string().min(1),
+        datasetId: z.string().min(1),
+        billingProjectId: z.string().optional(),
+        startDate: z.string().optional(),
+        endDate: z.string().optional(),
+        eventName: z.string().optional(),
+        includeIntraday: z.boolean().optional(),
+        limit: z.number().int().min(1).max(10000).optional(),
+        location: z.string().optional(),
+        maxBytesBilled: z.number().int().positive().optional(),
+        dryRun: z.boolean().optional()
+      },
+      annotations: { readOnlyHint: true }
+    }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_bigquery_ga4_preset, async ({ googleCredentials }) => {
+      let sql;
+      try {
+        sql = buildBigQueryGa4PresetSql(params);
+      } catch (error) {
+        return buildToolResult({ error: "invalid_preset_request", error_description: error.message }, true);
+      }
+      const billingProjectId = params.billingProjectId || params.projectId;
+      const result = await executeBigQuerySql(googleCredentials.accessToken, { ...params, sql, billingProjectId });
+      return bigQueryResultPayload(result, { preset: params.preset, description: BIGQUERY_GA4_PRESET_DEFINITIONS[params.preset], sql });
+    }));
+  }
+
   server.registerTool("list_callrail_accounts", {
     title: "List CallRail Accounts",
     description: "List CallRail accounts visible to the configured CallRail API token.",
