@@ -97,6 +97,7 @@ const TOOL_SCOPE_MAP = {
   query_meta_graph: [META_ADS_SCOPE],
   run_meta_preset: [META_ADS_SCOPE],
   get_ga4_admin_resource: [GA4_SCOPE],
+  audit_ga4_property: [GA4_SCOPE],
   run_ga4_access_report: [GA4_SCOPE],
   run_ga4_audience_export: [GA4_SCOPE],
   run_ga4_multi_property_report: [GA4_SCOPE],
@@ -1124,7 +1125,7 @@ async function callMetaGraphApi(pathOrUrl, accessToken, params = {}) {
       // META_APP_SECRET missing; the call will fail on its own with a clearer error.
     }
   }
-  const response = await fetch(url.toString(), { method: "GET" });
+  const response = await fetchWithTimeout(url.toString(), { method: "GET" });
   const rawBody = await response.text();
   let parsedBody = rawBody;
   try {
@@ -1134,7 +1135,7 @@ async function callMetaGraphApi(pathOrUrl, accessToken, params = {}) {
   const safeUrl = new URL(url.toString());
   safeUrl.searchParams.delete("access_token");
   safeUrl.searchParams.delete("appsecret_proof");
-  console.log(JSON.stringify({ type: "meta_api_debug", url: safeUrl.toString(), status: response.status, body: parsedBody }));
+  logApiResult("meta_api_debug", { url: safeUrl.toString() }, response.status, parsedBody);
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -1860,8 +1861,31 @@ async function exchangeGoogleRefreshToken(req, refreshToken) {
   return credentials;
 }
 
+// Successful responses carry customer data (user emails, caller details, search
+// queries, device IDs), so only error bodies reach the logs.
+function logApiResult(type, fields, status, body) {
+  console.log(JSON.stringify({ type, ...fields, status, ...(status >= 400 ? { body } : {}) }));
+}
+
+// Without a deadline, one slow upstream API holds the function until the platform
+// kills it and the client sees a bare timeout. BigQuery waits up to 45s server-side,
+// so the default leaves room for that.
+const API_TIMEOUT_MS = 60000;
+
+async function fetchWithTimeout(url, options = {}) {
+  const { timeoutMs = API_TIMEOUT_MS, ...init } = options;
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      return new Response(JSON.stringify({ error: { code: 504, status: "DEADLINE_EXCEEDED", message: `No response within ${Math.round(timeoutMs / 1000)}s.` } }), { status: 504 });
+    }
+    throw error;
+  }
+}
+
 async function callGoogleApi(url, accessToken, options = {}) {
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -1874,7 +1898,7 @@ async function callGoogleApi(url, accessToken, options = {}) {
   try {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
-  console.log(JSON.stringify({ type: "google_api_debug", url, status: response.status, body: parsedBody }));
+  logApiResult("google_api_debug", { url }, response.status, parsedBody);
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -1883,7 +1907,7 @@ async function callCallRailApi(pathOrUrl, query = {}) {
     ? new URL(pathOrUrl)
     : new URL(`${getCallRailBaseUrl()}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`);
   appendQueryParams(url, query);
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithTimeout(url.toString(), {
     method: "GET",
     headers: {
       Authorization: `Token token="${requireCallRailApiToken()}"`,
@@ -1895,13 +1919,13 @@ async function callCallRailApi(pathOrUrl, query = {}) {
   try {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
-  console.log(JSON.stringify({ type: "callrail_api_debug", url: url.toString(), status: response.status, body: parsedBody }));
+  logApiResult("callrail_api_debug", { url: url.toString() }, response.status, parsedBody);
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
 async function callGoogleAdsApi(path, accessToken, options = {}) {
   const url = path.startsWith("http") ? path : `https://googleads.googleapis.com/${getGoogleAdsApiVersion()}/${path.replace(/^\/+/, "")}`;
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: options.method || "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -1917,7 +1941,7 @@ async function callGoogleAdsApi(path, accessToken, options = {}) {
   try {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
-  console.log(JSON.stringify({ type: "google_ads_api_debug", url, status: response.status, body: parsedBody }));
+  logApiResult("google_ads_api_debug", { url }, response.status, parsedBody);
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -3696,12 +3720,16 @@ const GA4_ADMIN_COLLECTIONS = {
   firebase_links: "firebaseLinks",
   search_ads_360_links: "searchAds360Links",
   display_video_360_links: "displayVideo360AdvertiserLinks",
+  adsense_links: "adSenseLinks",
   key_events: "keyEvents",
   custom_dimensions: "customDimensions",
   custom_metrics: "customMetrics",
   calculated_metrics: "calculatedMetrics",
   channel_groups: "channelGroups",
-  data_streams: "dataStreams"
+  data_streams: "dataStreams",
+  expanded_data_sets: "expandedDataSets",
+  rollup_property_source_links: "rollupPropertySourceLinks",
+  subproperty_event_filters: "subpropertyEventFilters"
 };
 
 const GA4_ADMIN_SINGLETONS = {
@@ -3711,10 +3739,33 @@ const GA4_ADMIN_SINGLETONS = {
   google_signals: "googleSignalsSettings"
 };
 
+// Settings that live on a data stream rather than on the property. They need a
+// dataStreamId; true marks a single settings object, false a list.
+const GA4_ADMIN_STREAM_RESOURCES = {
+  enhanced_measurement: { path: "enhancedMeasurementSettings", singleton: true },
+  data_redaction: { path: "dataRedactionSettings", singleton: true },
+  measurement_protocol_secrets: { path: "measurementProtocolSecrets", singleton: false },
+  event_create_rules: { path: "eventCreateRules", singleton: false },
+  event_edit_rules: { path: "eventEditRules", singleton: false }
+};
+
+// Settings that live on the account that owns the property.
+const GA4_ADMIN_ACCOUNT_RESOURCES = {
+  data_sharing: "dataSharingSettings"
+};
+
 const GA4_ADMIN_RESOURCE_NAMES = [
   ...Object.keys(GA4_ADMIN_COLLECTIONS),
-  ...Object.keys(GA4_ADMIN_SINGLETONS)
+  ...Object.keys(GA4_ADMIN_SINGLETONS),
+  ...Object.keys(GA4_ADMIN_STREAM_RESOURCES),
+  ...Object.keys(GA4_ADMIN_ACCOUNT_RESOURCES)
 ];
+
+function normalizeGa4StreamId(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/dataStreams\/(\d+)/);
+  return match ? match[1] : text.replace(/\D/g, "");
+}
 
 async function getGa4AdminResource(accessToken, propertyId, resource, params = {}) {
   const property = normalizePropertyName(propertyId);
@@ -3722,11 +3773,358 @@ async function getGa4AdminResource(accessToken, propertyId, resource, params = {
     const suffix = GA4_ADMIN_SINGLETONS[resource];
     return callGoogleApi(`${GA4_ADMIN_BASE}/${property}${suffix ? `/${suffix}` : ""}`, accessToken, { method: "GET" });
   }
+  if (Object.prototype.hasOwnProperty.call(GA4_ADMIN_STREAM_RESOURCES, resource)) {
+    const streamId = normalizeGa4StreamId(params.dataStreamId);
+    if (!streamId) throw new Error(`${resource} is a data stream setting: pass dataStreamId (list them with resource data_streams).`);
+    const { path, singleton } = GA4_ADMIN_STREAM_RESOURCES[resource];
+    const url = new URL(`${GA4_ADMIN_BASE}/${property}/dataStreams/${streamId}/${path}`);
+    if (!singleton) appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
+    return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+  }
+  if (Object.prototype.hasOwnProperty.call(GA4_ADMIN_ACCOUNT_RESOURCES, resource)) {
+    let account = params.accountId ? `accounts/${String(params.accountId).replace(/\D/g, "")}` : null;
+    if (!account) {
+      const found = await callGoogleApi(`${GA4_ADMIN_BASE}/${property}`, accessToken, { method: "GET" });
+      if (!found.ok) return found;
+      account = found.body?.account || found.body?.parent;
+    }
+    return callGoogleApi(`${GA4_ADMIN_BASE}/${account}/${GA4_ADMIN_ACCOUNT_RESOURCES[resource]}`, accessToken, { method: "GET" });
+  }
   const collection = GA4_ADMIN_COLLECTIONS[resource];
   if (!collection) throw new Error(`Unsupported GA4 admin resource: ${resource}`);
   const url = new URL(`${GA4_ADMIN_BASE}/${property}/${collection}`);
   appendQueryParams(url, { pageSize: params.pageSize, pageToken: params.pageToken });
   return callGoogleApi(url.toString(), accessToken, { method: "GET" });
+}
+
+/* ---------------- GA4 property audit ---------------- */
+
+// Hosts that show up as referrals when a checkout or payment step leaves the site
+// and comes back. Each return starts a new session credited to the processor.
+const GA4_PAYMENT_REFERRAL_PATTERN = /(^|\.)(paypal\.com|stripe\.com|checkout\.stripe\.com|squareup\.com|square\.link|klarna\.com|afterpay\.com|affirm\.com|sezzle\.com|authorize\.net|braintreegateway\.com|adyen\.com|checkout\.com|razorpay\.com|payu\.in|paytm\.com|shopify\.com|shop\.app|apple\.com|pay\.google\.com)$/i;
+
+// Standard properties allow 50 event-scoped and 25 user-scoped custom dimensions and
+// 50 custom metrics; 360 properties allow 125, 100 and 125.
+const GA4_CUSTOM_DEFINITION_LIMITS = {
+  standard: { EVENT: 50, USER: 25, ITEM: 10, metrics: 50 },
+  premium: { EVENT: 125, USER: 100, ITEM: 25, metrics: 125 }
+};
+
+// Settings GA4 has no API for. The audit says so rather than implying they passed.
+const GA4_UNAUDITABLE_SETTINGS = [
+  "Internal traffic rules and data filters",
+  "Unwanted referrals list (self-referrals and payment processors are checked from the data instead)",
+  "Cross-domain linking domains",
+  "Session timeout and engaged-session timer",
+  "Consent mode implementation (check it with audit_gtm_container, or the BigQuery export)",
+  "Change history and user permissions (need GA4 edit or user-management access)"
+];
+
+function hostOf(uri) {
+  try {
+    return new URL(String(uri)).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+function describeFailedResponse(response) {
+  const message = response?.body?.error?.message || (typeof response?.body === "string" ? response.body.slice(0, 200) : "");
+  return `failed: ${response?.status || "error"}${message ? ` ${message}` : ""}`;
+}
+
+// Reads everything the audit needs. Admin reads and data checks run together;
+// any one failing is recorded against its check instead of failing the audit.
+async function collectGa4AuditInputs(accessToken, params) {
+  const property = normalizePropertyName(params.propertyId);
+  const checks = {};
+  let requestCount = 0;
+  const admin = async (resource, extra = {}) => {
+    requestCount += 1;
+    const key = extra.dataStreamId ? `${resource}:${extra.dataStreamId}` : resource;
+    try {
+      const response = await getGa4AdminResource(accessToken, property, resource, extra);
+      checks[key] = response.ok ? "checked" : describeFailedResponse(response);
+      return response.ok ? response.body || {} : null;
+    } catch (error) {
+      checks[key] = `failed: ${error.message}`;
+      return null;
+    }
+  };
+  const allPages = async (resource, ...fields) => {
+    const items = [];
+    let pageToken;
+    do {
+      const body = await admin(resource, { pageSize: 200, pageToken });
+      if (!body) return items.length ? items : null;
+      items.push(...(fields.map((field) => body[field]).find(Array.isArray) || []));
+      pageToken = body.nextPageToken;
+    } while (pageToken);
+    return items;
+  };
+
+  const [propertyBody, retention, signals, attribution, streams, keyEvents, customDimensions, customMetrics, adsLinks, bigQueryLinks] = await Promise.all([
+    admin("property"),
+    admin("data_retention"),
+    admin("google_signals"),
+    admin("attribution_settings"),
+    allPages("data_streams", "dataStreams"),
+    allPages("key_events", "keyEvents"),
+    allPages("custom_dimensions", "customDimensions"),
+    allPages("custom_metrics", "customMetrics"),
+    allPages("google_ads_links", "googleAdsLinks"),
+    allPages("bigquery_links", "bigqueryLinks", "bigQueryLinks")
+  ]);
+
+  const webStreams = (streams || []).filter((stream) => stream.type === "WEB_DATA_STREAM");
+  const streamSettings = await runWithConcurrency(webStreams.slice(0, 10), 4, async (stream) => {
+    const dataStreamId = normalizeGa4StreamId(stream.name);
+    const [enhanced, redaction, secrets] = await Promise.all([
+      admin("enhanced_measurement", { dataStreamId }),
+      admin("data_redaction", { dataStreamId }),
+      admin("measurement_protocol_secrets", { dataStreamId })
+    ]);
+    return { stream, dataStreamId, enhanced, redaction, secrets: secrets ? secrets.measurementProtocolSecrets || [] : null };
+  });
+
+  const data = {};
+  if (params.includeDataChecks !== false) {
+    const range = resolveDateWindow({ lookbackDays: params.lookbackDays || 28 });
+    const report = async (key, request) => {
+      requestCount += 1;
+      const response = await runGa4Report(accessToken, {
+        propertyId: property,
+        dateRanges: [{ startDate: range.startDate, endDate: range.endDate }],
+        ...request
+      });
+      checks[`data:${key}`] = response.ok ? "checked" : describeFailedResponse(response);
+      data[key] = response.ok ? mapGa4ReportRows(response.body) : null;
+    };
+    data.range = range;
+    await Promise.all([
+      report("daily", { dimensions: [{ name: "date" }], metrics: [{ name: "sessions" }, { name: "keyEvents" }], limit: "400" }),
+      report("channels", { dimensions: [{ name: "sessionDefaultChannelGroup" }], metrics: [{ name: "sessions" }], limit: "50" }),
+      report("landingNotSet", {
+        dimensions: [{ name: "landingPage" }],
+        metrics: [{ name: "sessions" }],
+        dimensionFilter: { filter: { fieldName: "landingPage", stringFilter: { matchType: "EXACT", value: "(not set)" } } },
+        limit: "1"
+      }),
+      report("referrals", {
+        dimensions: [{ name: "sessionSource" }],
+        metrics: [{ name: "sessions" }],
+        dimensionFilter: { filter: { fieldName: "sessionMedium", stringFilter: { matchType: "EXACT", value: "referral" } } },
+        orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+        limit: "250"
+      }),
+      report("events", { dimensions: [{ name: "eventName" }], metrics: [{ name: "eventCount" }, { name: "sessions" }], limit: "500" })
+    ]);
+  }
+
+  return {
+    config: { property: propertyBody, retention, signals, attribution, streams, webStreams, streamSettings, keyEvents, customDimensions, customMetrics, adsLinks, bigQueryLinks },
+    data,
+    checks,
+    requestCount
+  };
+}
+
+function auditGa4Property({ config, data }) {
+  const findings = [];
+  const add = (severity, rule, message, items) => findings.push({ severity, rule, message, items: items && items.length ? items : undefined });
+  const num = (value) => toNumber(value) || 0;
+
+  /* Property and retention */
+  const premium = config.property?.serviceLevel === "GOOGLE_ANALYTICS_360";
+  if (config.retention?.eventDataRetention === "TWO_MONTHS") {
+    add("medium", "short_data_retention", "Event data retention is 2 months, so explorations, funnels and path reports cannot look back further. Standard properties can keep 14 months.");
+  }
+  if (config.signals && config.signals.state !== "GOOGLE_SIGNALS_ENABLED") {
+    add("low", "google_signals_off", "Google signals is off: no demographics or interests reports, and no signals-based remarketing audiences.");
+  }
+  if (config.attribution) {
+    if (config.attribution.reportingAttributionModel && !/DATA_DRIVEN/.test(config.attribution.reportingAttributionModel)) {
+      add("info", "attribution_model", `Reporting attribution model is ${config.attribution.reportingAttributionModel}. Data-driven credits every touchpoint and is the default for new properties.`);
+    }
+    if (/7_DAYS/.test(config.attribution.acquisitionConversionEventLookbackWindow || "")) {
+      add("info", "short_acquisition_lookback", "Acquisition key-event lookback is 7 days; 30 days credits slower first-touch journeys.");
+    }
+  }
+
+  /* Streams */
+  if (config.streams && !config.streams.length) {
+    add("high", "no_data_streams", "The property has no data streams, so it collects nothing.");
+  }
+  const insecure = config.webStreams.filter((stream) => /^http:/i.test(stream.webStreamData?.defaultUri || ""));
+  if (insecure.length) add("low", "stream_url_not_https", "Web streams whose default URL is http://.", insecure.map((stream) => `${stream.displayName} (${stream.webStreamData.defaultUri})`));
+
+  const emOff = [];
+  const emPartial = [];
+  const redactionOff = [];
+  const secretStreams = [];
+  for (const entry of config.streamSettings) {
+    const label = `${entry.stream.displayName} (${entry.stream.webStreamData?.measurementId || entry.dataStreamId})`;
+    if (entry.enhanced) {
+      if (entry.enhanced.streamEnabled === false) {
+        emOff.push(label);
+      } else {
+        const off = ["scrollsEnabled", "outboundClicksEnabled", "siteSearchEnabled", "videoEngagementEnabled", "fileDownloadsEnabled", "pageChangesEnabled", "formInteractionsEnabled"].filter((key) => entry.enhanced[key] === false);
+        if (off.length) emPartial.push(`${label}: ${off.map((key) => key.replace(/Enabled$/, "")).join(", ")} off`);
+      }
+    }
+    if (entry.redaction && entry.redaction.emailRedactionEnabled === false) redactionOff.push(label);
+    if (entry.secrets?.length) secretStreams.push(`${label}: ${entry.secrets.map((secret) => secret.displayName).join(", ")}`);
+  }
+  if (emOff.length) add("medium", "enhanced_measurement_off", "Enhanced measurement is switched off, so scrolls, outbound clicks, site search, video, file downloads and form interactions are only tracked if tagged by hand.", emOff);
+  if (emPartial.length) add("info", "enhanced_measurement_partial", "Enhanced measurement events that are switched off. Fine if they are tracked another way.", emPartial);
+  if (redactionOff.length) add("medium", "email_redaction_off", "Email redaction is off. Email addresses in URLs or event parameters reach GA4, which breaks Google's no-PII policy and can get data deleted.", redactionOff);
+  if (secretStreams.length) add("info", "measurement_protocol_secrets", "Measurement Protocol secrets exist. Anyone holding one can send events into the property; confirm each is still in use.", secretStreams);
+
+  /* Key events */
+  const keyEvents = config.keyEvents || [];
+  if (config.keyEvents && !keyEvents.length) {
+    add("high", "no_key_events", "No key events are configured, so GA4 reports no conversions and Google Ads cannot import any.");
+  }
+  const purchaseOncePerSession = keyEvents.filter((event) => ["purchase", "in_app_purchase"].includes(event.eventName) && event.countingMethod === "ONCE_PER_SESSION");
+  if (purchaseOncePerSession.length) add("medium", "purchase_counted_once_per_session", "Purchase is counted once per session, so a second order in the same session is dropped.", purchaseOncePerSession.map((event) => event.eventName));
+  const unvalued = keyEvents.filter((event) => !["purchase", "in_app_purchase"].includes(event.eventName) && !event.defaultValue);
+  if (unvalued.length) add("low", "key_events_without_value", "Key events with no default value. A value lets reports and Google Ads bidding weigh leads against each other.", unvalued.map((event) => event.eventName));
+
+  /* Custom definitions */
+  const limits = GA4_CUSTOM_DEFINITION_LIMITS[premium ? "premium" : "standard"];
+  if (config.customDimensions) {
+    for (const scope of ["EVENT", "USER", "ITEM"]) {
+      const used = config.customDimensions.filter((dimension) => dimension.scope === scope).length;
+      if (used >= limits[scope] * 0.8) add("low", "custom_dimension_quota", `${used} of ${limits[scope]} ${scope.toLowerCase()}-scoped custom dimensions are used.`);
+    }
+  }
+  if (config.customMetrics && config.customMetrics.length >= limits.metrics * 0.8) {
+    add("low", "custom_metric_quota", `${config.customMetrics.length} of ${limits.metrics} custom metrics are used.`);
+  }
+
+  /* Links */
+  if (config.adsLinks && !config.adsLinks.length) {
+    add("medium", "no_google_ads_link", "No Google Ads link. If the business runs Google Ads, key events and audiences cannot reach Ads, and GA4 shows no ad cost.");
+  }
+  const noPersonalization = (config.adsLinks || []).filter((link) => link.adsPersonalizationEnabled === false);
+  if (noPersonalization.length) add("low", "ads_link_personalization_off", "Google Ads links with personalized advertising off, so GA4 audiences cannot be used for remarketing.", noPersonalization.map((link) => link.customerId));
+  if (config.bigQueryLinks && !config.bigQueryLinks.length) {
+    add("low", "no_bigquery_link", "No BigQuery export. Raw event data is the only way to go past GA4's sampling, thresholds and retention, and export does not backfill, so every day without it is lost.");
+  }
+
+  /* Data checks */
+  const summary = {};
+  if (data.daily) {
+    const days = data.daily.map((row) => ({ date: row.dimensions.date, sessions: num(row.metrics.sessions), keyEvents: num(row.metrics.keyEvents) })).sort((a, b) => a.date.localeCompare(b.date));
+    const sessions = days.reduce((total, day) => total + day.sessions, 0);
+    const conversions = days.reduce((total, day) => total + day.keyEvents, 0);
+    summary.sessions = sessions;
+    summary.keyEvents = conversions;
+    // GA4 leaves out days with no rows and can take a day to process, so tracking
+    // counts as stopped only when the last day with sessions is over 3 days old.
+    const lastActive = days.filter((day) => day.sessions > 0).pop()?.date || null;
+    const cutoff = shiftDays(data.range.endDate, -3).replace(/-/g, "");
+    summary.lastDayWithSessions = lastActive;
+    if (!sessions) {
+      add("high", "no_recent_data", `No sessions recorded between ${data.range.startDate} and ${data.range.endDate}. The tag is missing or broken.`);
+    } else if (lastActive < cutoff) {
+      add("high", "tracking_stopped", `No sessions since ${lastActive}. Tracking looks broken.`);
+    }
+    if (sessions && keyEvents.length && !conversions) {
+      add("high", "key_events_not_recorded", "Key events are configured but none were recorded in the period.");
+    }
+  }
+  const totalSessions = summary.sessions || 0;
+  if (data.channels && totalSessions) {
+    const unassigned = data.channels.filter((row) => row.dimensions.sessionDefaultChannelGroup === "Unassigned").reduce((total, row) => total + num(row.metrics.sessions), 0);
+    const share = unassigned / totalSessions;
+    summary.unassignedShare = Number(share.toFixed(4));
+    if (share > 0.1) add("medium", "unassigned_traffic", `${(share * 100).toFixed(1)}% of sessions are Unassigned. Usually non-standard utm_medium values or Measurement Protocol hits without session data.`);
+    else if (share > 0.03) add("low", "unassigned_traffic", `${(share * 100).toFixed(1)}% of sessions are Unassigned.`);
+  }
+  if (data.landingNotSet && totalSessions) {
+    const notSet = num(data.landingNotSet[0]?.metrics.sessions);
+    const share = notSet / totalSessions;
+    summary.landingPageNotSetShare = Number(share.toFixed(4));
+    if (share > 0.05) add("medium", "landing_page_not_set", `${(share * 100).toFixed(1)}% of sessions have landing page (not set): sessions that started without a page_view, often from events firing before the config tag or from sessions that time out and restart.`);
+  }
+  if (data.referrals && totalSessions) {
+    const ownHosts = new Set(config.webStreams.map((stream) => hostOf(stream.webStreamData?.defaultUri)).filter(Boolean));
+    const selfReferrals = [];
+    const payments = [];
+    for (const row of data.referrals) {
+      const source = String(row.dimensions.sessionSource || "").toLowerCase().replace(/^www\./, "");
+      const sessions = num(row.metrics.sessions);
+      if ([...ownHosts].some((host) => source === host || source.endsWith(`.${host}`) || host.endsWith(`.${source}`))) selfReferrals.push(`${source} (${sessions} sessions)`);
+      else if (GA4_PAYMENT_REFERRAL_PATTERN.test(source)) payments.push(`${source} (${sessions} sessions)`);
+    }
+    if (selfReferrals.length) add("medium", "self_referrals", "The site shows up as its own referrer, which splits sessions and steals credit from the real source. Add cross-domain linking or an unwanted-referral rule for these hosts.", selfReferrals);
+    if (payments.length) add("medium", "payment_processor_referrals", "Payment and checkout providers are credited as referrers, so the purchase is attributed to them instead of the source that brought the buyer. List them under unwanted referrals.", payments);
+  }
+  if (data.events) {
+    const byName = new Map(data.events.map((row) => [row.dimensions.eventName, { count: num(row.metrics.eventCount), sessions: num(row.metrics.sessions) }]));
+    summary.distinctEvents = byName.size;
+    if (totalSessions && !byName.has("page_view") && config.webStreams.length) {
+      add("high", "no_page_views", "Web streams exist but no page_view events were recorded.");
+    }
+    // Every property starts with purchase as a built-in key event; on a site that sells
+    // nothing it never fires, and that is not a tracking fault.
+    const silent = keyEvents.filter((event) => !byName.has(event.eventName) && (event.custom || event.eventName !== "purchase")).map((event) => event.eventName);
+    if (silent.length && totalSessions) add("medium", "key_events_never_fired", "Key events that did not fire once in the period. Either the tracking is broken or the key event is obsolete.", silent);
+    const doubled = [];
+    for (const event of keyEvents) {
+      const stats = byName.get(event.eventName);
+      if (!stats || stats.sessions < 20) continue;
+      const perSession = stats.count / stats.sessions;
+      const threshold = ["purchase", "generate_lead", "sign_up"].includes(event.eventName) ? 1.2 : 2;
+      if (perSession > threshold) doubled.push(`${event.eventName}: ${perSession.toFixed(2)} per session`);
+    }
+    if (doubled.length) add("medium", "key_events_firing_repeatedly", "Key events firing several times per session, which usually means a duplicate tag or a trigger on every page and inflates conversions.", doubled);
+  }
+
+  const score = Math.max(0, 100 - findings.reduce((total, finding) => total + (GTM_SEVERITY_WEIGHT[finding.severity] || 0), 0));
+  const order = ["high", "medium", "low", "info"];
+  findings.sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
+  return {
+    score,
+    summary: {
+      ...summary,
+      high: findings.filter((finding) => finding.severity === "high").length,
+      medium: findings.filter((finding) => finding.severity === "medium").length,
+      low: findings.filter((finding) => finding.severity === "low").length
+    },
+    inventory: {
+      property: config.property ? {
+        displayName: config.property.displayName,
+        timeZone: config.property.timeZone,
+        currencyCode: config.property.currencyCode,
+        industryCategory: config.property.industryCategory,
+        serviceLevel: config.property.serviceLevel,
+        createTime: config.property.createTime
+      } : null,
+      dataRetention: config.retention ? { event: config.retention.eventDataRetention, user: config.retention.userDataRetention, resetOnNewActivity: config.retention.resetUserDataOnNewActivity } : null,
+      googleSignals: config.signals?.state || null,
+      attribution: config.attribution ? {
+        model: config.attribution.reportingAttributionModel,
+        acquisitionLookback: config.attribution.acquisitionConversionEventLookbackWindow,
+        otherLookback: config.attribution.otherConversionEventLookbackWindow
+      } : null,
+      dataStreams: (config.streams || []).map((stream) => ({
+        id: normalizeGa4StreamId(stream.name),
+        type: stream.type,
+        name: stream.displayName,
+        measurementId: stream.webStreamData?.measurementId,
+        url: stream.webStreamData?.defaultUri
+      })),
+      keyEvents: keyEvents.map((event) => ({ name: event.eventName, countingMethod: event.countingMethod, defaultValue: event.defaultValue || null })),
+      customDimensions: config.customDimensions ? config.customDimensions.length : null,
+      customMetrics: config.customMetrics ? config.customMetrics.length : null,
+      googleAdsLinks: (config.adsLinks || []).map((link) => link.customerId),
+      bigQueryLinks: (config.bigQueryLinks || []).map((link) => link.project)
+    },
+    findings,
+    notAuditable: GA4_UNAUDITABLE_SETTINGS
+  };
 }
 
 const GA4_ACCESS_DEFAULT_DIMENSIONS = ["userEmail", "accessMechanism", "reportType", "date"];
@@ -4292,7 +4690,7 @@ async function callMetaGraphApiPost(pathOrUrl, accessToken, params = {}) {
       // META_APP_SECRET missing; the call fails on its own with a clearer error.
     }
   }
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithTimeout(url.toString(), {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form.toString()
@@ -4303,7 +4701,7 @@ async function callMetaGraphApiPost(pathOrUrl, accessToken, params = {}) {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
   // The token travels in the body, so the logged URL carries no credential.
-  console.log(JSON.stringify({ type: "meta_api_debug", method: "POST", url: url.toString(), status: response.status, body: parsedBody }));
+  logApiResult("meta_api_debug", { method: "POST", url: url.toString() }, response.status, parsedBody);
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -6564,22 +6962,56 @@ function createServer(req) {
   /* ---------------- GA4: admin, access, audience exports, many properties ---------------- */
   server.registerTool("get_ga4_admin_resource", {
     title: "Get GA4 Admin Resource",
-    description: "Read GA4 property configuration: audiences, Google Ads links, BigQuery links, annotations, Firebase / SA360 / DV360 links, key events, custom and calculated metrics, channel groups, data streams, data retention, attribution settings, Google signals, or the property itself. Change history is not available: Google only serves it to connections with edit access to GA4, and this server connects read-only.",
+    description: "Read GA4 property configuration. Property level: the property itself, data retention, attribution settings, Google signals, audiences, key events, custom dimensions and metrics, calculated metrics, channel groups, data streams, annotations, expanded data sets, rollup source links, subproperty event filters, and Google Ads / BigQuery / Firebase / SA360 / DV360 / AdSense links. Data stream level (needs dataStreamId): enhanced_measurement, data_redaction, measurement_protocol_secrets, event_create_rules, event_edit_rules. Account level: data_sharing (the account is looked up from the property unless accountId is given). For a scored review of all of these at once, use audit_ga4_property. Change history and user permissions are not available: Google only serves them to connections with GA4 edit or user-management access, and this server connects read-only.",
     inputSchema: {
       propertyId: z.string().min(1),
       resource: z.enum(GA4_ADMIN_RESOURCE_NAMES),
+      dataStreamId: z.string().optional(),
+      accountId: z.string().optional(),
       pageSize: z.number().int().min(1).max(200).optional(),
       pageToken: z.string().optional()
     },
     annotations: { readOnlyHint: true }
   }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_ga4_admin_resource, async ({ googleCredentials }) => {
-    const response = await getGa4AdminResource(googleCredentials.accessToken, params.propertyId, params.resource, params);
+    let response;
+    try {
+      response = await getGa4AdminResource(googleCredentials.accessToken, params.propertyId, params.resource, params);
+    } catch (error) {
+      return buildToolResult({ error: "invalid_ga4_admin_request", error_description: error.message }, true);
+    }
+    // Google answers an empty list with {}, which reads like a failure rather than "none configured".
+    const empty = response.ok && Object.prototype.hasOwnProperty.call(GA4_ADMIN_COLLECTIONS, params.resource) && !Object.keys(response.body || {}).length;
     return buildToolResult({
       propertyId: normalizePropertyName(params.propertyId),
       resource: params.resource,
+      dataStreamId: params.dataStreamId ? normalizeGa4StreamId(params.dataStreamId) : undefined,
       apiSurface: "analyticsadmin v1alpha",
+      note: empty ? `None configured: the property has no ${params.resource.replace(/_/g, " ")}.` : undefined,
       raw: toGoogleDebugPayload(response)
     }, !response.ok);
+  }));
+
+  server.registerTool("audit_ga4_property", {
+    title: "Audit GA4 Property",
+    description: "Configuration and tracking-health audit of a GA4 property, scored out of 100. Reads every setting the Admin API exposes (retention, Google signals, attribution, data streams, enhanced measurement, email redaction, Measurement Protocol secrets, key events and their counting and values, custom definition quotas, Google Ads and BigQuery links) and checks recent data for missing or stopped tracking, key events that never fire or fire repeatedly, Unassigned traffic, (not set) landing pages, self-referrals and payment-processor referrals. Lists the settings GA4 has no API for so they can be checked by hand.",
+    inputSchema: {
+      propertyId: z.string().min(1),
+      includeDataChecks: z.boolean().optional(),
+      lookbackDays: z.number().int().min(7).max(90).optional()
+    },
+    annotations: { readOnlyHint: true }
+  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.audit_ga4_property, async ({ googleCredentials }) => {
+    const inputs = await collectGa4AuditInputs(googleCredentials.accessToken, params);
+    if (!inputs.config.property) {
+      return buildToolResult({ error: "property_not_readable", propertyId: normalizePropertyName(params.propertyId), checks: inputs.checks }, true);
+    }
+    return buildToolResult({
+      propertyId: normalizePropertyName(params.propertyId),
+      dateRange: inputs.data.range || null,
+      requestCount: inputs.requestCount,
+      ...auditGa4Property(inputs),
+      checks: inputs.checks
+    });
   }));
 
   server.registerTool("run_ga4_access_report", {

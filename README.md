@@ -165,7 +165,8 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 
 | Area | Tool | What it adds |
 |---|---|---|
-| GA4 | `get_ga4_admin_resource` | Audiences, Google Ads / BigQuery / Firebase / SA360 / DV360 links, annotations, key events, custom and calculated metrics, channel groups, data streams, data retention, attribution settings, Google signals, the property, and its change history |
+| GA4 | `get_ga4_admin_resource` | Audiences, Google Ads / BigQuery / Firebase / SA360 / DV360 / AdSense links, annotations, key events, custom and calculated metrics, channel groups, data streams, expanded data sets, rollup and subproperty settings, data retention, attribution settings, Google signals and the property. Per data stream (with `dataStreamId`): enhanced measurement, data redaction, Measurement Protocol secrets, event create and edit rules. Per account: data sharing settings. |
+| GA4 | `audit_ga4_property` | A scored configuration and tracking-health audit of one property. See [GA4 property audit](#ga4-property-audit). |
 | GA4 | `run_ga4_access_report` | Who accessed the property's data, how and when. Needs the Administrator role. |
 | GA4 | `run_ga4_audience_export` | List, create, check and read audience exports |
 | GA4 | `run_ga4_multi_property_report` | One report across up to 10 properties, rows tagged by property |
@@ -181,6 +182,26 @@ https://YOUR-VERCEL-DOMAIN/auth/google/callback
 | Meta | `search_meta_ad_library` | Competitor ads from the public Ad Library |
 | Tag Manager | `get_gtm_container`, `audit_gtm_container` | Browse containers, and a scored tracking audit cross-checked against GA4 and Google Ads |
 | BigQuery | `list_bigquery_ga4_exports`, `run_bigquery_ga4_query`, `run_bigquery_ga4_preset` | Raw GA4 export data in SQL, with 11 ready-made analyses |
+
+### GA4 property audit
+
+`audit_ga4_property` reads every property and web stream setting the Admin API exposes, then runs five small Data API reports over the last 28 days (`lookbackDays` changes this; `includeDataChecks: false` skips them). It scores the property out of 100 with the same weights as the Tag Manager audit and flags:
+
+- no data streams, no data in the period, or tracking that stopped more than 3 days ago
+- no key events, key events that never fired, and key events firing more than about twice per session (1.2 for purchase, generate_lead and sign_up)
+- purchase counted once per session, and lead key events with no default value
+- event data retention left at 2 months, Google signals off
+- enhanced measurement off, or parts of it off
+- email redaction off on a web stream
+- Measurement Protocol secrets, listed so they can be reviewed
+- custom dimensions or metrics near their quota
+- no Google Ads link, links with personalized ads off, no BigQuery export
+- more than 3% of sessions Unassigned, more than 5% with landing page `(not set)`
+- the site referring to itself, and payment or checkout providers credited as referrers
+
+GA4 has no API for internal traffic rules, the unwanted referrals list, cross-domain domains, session timeout or consent mode, and change history and user permissions need more than read-only access. The audit returns these under `notAuditable` rather than implying they passed. Each read is listed under `checks`, so one that fails (for example a 403 on a single stream) is reported without failing the whole audit.
+
+A typical audit costs about 15 Admin API requests plus 5 Data API reports.
 
 ### Request cost
 
