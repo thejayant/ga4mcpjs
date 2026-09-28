@@ -1,6 +1,6 @@
 # Marketing Data MCP Server for Vercel
 
-This project is a Vercel-hosted Node.js MCP server for ChatGPT. The Vercel app is the OAuth authorization server for ChatGPT. Google-backed tools use one Google OAuth connection with product-specific scopes, and CallRail-backed tools use a server-side CallRail API token.
+This project is a Vercel-hosted Node.js MCP server for ChatGPT. The Vercel app is the OAuth authorization server for ChatGPT. Google-backed tools use one Google OAuth connection with product-specific scopes. Public `/mcp` CallRail tools use only the API token supplied by that user during connection; the shared server-side token is reserved for internal `/cbx`.
 
 This server also includes an expert analyst layer:
 
@@ -113,7 +113,6 @@ the token instead of forcing the user to sign in again.
 - `APP_BASE_URL`
 - `APP_ENCRYPTION_KEY`
 - `GOOGLE_ADS_DEVELOPER_TOKEN` for Google Ads tools
-- `CALLRAIL_API_TOKEN` for CallRail tools
 
 Compatibility fallback names also supported:
 
@@ -123,12 +122,14 @@ Compatibility fallback names also supported:
 Optional:
 
 - `CALLRAIL_API_BASE_URL` to override the default CallRail API base URL (`https://api.callrail.com/v3`)
+- `CBX_INTERNAL_SECRET` and `CALLRAIL_API_TOKEN` for the internal `/cbx` connection only
 - `GOOGLE_ADS_LOGIN_CUSTOMER_ID` for manager-account access in Google Ads
 - `GOOGLE_ADS_API_VERSION` to override the default Google Ads API version (`v22`)
 - `GOOGLE_ADS_ACCESS_LEVEL` to record the developer-token tier, `basic` (default) or `standard`
 - `META_APP_ID` and `META_APP_SECRET` for the Meta (Facebook / Instagram) tools
 - `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
 - `META_LOGIN_CONFIG_ID` to use a Facebook Login for Business configuration instead of a raw scope list (recommended)
+- `ENABLE_GBP=1` to expose Google Business Profile tools and request the `business.manage` scope
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -479,13 +480,13 @@ The resulting token carries both credential sets, so Google and Meta tools work 
 
 ## CallRail notes
 
-- CallRail tools use `CALLRAIL_API_TOKEN` from the server environment.
+- `/mcp` CallRail tools appear only after the user adds their own API token on the optional CallRail screen after Google/Meta authorization. The token is checked against CallRail, encrypted into that connection's access/refresh tokens, and never falls back to `CALLRAIL_API_TOKEN`.
 - CallRail has no server-side aggregation endpoint for most groupings, so `run_callrail_preset` fetches **one page** of call records and aggregates them here. Always compare `callsFetched` against `totalRecords`; if they differ, raise `perPage` (max 250) or advance `page`. Auto-pagination is deliberately not implemented.
 - Presets emit `normalizedRows` in the cross-platform schema, so calls join to Google Ads, GA4, and Search Console rows on campaign, source / medium, landing page, or date.
 - A call carrying several tags is counted once per tag, so `calls_by_tag` totals can exceed the call total. This is stated in the response `notes`.
 - Qualified calls are counted from `lead_status = good_lead`, which only works if the account actually scores leads.
 - `answeredOnly` and `minDurationSeconds` filter calls before aggregation, which is the usual way to drop wrong numbers and hang-ups.
-- ChatGPT does not perform a separate CallRail OAuth flow in this setup.
+- CallRail uses an API token, not an OAuth authorization flow. The connection screen accepts it through a no-store HTTPS form; skipping CallRail leaves Google/Meta connected.
 - `list_callrail_calls`, `get_callrail_call_summary`, `get_callrail_call_timeseries`, `list_callrail_trackers`, and `get_callrail_resource` accept documented CallRail query parameters via the `query` object.
 - Call transcripts, call recordings, landing pages, tags, channels, sources, and attribution fields depend on what the CallRail API returns for the selected endpoint and the data available in the account.
 
@@ -505,6 +506,16 @@ The resulting token carries both credential sets, so Google and Meta tools work 
    - `/.well-known/oauth-protected-resource`
    - `/mcp`
 6. Reconnect the ChatGPT connector after adding new scopes such as Merchant Center or Google Ads so the new Google scopes are granted.
+
+## Internal CBX endpoint
+
+`/cbx` exposes the same Google/Meta/GBP modules plus CallRail using the shared `CALLRAIL_API_TOKEN`. It requires Google OAuth **and** a separate `CBX_INTERNAL_SECRET` entered by the colleague on the internal authorization screen. The raw secret is not stored in the MCP token; a sealed approval tied to the current secret is checked on every `/cbx` request. Rotating the secret invalidates existing approvals. A public `/mcp` bearer token cannot be reused for `/cbx`. Set the secret to a long random value and distribute it only to authorized colleagues. Do not put it in a URL or client header. If either server secret is unset, internal CallRail access does not work.
+
+For the internal connector, use `https://YOUR-VERCEL-DOMAIN/cbx` as the MCP resource. OAuth authorization and token URLs remain `/auth/google/start` and `/oauth/token`; the browser flow will ask for the internal secret after Google/Meta sign-in. The protected-resource metadata is at `/.well-known/oauth-protected-resource/cbx`. Verify the internal connector separately from the public `/mcp` connector. ChatGPT cannot send an arbitrary shared API key as a custom MCP request header, which is why the extra secret is collected during authorization instead.
+
+## Google Business Profile
+
+The separate [MCP GBP module](MCP%20GBP/README.md) adds GBP account and location discovery, profile content, reviews, posts, media, performance, search keywords, and read-only action links. It shares this server's Google OAuth connection and is opt-in via `ENABLE_GBP=1`. All GBP writes are dedicated tools requiring `confirmed: true`; access-management changes, Verification, and Notifications are not exposed. The discontinued Business Calls API is not used; call-button clicks are available through the Performance API. Reconnect ChatGPT after enabling the flag and check `/debug/integrations` for the new scope and tool catalog.
 
 ## Local development
 
