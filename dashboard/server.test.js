@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { dashboardRange, ga4Rows, report, registerDashboard, gbpDailyRows, merchantHealth, sumRows, DASHBOARD_URI } from './server.js';
+import { dashboardRange, ga4Rows, report, registerDashboard, gbpDailyRows, merchantHealth, sumRows, matchSearchConsoleSite, DASHBOARD_URI } from './server.js';
 import { fixtureDeps } from './fixtures.js';
 
 test('equal previous period crosses month boundaries and rejects invalid ranges', () => {
@@ -87,7 +87,7 @@ test('GA4 filters apply to totals, a chosen key event keeps the keyEvents column
 });
 test('Search Console filters and search type reach every query', async () => {
   const h = harness();
-  await load(h, { siteUrl: 'sc-domain:x.com', options: { search_console: { query: 'carport', queryMatch: 'notContains', country: 'USA', searchType: 'image', breakdown: 'page' } } });
+  await load(h, { siteUrl: 'sc-domain:carportdirect.com', options: { search_console: { query: 'carport', queryMatch: 'notContains', country: 'USA', searchType: 'image', breakdown: 'page' } } });
   for (const call of h.calls.gsc) {
     assert.equal(call.type, 'image');
     assert.deepEqual(call.dimensionFilterGroups[0].filters, [{ dimension: 'query', operator: 'notContains', expression: 'carport' }, { dimension: 'country', operator: 'equals', expression: 'usa' }]);
@@ -196,4 +196,31 @@ test('registered resource is self-contained, versioned and the opener declares b
   assert.deepEqual(h.tools.open_marketing_dashboard.config._meta['openai/ui'].entrypoints, [{ type: 'global' }, { type: 'thread' }]);
   assert.throws(() => h.tools.get_marketing_dashboard.config.inputSchema.startDate.parse('2026-02-30'));
   assert.throws(() => h.tools.get_marketing_dashboard.config.inputSchema.gbpLocation.parse('accounts/1/locations/../x'));
+});
+test('a guessed Search Console address resolves to the property the user can read', async () => {
+  const entries = [{ siteUrl: 'https://www.getcarports.com/', permissionLevel: 'siteOwner' }, { siteUrl: 'sc-domain:carportdirect.com', permissionLevel: 'siteFullUser' }, { siteUrl: 'https://carportdirect.com/', permissionLevel: 'siteOwner' }, { siteUrl: 'https://unverified.example/', permissionLevel: 'siteUnverifiedUser' }];
+  for (const guess of ['getcarports.com', 'http://getcarports.com', 'www.getcarports.com', 'https://www.getcarports.com']) assert.equal(matchSearchConsoleSite(guess, entries), 'https://www.getcarports.com/');
+  assert.equal(matchSearchConsoleSite('https://carportdirect.com/', entries), 'https://carportdirect.com/', 'an exact usable match wins');
+  assert.equal(matchSearchConsoleSite('carportdirect.com', entries), 'sc-domain:carportdirect.com', 'the domain property is preferred');
+  assert.equal(matchSearchConsoleSite('https://unverified.example/', entries), null, 'unverified properties are never used');
+  assert.equal(matchSearchConsoleSite('othersite.com', entries), null);
+
+  const h = harness();
+  const data = await load(h, { siteUrl: 'http://getcarports.com' });
+  assert.equal(data.sources.search_console.account, 'https://www.getcarports.com/');
+  assert.equal(data.sources.search_console.requestedAccount, 'http://getcarports.com');
+  assert.ok(h.calls.gsc.every(call => call.siteUrl === 'https://www.getcarports.com/'));
+  const missing = await load(harness(), { siteUrl: 'othersite.com' });
+  assert.equal(missing.sources.search_console.status, 'error');
+  assert.match(missing.sources.search_console.message, /Pick the site in Accounts/);
+  const picker = (await h.tools.list_dashboard_accounts.handler()).structuredContent.search_console.data;
+  assert.ok(!picker.some(site => site.id === 'https://unverified.example/'), 'picker hides unverified properties');
+  assert.ok(picker.some(site => site.name === 'https://www.getcarports.com/'), 'picker shows the full URL-prefix address');
+});
+test('the opener passes a business name through for automatic matching', async () => {
+  const h = harness();
+  const opened = (await h.tools.open_marketing_dashboard.handler({ business: 'getcarports.com' })).structuredContent;
+  assert.equal(opened.business, 'getcarports.com');
+  assert.deepEqual(opened.selection, {});
+  assert.equal((await h.tools.open_marketing_dashboard.handler({})).structuredContent.business, undefined);
 });

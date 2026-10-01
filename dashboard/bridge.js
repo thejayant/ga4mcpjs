@@ -23,6 +23,7 @@ export class HostBridge {
     const result = await this.request('ui/initialize', { appInfo: this.appInfo, appCapabilities: this.capabilities, protocolVersion: PROTOCOL_VERSION });
     this.hostContext = result?.hostContext || {};
     this.hostCapabilities = result?.hostCapabilities || {};
+    this.hostInfo = result?.hostInfo || {};
     this.notify('ui/notifications/initialized', {});
     this.watchSize();
     return result;

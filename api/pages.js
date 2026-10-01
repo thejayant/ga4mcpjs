@@ -2,6 +2,8 @@
 // privacy policy and terms the plugin manifest links to, and OpenAI's domain
 // verification challenge. Static HTML; nothing here reads user data.
 
+import { buildPluginZip } from "../plugin/zip.js";
+
 const OWNER = "Jayant Solanki";
 const OWNER_SITE = "https://thejayant.in";
 const UPDATED = "1 October 2026";
@@ -46,6 +48,28 @@ code{background:var(--code);padding:2px 6px;border-radius:6px;font-size:13.5px;w
 .jump a{border:1px solid var(--border);background:var(--surface);border-radius:999px;padding:5px 12px;font-size:13.5px;font-weight:600;text-decoration:none}
 h2[id]{scroll-margin-top:16px}
 .copy button{border:0;background:var(--accent);color:#fff;font:inherit;font-weight:600;font-size:13px;padding:6px 12px;border-radius:8px;cursor:pointer}
+.needs{font-size:14.5px}
+.pick{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:10px 0 8px}
+.pick-option{display:flex;flex-direction:column;gap:2px;padding:18px 20px;border-radius:16px;border:2px solid var(--border);background:var(--surface);color:var(--ink);text-decoration:none;transition:border-color .2s,transform .2s}
+.pick-option strong{font-size:19px}
+.pick-option span{font-size:13.5px;color:var(--ink-2)}
+.pick-option:hover{border-color:var(--accent);transform:translateY(-1px)}
+.pick-option[aria-selected=true]{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+body[data-app=claude] #chatgpt,body[data-app=chatgpt] #claude{display:none}
+.app{scroll-margin-top:16px}
+.steps{list-style:none;padding:0;margin:16px 0;display:grid;gap:12px}
+.step{display:grid;grid-template-columns:36px 1fr;gap:14px;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 18px}
+.step p{margin:4px 0}
+.num{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;display:grid;place-items:center}
+.cta{display:inline-block;margin:10px 0 4px;padding:12px 22px;border-radius:12px;background:var(--accent);color:#fff;font-weight:700;font-size:16px;text-decoration:none}
+.cta:hover{filter:brightness(1.08)}
+.cta.secondary{background:transparent;color:var(--accent);border:2px solid var(--accent);font-size:15px;padding:9px 18px}
+.field{margin:12px 0 0;font-weight:600;color:var(--ink)}
+.hint{font-size:13.5px}
+.more{margin:14px 0;border:1px solid var(--border);border-radius:14px;background:var(--surface);padding:12px 18px}
+.more summary{cursor:pointer;font-weight:600}
+.more[open] summary{margin-bottom:8px}
+.dev{margin-top:36px}
 footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)}
 </style></head><body><main>
 <header><svg viewBox="0 0 600 600" aria-hidden="true"><rect width="600" height="600" rx="150" fill="#25bd63"/><path d="M162 293h62l43-128 78 250 40-122h60" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -73,84 +97,125 @@ export function publicBaseUrl(baseUrl) {
   return url.origin;
 }
 
+// A big call-to-action link styled as a button.
+const button = (href, text, { primary = true, download = false } = {}) => `<a class="cta${primary ? "" : " secondary"}" href="${escapeHtml(href)}"${download ? " download" : ' target="_blank" rel="noopener"'}>${text}</a>`;
+const step = (n, body) => `<li class="step"><span class="num">${n}</span><div>${body}</div></li>`;
+
+// Claude opens its "Add custom connector" box with the name and address filled in, or the
+// directory listing once there is one. Organization owners get the org-wide form.
+export function claudeInstallLink(site, { organization = false } = {}) {
+  if (!organization && process.env.CLAUDE_DIRECTORY_URL) return process.env.CLAUDE_DIRECTORY_URL;
+  const query = `connectorName=${encodeURIComponent("Marketer Companion")}&connectorUrl=${encodeURIComponent(`${site}/mcp`)}`;
+  return `https://claude.ai/${organization ? "admin-settings" : "customize"}/connectors?modal=add-custom-connector&${query}`;
+}
+
+// The install guide is written for people who have never added an integration: pick your
+// app, then follow a few numbered steps. Developer setups sit in a collapsed section.
 function installPage(baseUrl) {
-  const mcpUrl = `${publicBaseUrl(baseUrl)}/mcp`;
+  const site = publicBaseUrl(baseUrl);
+  const mcpUrl = `${site}/mcp`;
   const name = "marketer-companion";
+  const display = "Marketer Companion";
+  const claudeLink = claudeInstallLink(site);
+  const claudeOrgLink = claudeInstallLink(site, { organization: true });
+  const claudeListed = Boolean(process.env.CLAUDE_DIRECTORY_URL);
   // Only advertise the ChatGPT directory once the listing is actually live.
-  const directoryLive = process.env.PLUGIN_DIRECTORY_LIVE === "true";
-  const prompt = `Add the remote MCP server "${name}" at ${mcpUrl} (HTTP transport, OAuth sign-in) to my MCP settings, then start the sign-in so I can connect my Google account.`;
+  const chatgptListed = process.env.PLUGIN_DIRECTORY_LIVE === "true";
+  const zipUrl = `${site}/download/plugin.zip`;
+  const ask = "Open my marketing dashboard";
+  const claudeAdminNote = `Hi! Could you add Marketer Companion to our Claude organization? It is a read-only marketing reporting connector. This link opens the form with everything filled in: ${claudeOrgLink}  (Guide: ${site}/install#claude)`;
+  const chatgptAdminNote = `Hi! Could you add Marketer Companion to our ChatGPT workspace? Download the plugin file from ${zipUrl}, then go to Workspace settings → Plugins → Add → Upload plugin, and set it to Available. It is a read-only marketing reporting plugin. (Guide: ${site}/install#chatgpt)`;
+  const prompt = `Add the remote MCP server "${name}" at ${mcpUrl} (HTTP transport, OAuth sign-in) to your MCP settings, then start the sign-in so I can connect my Google account.`;
+
   return layout("Install", `
-<h1>Install Marketer Companion</h1>
-<p class="lead">Marketing reporting for GA4, Search Console, Google Ads, Merchant Center, Google Business Profile and CallRail, in the AI tools you already use. You connect your own accounts; reporting is read-only.</p>
-<p>Every setup below uses the same server address:</p>
-${copyBlock(mcpUrl)}
-<nav class="jump"><a href="#chatgpt">ChatGPT</a><a href="#claude">Claude</a><a href="#terminal">Terminal</a><a href="#editors">Cursor &amp; VS Code</a><a href="#prompt">Ask your AI</a></nav>
+<h1>Add Marketer Companion to your AI assistant</h1>
+<p class="lead">See your GA4, Search Console, Google Ads, Merchant Center, Business Profile and CallRail numbers by asking in chat. Setup takes about two minutes and needs no technical knowledge.</p>
+<p class="needs">You need: the Google account that can see your marketing data.</p>
 
-<h2 id="chatgpt">ChatGPT</h2>
-${directoryLive ? `<div class="card"><span class="tag">Easiest</span><h3>From the ChatGPT plugin directory</h3>
-<ol><li>Open <strong>Plugins</strong> in the ChatGPT sidebar and search for <strong>Marketer Companion</strong>.</li>
-<li>Select <strong>Install plugin</strong>, then <strong>Connect</strong>, and sign in with Google.</li>
-<li>Ask: <em>“Open my marketing dashboard.”</em></li></ol></div>` : ""}
-<div class="card"><span class="tag">Plus, Pro and workspace admins</span><h3>Developer mode</h3>
-<ol><li>On ChatGPT on the web or desktop, open <strong>Settings → Security and login</strong> and turn on <strong>Developer mode</strong>.</li>
-<li>Open <strong>Plugins</strong>, select <strong>+</strong>, and add an MCP app.</li>
-<li>Name it <strong>Marketer Companion</strong>, paste the server address above, and choose <strong>OAuth</strong>.</li>
-<li>Select <strong>Connect</strong> and sign in with Google. Add a CallRail API key on the next screen, or skip it.</li>
-<li>In a new chat, ask: <em>“Open my marketing dashboard.”</em></li></ol>
-<p>Not available in the mobile apps. If the setting is missing in a work account, your admin has turned it off.</p></div>
-<div class="card"><span class="tag">Teams</span><h3>Business, Enterprise or Edu workspace</h3>
-<ol><li>A workspace owner or admin goes to <strong>Workspace settings → Plugins → Add → Upload plugin</strong> and uploads the Marketer Companion plugin ZIP (ask ${OWNER} for the latest file).</li>
-<li>Set the installation policy to <strong>Available</strong> (members install it) or <strong>Installed</strong> (installed for everyone).</li>
-<li>Each member connects their own Google account the first time they use it.</li></ol></div>
-<div class="card"><span class="tag">By chat</span><h3>Create it with Plugin Creator</h3>
-<p>With developer mode on, install <strong>Plugin Creator</strong> from Plugins, then send:</p>
-${copyBlock(`@plugin-creator Create a plugin called Marketer Companion that connects to the MCP server ${mcpUrl} with OAuth sign-in.`)}
-<p>Approve the install card it shows, then connect Google.</p></div>
+<h2 class="pick-title">Which app do you use?</h2>
+<div class="pick" role="tablist">
+  <a class="pick-option" href="#claude" data-app="claude" role="tab"><strong>Claude</strong><span>claude.ai or the Claude desktop app</span></a>
+  <a class="pick-option" href="#chatgpt" data-app="chatgpt" role="tab"><strong>ChatGPT</strong><span>chatgpt.com or the ChatGPT desktop app</span></a>
+</div>
 
-<h2 id="claude">Claude</h2>
-<div class="card"><span class="tag">Claude.ai and Claude Desktop</span><h3>Custom connector</h3>
-<ol><li>Open <strong>Customize → Connectors</strong>, select <strong>+</strong>, then <strong>Add custom connector</strong>. On Team and Enterprise plans an owner adds it under <strong>Organization settings → Connectors</strong>.</li>
-<li>Name it <strong>Marketer Companion</strong> and paste the server address. Leave the advanced OAuth fields empty.</li>
-<li>Select <strong>Connect</strong> and sign in with Google.</li>
-<li>Enable it in a chat from the tools menu and ask: <em>“Open my marketing dashboard.”</em></li></ol>
-<p>Free plans can add one custom connector; Pro, Max, Team and Enterprise can add more. Connectors added on the web also appear in Claude Desktop.</p></div>
+<section class="app" id="claude">
+<h2>Add it to Claude</h2>
+<ol class="steps">
+${step(1, `<p>Click the button. Claude opens with everything filled in${claudeListed ? "" : " (sign in first if Claude asks)"}.</p>${button(claudeLink, claudeListed ? "Open Marketer Companion in Claude" : "Add to Claude")}`)}
+${step(2, `<p>Click <strong>${claudeListed ? "Connect" : "Add"}</strong>${claudeListed ? "" : `, then <strong>Connect</strong> next to Marketer Companion`}.</p>`)}
+${step(3, `<p>Choose your Google account and click <strong>Allow</strong>. If you are asked about CallRail and don't use it, click <strong>Skip</strong>.</p>`)}
+${step(4, `<p>Start a new chat and type:</p>${copyBlock(ask)}<p class="hint">Tip: name your website, for example <em>“Open my marketing dashboard for getcarports.com”</em>, and it picks that business’s accounts for you.</p><p class="hint">If Claude doesn't use it, click the <strong>+</strong> (or tools) button under the message box and switch on Marketer Companion.</p>`)}
+</ol>
+<details class="more"><summary>Using Claude at work (Team or Enterprise)?</summary>
+<p>Only an organization owner can add connectors. If you are the owner, use this button instead:</p>
+${button(claudeOrgLink, "Add for my organization", { primary: false })}
+<p>Not the owner? Send them this message:</p>${copyBlock(claudeAdminNote)}
+<p>On the free plan you can add one connector like this; paid plans can add more.</p>
+</details>
+</section>
 
-<h2 id="terminal">Terminal</h2>
-<div class="card"><h3>Claude Code</h3>
-${copyBlock(`claude mcp add --transport http ${name} ${mcpUrl}`)}
-<p>Then run <code>/mcp</code> inside Claude Code, choose <strong>${name}</strong> and select <strong>Authenticate</strong>.</p></div>
-<div class="card"><h3>OpenAI Codex CLI</h3>
-${copyBlock(`codex mcp add ${name} --url ${mcpUrl}`)}
-${copyBlock(`codex mcp login ${name}`)}
-<p>The second command opens your browser to sign in.</p></div>
-<div class="card"><h3>Gemini CLI</h3>
-${copyBlock(`gemini mcp add --transport http ${name} ${mcpUrl}`)}
-<p>Gemini CLI opens the sign-in the first time it uses the server.</p></div>
+<section class="app" id="chatgpt">
+<h2>Add it to ChatGPT</h2>
+${chatgptListed ? `<ol class="steps">
+${step(1, `<p>In ChatGPT, open <strong>Plugins</strong> in the left sidebar and search for <strong>Marketer Companion</strong>.</p>${button("https://chatgpt.com", "Open ChatGPT")}`)}
+${step(2, `<p>Click <strong>Install plugin</strong>, then <strong>Connect</strong>. Choose your Google account and click <strong>Allow</strong>.</p>`)}
+${step(3, `<p>Start a new chat and type:</p>${copyBlock(ask)}<p class="hint">Tip: name your website, for example <em>“Open my marketing dashboard for getcarports.com”</em>, and it picks that business’s accounts for you.</p>`)}
+</ol>
+<details class="more"><summary>Can't find it in Plugins?</summary>` : `<p class="needs">Works with ChatGPT <strong>Plus</strong> or <strong>Pro</strong>, on chatgpt.com or the desktop app. It doesn't work in the phone app.</p>`}
+<ol class="steps">
+${step(1, `<p>Open ChatGPT, click your name in the bottom-left corner, then <strong>Settings → Security and login</strong>. Turn on <strong>Developer mode</strong>.</p>${button("https://chatgpt.com", "Open ChatGPT")}`)}
+${step(2, `<p>Click <strong>Plugins</strong> in the left sidebar, then the <strong>+</strong> button, and choose <strong>Create app</strong>, then <strong>MCP app</strong>.</p>`)}
+${step(3, `<p>Fill in the form. Copy each value with its button:</p>
+<p class="field">Name</p>${copyBlock(display)}
+<p class="field">MCP server URL</p>${copyBlock(mcpUrl)}
+<p class="field">Authentication: choose <strong>OAuth</strong>. Tick the confirmation box if one appears, then click <strong>Create</strong>.</p>`)}
+${step(4, `<p>Click <strong>Connect</strong>. Choose your Google account and click <strong>Allow</strong>. If you are asked about CallRail and don't use it, click <strong>Skip</strong>.</p>`)}
+${step(5, `<p>Start a new chat and type:</p>${copyBlock(ask)}<p class="hint">Tip: name your website, for example <em>“Open my marketing dashboard for getcarports.com”</em>, and it picks that business’s accounts for you.</p>`)}
+</ol>
+${chatgptListed ? "</details>" : ""}
+<details class="more"><summary>Using ChatGPT at work (Business, Enterprise or Edu)?</summary>
+<p>Work accounts usually can't turn on developer mode; an admin adds the plugin once for everyone. If you are the admin, download the plugin file and upload it in <strong>Workspace settings → Plugins → Add → Upload plugin</strong>, then set it to <strong>Available</strong>:</p>
+${button(zipUrl, "Download plugin file", { primary: false, download: true })}
+<p>Not the admin? Send them this message:</p>${copyBlock(chatgptAdminNote)}
+</details>
+</section>
 
-<h2 id="editors">Cursor and VS Code</h2>
-<div class="card"><h3>Cursor</h3>
-<p>Add this to <code>~/.cursor/mcp.json</code> (or <strong>Settings → MCP → Add new MCP server</strong>), then select <strong>Connect</strong> next to it:</p>
-${copyBlock(JSON.stringify({ mcpServers: { [name]: { url: mcpUrl } } }, null, 2))}</div>
-<div class="card"><h3>VS Code (GitHub Copilot agent mode)</h3>
-${copyBlock(`code --add-mcp '${JSON.stringify({ name, type: "http", url: mcpUrl })}'`)}
-<p>Or add it to <code>.vscode/mcp.json</code> under <code>servers</code>. VS Code asks you to sign in the first time a tool runs.</p></div>
+<h2>What happens next</h2>
+<ul><li>The dashboard asks you to pick your accounts, one per tool, for the same business. Skip any tool you don't use.</li>
+<li>Change the dates, add filters, or click <strong>Ask</strong> to get an explanation of what changed.</li>
+<li>Google shows exactly what you are sharing before you click Allow. You can remove access any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li></ul>
 
-<h2 id="prompt">Ask your AI to set it up</h2>
-<p>Agents that can change their own settings, such as Claude Code, Codex, Gemini CLI, Cursor and Copilot agent mode, can add it for you. Paste:</p>
-${copyBlock(prompt)}
+<h2 id="support">Something not working?</h2>
+<ul><li><strong>I can't find Developer mode in ChatGPT</strong>: it needs a Plus or Pro plan. On a work account, send the message above to your admin.</li>
+<li><strong>A tool says I don't have access</strong>: you signed in with a Google account that can't see that property. Remove Marketer Companion, add it again, and pick the right Google account.</li>
+<li><strong>The dashboard looks out of date</strong>: start a new chat.</li>
+<li><strong>Google Ads says quota exceeded</strong>: the shared daily Google Ads allowance ran out. Try again tomorrow.</li></ul>
+<p>Still stuck? Contact ${contact()} and say which app you use and what you see.</p>
 
-<h2>What you will see</h2>
-<ul><li>In ChatGPT and Claude, “Open my marketing dashboard” shows the interactive dashboard where the app supports it. In terminals and editors you get the same reports as text and tables.</li>
-<li>Pick one account per source for the same business, or leave a source out. Then choose dates, add filters and ask for an analysis.</li>
-<li>Google shows exactly which data you are granting before you approve. Revoke access any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li></ul>
+<details class="more dev" id="developers"><summary>For developers: Claude Code, Codex, Gemini CLI, Cursor and VS Code</summary>
+<p>Server address (Streamable HTTP, OAuth 2.1 with dynamic client registration):</p>${copyBlock(mcpUrl)}
+<h3>Claude Code</h3>${copyBlock(`claude mcp add --transport http ${name} ${mcpUrl}`)}<p>Then run <code>/mcp</code>, choose <strong>${name}</strong> and select <strong>Authenticate</strong>.</p>
+<h3>OpenAI Codex CLI</h3>${copyBlock(`codex mcp add ${name} --url ${mcpUrl}`)}${copyBlock(`codex mcp login ${name}`)}
+<h3>Gemini CLI</h3>${copyBlock(`gemini mcp add --transport http ${name} ${mcpUrl}`)}<p>Gemini CLI opens the sign-in the first time it uses the server.</p>
+<h3>Cursor</h3><p>Add to <code>~/.cursor/mcp.json</code>, then select <strong>Connect</strong> next to it:</p>${copyBlock(JSON.stringify({ mcpServers: { [name]: { url: mcpUrl } } }, null, 2))}
+<h3>VS Code (Copilot agent mode)</h3>${copyBlock(`code --add-mcp '${JSON.stringify({ name, type: "http", url: mcpUrl })}'`)}
+<h3>Let a coding agent do it</h3><p>Claude Code, Codex, Gemini CLI, Cursor and Copilot agent mode can edit their own settings. Paste this into one of them (chat apps like ChatGPT and Claude.ai cannot):</p>${copyBlock(prompt)}
+<p>In terminals and editors you get the reports as text and tables; the interactive dashboard needs ChatGPT or Claude.</p>
+</details>
 
-<h2 id="support">Troubleshooting and support</h2>
-<ul><li><strong>“Reconnect this source”</strong>: remove the connection in your AI tool and add it again, approving every requested permission.</li>
-<li><strong>A source shows an access error</strong>: the Google account you signed in with has no access to that property or account.</li>
-<li><strong>Sign-in does not open from a terminal tool</strong>: run its login command again (<code>/mcp</code> in Claude Code, <code>codex mcp login ${name}</code> in Codex).</li>
-<li><strong>The dashboard looks out of date</strong>: start a new chat; ChatGPT caches app views per conversation.</li>
-<li><strong>Google Ads says quota exceeded</strong>: the shared daily Google Ads allowance ran out; try again the next day.</li></ul>
-<p>Still stuck? Contact ${contact()}.</p>`);
+<script>
+// Show only the chosen app's steps. Without JavaScript both sections stay visible.
+(function () {
+  var options = document.querySelectorAll('.pick-option');
+  function show(app) {
+    if (app !== 'claude' && app !== 'chatgpt') return;
+    document.body.setAttribute('data-app', app);
+    options.forEach(function (o) { o.setAttribute('aria-selected', String(o.dataset.app === app)); });
+  }
+  options.forEach(function (o) { o.addEventListener('click', function (e) { e.preventDefault(); show(o.dataset.app); history.replaceState(null, '', '#' + o.dataset.app); document.getElementById(o.dataset.app).scrollIntoView({ behavior: 'smooth', block: 'start' }); }); });
+  show(location.hash.slice(1));
+})();
+</script>`);
 }
 
 function privacyPage() {
@@ -217,6 +282,15 @@ export function registerPublicPages(app, { getBaseUrl }) {
   app.get(["/install", "/support"], (req, res) => send(res, installPage(getBaseUrl(req))));
   app.get("/privacy", (req, res) => send(res, privacyPage()));
   app.get("/terms", (req, res) => send(res, termsPage()));
+  // Short links to share: /claude goes straight to Claude's prefilled "Add connector" form.
+  app.get("/claude", (req, res) => res.redirect(302, claudeInstallLink(publicBaseUrl(getBaseUrl(req)))));
+  app.get("/chatgpt", (req, res) => res.redirect(302, "/install#chatgpt"));
+  app.get(["/add", "/start"], (req, res) => res.redirect(302, "/install"));
+  // The ChatGPT plugin package, built from the deployed files, for workspace admins.
+  app.get("/download/plugin.zip", (req, res) => {
+    const { fileName, buffer } = buildPluginZip();
+    res.set("Content-Disposition", `attachment; filename="${fileName}"`).set("Cache-Control", "public, max-age=300").type("application/zip").send(buffer);
+  });
   // OpenAI verifies plugin domain ownership by fetching this token over HTTPS.
   app.get("/.well-known/openai-apps-challenge", (req, res) => {
     const token = process.env.OPENAI_APPS_CHALLENGE;

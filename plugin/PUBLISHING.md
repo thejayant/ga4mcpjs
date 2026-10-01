@@ -14,6 +14,21 @@ Gemini CLI, Cursor and VS Code. The user-facing guide at **https://ga4mcpjs.verc
 covers every one, with copy-ready commands and a prompt people can paste into an AI agent to
 set it up for them. It hides the ChatGPT directory option until `PLUGIN_DIRECTORY_LIVE=true`.
 
+## Links to share
+
+| Link | What it does |
+|---|---|
+| `https://ga4mcpjs.vercel.app/claude` | Opens Claude’s *Add connector* form with everything filled in (or the directory listing once `CLAUDE_DIRECTORY_URL` is set). The person clicks **Add** and **Connect**. |
+| `https://ga4mcpjs.vercel.app/chatgpt` | The ChatGPT steps. |
+| `https://ga4mcpjs.vercel.app/install` | Asks which app they use, then shows its steps. |
+
+After connecting, people only need to ask *“Open my marketing dashboard for theirwebsite.com”*.
+The dashboard finds that business’s GA4 property, Search Console site, Merchant Center account,
+Business Profile location and CallRail account by name, plus a lone Google Ads account, and opens
+without asking. With no business named, it uses every source that has a single account and only
+shows the account picker when it cannot decide; the picker’s *Find your business* box fills the
+rest from one name.
+
 ## 1. Deploy the server with the dashboard on
 
 Set these in Vercel (Production) and redeploy:
@@ -24,6 +39,7 @@ Set these in Vercel (Production) and redeploy:
 | `SUPPORT_EMAIL` | The address shown on the install, privacy and terms pages |
 | `OPENAI_APPS_CHALLENGE` | The token OpenAI gives you for domain verification (step 4) |
 | `PUBLIC_BASE_URL` | Optional. Only if you move to a custom domain, e.g. `https://mcp.thejayant.in`. The install page always shows an `https://` address |
+| `CLAUDE_DIRECTORY_URL` | Leave unset. After the Claude directory listing is live, set it to the listing URL (`https://claude.ai/directory/connectors/<slug>`); the **Add to Claude** button then opens the listing instead of the prefilled custom-connector form |
 | `PLUGIN_DIRECTORY_LIVE` | Leave unset. Set to `true` only after the listing is published; it adds the ChatGPT directory option to the install page |
 
 Check that https://ga4mcpjs.vercel.app/install, /privacy and /terms load, and that the root
@@ -95,6 +111,26 @@ anyone outside your Meta app's testers can connect it.)
    listed; nothing else is fetched.
 3. "Load data from 2010 to today." → the server rejects the range (1–366 days ending
    before today) and ChatGPT asks for a valid range.
+
+## 5. List it in Claude's connector directory (one-click for Claude users)
+
+Until it is listed, the install page's **Add to Claude** button opens Claude's *Add custom
+connector* form with the name and address already filled in, so Claude users click **Add** and
+**Connect**. A directory listing removes even that and lets Claude suggest it in chat.
+
+1. On a paid Claude plan, open the developer portal at https://claude.ai/directory/manage and
+   choose **MCP connector**.
+2. Server URL `https://ga4mcpjs.vercel.app/mcp`; documentation `https://ga4mcpjs.vercel.app/install`;
+   privacy policy `https://ga4mcpjs.vercel.app/privacy`; icon `assets/logo.png`; the same reviewer
+   Google account as for OpenAI; dashboard screenshots for the MCP App carousel.
+3. Accept the seven compliance acknowledgements and submit. Every tool already has a title and
+   a read-only or destructive annotation, which the automated scan checks. Submissions are
+   listed as **Community** connectors after the scan; Anthropic may later review them for
+   **Verified**.
+4. Set `CLAUDE_DIRECTORY_URL` to the listing URL you receive and redeploy.
+
+Workspace admins can download the ChatGPT plugin package at
+`https://ga4mcpjs.vercel.app/download/plugin.zip`; it is built from the deployed files.
 
 ## Updating
 

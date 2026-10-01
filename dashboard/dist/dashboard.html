@@ -317,6 +317,13 @@ th[aria-sort=descending] .sort::after{content:' \2193'}th[aria-sort=ascending] .
 .field-label{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
 .field-count{font-size:11.5px;color:var(--muted)}
 .field select,.field-filter{width:100%;padding:8px 10px;border-radius:9px;border:1px solid var(--border);background:var(--surface);font-size:13px;min-width:0}
+.finder{background:var(--accent-wash);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
+.finder-row{display:flex;gap:8px}
+.finder-row input{flex:1}
+.finder-result{margin:0;font-size:12px;color:var(--ink-2)}
+.finder-result:empty{display:none}
+.field.auto .field-head::after{content:"Matched";font-size:10.5px;font-weight:700;color:var(--accent);background:var(--accent-wash);border-radius:999px;padding:1px 8px;margin-left:auto}
+.field.auto .field-count{display:none}
 .sheet-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px;border-top:1px solid var(--border)}
 .footer{margin-top:28px;font-size:11.5px;color:var(--muted);line-height:1.8}
 
@@ -469,6 +476,7 @@ class HostBridge {
     const result = await this.request('ui/initialize', { appInfo: this.appInfo, appCapabilities: this.capabilities, protocolVersion: PROTOCOL_VERSION });
     this.hostContext = result?.hostContext || {};
     this.hostCapabilities = result?.hostCapabilities || {};
+    this.hostInfo = result?.hostInfo || {};
     this.notify('ui/notifications/initialized', {});
     this.watchSize();
     return result;
@@ -934,11 +942,82 @@ function logo(name, cls = 'logo') {
 
 return { logo };
 })();
+const __module_match = (() => {
+// Picks the accounts that belong to one business, so people don't have to choose six
+// dropdowns. Names are reduced to a "core" (getcarports.com, Get_Carports_GA4 and
+// "Get Carports" all become "getcarports") and compared. Pure functions; no DOM.
+
+const STOP = new Set(['ga4', 'ga', 'ua', 'analytics', 'google', 'property', 'site', 'website', 'web', 'app', 'stream', 'account',
+  'inc', 'llc', 'ltd', 'co', 'corp', 'company', 'the', 'and', 'www', 'http', 'https', 'sc', 'domain', 'com', 'net', 'org', 'io',
+  'us', 'uk', 'in', 'ca', 'au', 'biz', 'info', 'main', 'official', 'new', 'old', 'prod', 'production', 'live', 'store', 'shop']);
+
+function tokens(text) {
+  return String(text || '')
+    .replace(/^sc-domain:/i, '')
+    .replace(/^https?:\/\//i, '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(token => token && !STOP.has(token) && !/^\d+$/.test(token));
+}
+const core = text => tokens(text).join('');
+
+// 100 = same business core; 80 = one core contains the other; up to 60 for shared words.
+function similarity(a, b) {
+  const x = core(a), y = core(b);
+  if (x.length < 4 || y.length < 4) return 0;
+  if (x === y) return 100;
+  if (x.includes(y) || y.includes(x)) return 80;
+  const ta = tokens(a).filter(token => token.length >= 4), tb = new Set(tokens(b).filter(token => token.length >= 4));
+  const shared = ta.filter(token => tb.has(token)).length;
+  return shared ? Math.round(60 * shared / Math.max(ta.length, tb.size)) : 0;
+}
+
+// Text that identifies an account: its name plus the website or place it belongs to.
+const label = item => `${item.name || ''} ${item.account || ''} ${String(item.id || '').startsWith('sc-domain:') || /^https?:/.test(item.id) ? item.id : ''}`;
+const MATCH = 60;
+
+// Best account in a list for a business name, or null when nothing is a confident match.
+function bestMatch(items, hint) {
+  let best = null, bestScore = 0;
+  for (const item of items) {
+    const score = Math.max(similarity(hint, item.name), similarity(hint, item.account), similarity(hint, item.id), similarity(hint, label(item)));
+    if (score > bestScore || (score === bestScore && best && String(item.name).length < String(best.name).length)) { best = item; bestScore = score; }
+  }
+  return bestScore >= MATCH ? best : null;
+}
+
+/**
+ * accounts: { [source]: { status, data: [{ id, name, account }] } }; params: { [source]: selection key }.
+ * With a hint (a business name or website), picks the matching account per source. A source's
+ * only account is used without a match just when its accounts carry no names to compare (Google
+ * Ads lists bare customer IDs); a named account that doesn't match belongs to another business.
+ * Without a hint, picks a source's account only when it is the only one.
+ * Returns { selection, matched: [source] }.
+ */
+function autoSelect(accounts, params, hint) {
+  const selection = {}, matched = [];
+  for (const [source, param] of Object.entries(params)) {
+    const list = accounts?.[source]?.status === 'ready' ? accounts[source].data : [];
+    if (!list.length) continue;
+    const nameless = list.every(item => !tokens(`${item.name || ''} ${item.account || ''}`).length);
+    const pick = hint ? bestMatch(list, hint) || (list.length === 1 && nameless ? list[0] : null) : list.length === 1 ? list[0] : null;
+    if (pick) { selection[param] = pick.id; matched.push(source); }
+  }
+  return { selection, matched };
+}
+
+// The business name an already chosen account stands for, used to fill in its siblings.
+const hintFrom = item => item ? (String(item.id).startsWith('sc-domain:') || /^https?:/.test(item.id) ? item.id : item.name) : '';
+
+return { tokens, similarity, bestMatch, autoSelect, hintFrom };
+})();
 const __module_app = (() => {
 const { HostBridge } = __module_bridge;
 const { reveal, countUp, stopAll, slideIn, slideOut, fadeIn } = __module_motion;
 const { el, trendChart, sparkline, rankedTable, shareBar, gauge } = __module_charts;
 const { logo } = __module_logos;
+const { autoSelect, bestMatch, hintFrom } = __module_match;
 const host = new HostBridge({ name: 'Marketer Companion', version: '2.0.0' }, { availableDisplayModes: ['fullscreen'] });
 const $ = id => document.getElementById(id);
 const STORE_KEY = 'marketer-companion.selection.v2';
@@ -1112,7 +1191,9 @@ const state = {
   view: 'overview', snapshot: null, accounts: null, available: Object.keys(SOURCES),
   selection: loadSelection(), preset: 28, compare: true, busy: false, connected: false, trendMetric: {},
   // Per-source breakdown, row limit and filters, sent to the server with every load.
-  options: readStore(OPTIONS_KEY), tiles: readStore(TILES_KEY), customizing: false, loadingSource: null, filtersOpen: {}
+  options: readStore(OPTIONS_KEY), tiles: readStore(TILES_KEY), customizing: false, loadingSource: null, filtersOpen: {},
+  // The business the user asked about, used to pick matching accounts automatically.
+  hint: ''
 };
 function readStore(key) { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; } }
 function writeStore(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable in this host */ } }
@@ -1161,11 +1242,49 @@ async function loadAccounts() {
     state.accounts = result.structuredContent;
     renderSheet();
   } catch (error) { status(error.message, 'error'); } finally { $('sheet-body').classList.remove('loading'); }
+  return state.accounts;
+}
+
+const selectionParams = () => Object.fromEntries(state.available.map(key => [key, SOURCES[key].select]));
+const accountItems = key => state.accounts?.[key]?.status === 'ready' ? state.accounts[key].data : [];
+
+// Sets the picker's dropdowns to the given accounts and flags the ones chosen automatically.
+function markMatched(selection, { overwrite }) {
+  let count = 0;
+  for (const select of document.querySelectorAll('#sheet-body select[data-param]')) {
+    const value = selection[select.dataset.param];
+    if (!value || (!overwrite && select.value)) continue;
+    select.value = value;
+    select.closest('.field')?.classList.add('auto');
+    count++;
+  }
+  return count;
 }
 
 function renderSheet() {
   const body = $('sheet-body');
   body.replaceChildren();
+  // One box instead of six dropdowns: type the business and every matching account is picked.
+  const finder = el('form', undefined, 'field finder');
+  const finderLabel = el('label', 'Find your business', 'field-label'); finderLabel.htmlFor = 'business-finder';
+  const finderRow = el('div', undefined, 'finder-row');
+  const input = el('input'); input.id = 'business-finder'; input.type = 'search'; input.className = 'field-filter';
+  input.placeholder = 'Business name or website, e.g. getcarports.com'; input.value = state.hint || ''; input.autocomplete = 'off';
+  const go = el('button', 'Match', 'primary small'); go.type = 'submit';
+  const result = el('p', undefined, 'finder-result');
+  finderRow.append(input, go);
+  finder.append(finderLabel, finderRow, result);
+  finder.onsubmit = event => {
+    event.preventDefault();
+    const hint = input.value.trim();
+    if (!hint || !state.accounts) return;
+    state.hint = hint;
+    for (const field of body.querySelectorAll('.field.auto')) field.classList.remove('auto');
+    const { selection, matched } = autoSelect(state.accounts, selectionParams(), hint);
+    markMatched(selection, { overwrite: true });
+    result.textContent = matched.length ? `Matched ${matched.length} ${matched.length === 1 ? 'account' : 'accounts'}. Check them below, then build the dashboard.` : 'No accounts match that name. Try the website address, or pick below.';
+  };
+  body.append(finder);
   for (const key of state.available) {
     const config = SOURCES[key];
     const list = state.accounts?.[key];
@@ -1188,6 +1307,20 @@ function renderSheet() {
       }
       const select = el('select'); select.id = `pick-${key}`; select.dataset.param = config.select;
       fill(select, items, state.selection[config.select], '', !list);
+      // Picking one account fills in the other sources that belong to the same business.
+      select.onchange = () => {
+        field.classList.remove('auto');
+        const item = items.find(entry => entry.id === select.value);
+        if (!item) return;
+        const hint = hintFrom(item);
+        const siblings = {};
+        for (const other of state.available) {
+          if (other === key) continue;
+          const match = bestMatch(accountItems(other), hint);
+          if (match) siblings[SOURCES[other].select] = match.id;
+        }
+        markMatched(siblings, { overwrite: false });
+      };
       field.append(select);
     }
     if (key === 'google_ads') {
@@ -1217,7 +1350,9 @@ function openSheet() {
   $('scrim').hidden = false;
   slideIn(sheet.querySelector('.sheet-panel'));
   fadeIn($('scrim'), { duration: 200 });
-  if (!state.accounts) loadAccounts();
+  // Redraw from the current choices: they may have been picked automatically after the
+  // picker was last drawn, and stale dropdowns would drop them on "Build dashboard".
+  if (state.accounts) renderSheet(); else loadAccounts();
   setTimeout(() => sheet.querySelector('select, button')?.focus(), 60);
 }
 async function closeSheet() {
@@ -1266,6 +1401,7 @@ async function loadSource(key) {
     if (result.isError) throw new Error(result.structuredContent?.error || 'This source could not be loaded.');
     const data = result.structuredContent;
     if (!data?.sources?.[key]) throw new Error('The source returned no data.');
+    adoptCorrections({ [key]: data.sources[key] });
     snap.sources[key] = data.sources[key];
     snap.selection = { ...snap.selection, options: { ...(snap.selection.options || {}), [key]: options?.[key] } };
     render();
@@ -1308,8 +1444,23 @@ function setBusy(value) {
   if (value && !state.snapshot) renderSkeleton();
 }
 
+// The server can correct a requested account (for example a guessed Search Console address);
+// keep the corrected ID so the next load asks for the right one.
+function adoptCorrections(sources) {
+  let changed = false;
+  for (const [key, source] of Object.entries(sources || {})) {
+    const param = SOURCES[key]?.select;
+    if (param && source?.requestedAccount && source.account && state.selection[param] !== source.account) {
+      state.selection[param] = source.account;
+      changed = true;
+    }
+  }
+  if (changed) saveSelection();
+}
+
 function accept(data) {
   if (!data?.sources) return;
+  adoptCorrections(data.sources);
   state.snapshot = data;
   if (data.available) state.available = data.available.filter(key => SOURCES[key]);
   if (state.view !== 'overview' && !data.sources[state.view]) state.view = 'overview';
@@ -1975,6 +2126,14 @@ function summaryFor(key) {
   return out;
 }
 
+// The same dashboard runs in ChatGPT and Claude; name the assistant the user is talking to.
+function assistantName() {
+  const label = `${host.hostInfo?.name || ''} ${host.hostInfo?.title || ''}`;
+  if (/claude|anthropic/i.test(label)) return 'Claude';
+  if (/chatgpt|openai/i.test(label) || window.openai) return 'ChatGPT';
+  return 'your assistant';
+}
+
 async function ask() {
   if (!state.snapshot || state.busy) return;
   const label = state.view === 'overview' ? 'cross-channel overview' : `${SOURCES[state.view].full} view`;
@@ -1985,9 +2144,9 @@ async function ask() {
   catch { prompt += `\n\nDashboard data (JSON):\n${summary}`; }
   try {
     await host.sendMessage(prompt);
-    status('Sent to ChatGPT. The analysis appears in the conversation.', 'info');
+    status(`Sent to ${assistantName()}. The analysis appears in the conversation.`, 'info');
   } catch (error) {
-    status(`Could not send to ChatGPT (${error.message}). Ask it to analyse the loaded dashboard instead.`, 'error');
+    status(`Could not send to ${assistantName()} (${error.message}). Ask it to analyse the loaded dashboard instead.`, 'error');
   }
 }
 
@@ -2027,19 +2186,54 @@ function wire() {
   $('endDate').max = end; $('startDate').max = end;
 }
 
+// First open with nothing chosen: find the accounts instead of asking. With a business name
+// (from the user's request) every matching account is used; without one, sources that have a
+// single account are. Only when nothing can be chosen does the picker open.
+let autoStarted = false;
+async function autoStart() {
+  if (autoStarted) return;
+  autoStarted = true;
+  // Tells start-up the first load is handled, so it doesn't load a second time.
+  opened = true;
+  status('Finding your accounts…', 'info');
+  const accounts = await loadAccounts();
+  if (!accounts) { openSheet(); return; }
+  const { selection, matched } = autoSelect(accounts, selectionParams(), state.hint);
+  if (!matched.length) {
+    status(state.hint ? `No accounts matched “${state.hint}”. Choose them once below.` : 'Choose your accounts once to build the dashboard.', 'info');
+    openSheet();
+    return;
+  }
+  state.selection = selection;
+  saveSelection();
+  await load();
+  // load() clears the status line; say what was chosen once it has worked.
+  if (state.snapshot && $('status').hidden) {
+    const names = matched.map(key => SOURCES[key].name).join(', ');
+    status(`${state.hint ? `Showing “${state.hint}”` : 'Showing your accounts'}: ${names}. Not right? Use Accounts at the top to change.`, 'info');
+  }
+}
+
 let opened = false;
 host.ontoolresult = result => {
   const data = result.structuredContent;
   if (data?.sources && !Array.isArray(data.sources)) return accept(data);
   if (!Array.isArray(data?.sources)) return;
-  // Result of open_marketing_dashboard: which sources this server offers, plus any accounts the model preselected.
+  // Result of open_marketing_dashboard: which sources this server offers, any accounts the
+  // model preselected, and the business the user asked about.
   state.available = data.sources.filter(key => SOURCES[key]);
+  if (data.business) state.hint = String(data.business);
   renderNav();
   const preset = Object.fromEntries(Object.entries(data.selection || {}).filter(([, value]) => value));
   if (Object.keys(preset).length) {
     state.selection = preset;
     saveSelection();
     if (state.connected && !opened) { opened = true; closeSheet(); load(); }
+  } else if (data.business && state.connected && !state.snapshot) {
+    // The business name can arrive after start-up already opened the picker.
+    autoStarted = false;
+    closeSheet();
+    autoStart();
   }
 };
 host.onhostcontextchanged = context => applyTheme(context.theme);
@@ -2052,16 +2246,17 @@ async function start() {
   try {
     await host.connect();
     state.connected = true;
+    $('ask').textContent = `Ask ${assistantName()} ↗`;
     $('refresh').disabled = false;
     applyTheme(host.hostContext.theme);
     const context = host.hostContext;
     if (context.displayMode !== 'fullscreen' && context.availableDisplayModes?.includes('fullscreen')) host.requestDisplayMode('fullscreen').catch(() => {});
     // The opener's tool result can arrive just after connecting; give it a moment before asking the user.
     await new Promise(resolve => setTimeout(resolve, 350));
-    if (opened) { loadAccounts(); return; }
+    if (opened) { if (!state.accounts && !autoStarted) loadAccounts(); return; }
     opened = true;
     const remembered = Object.values(SOURCES).some(config => state.selection[config.select]);
-    if (remembered) { load(); loadAccounts(); } else openSheet();
+    if (remembered) { load(); loadAccounts(); } else autoStart();
   } catch {
     status('This host could not connect the dashboard. Reopen it from ChatGPT.', 'error');
   }

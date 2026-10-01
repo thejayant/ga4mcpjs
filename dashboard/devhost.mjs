@@ -20,7 +20,9 @@ window.addEventListener('message', async e => {
   const reply = r => f.contentWindow.postMessage({ jsonrpc: '2.0', id: m.id, ...r }, '*');
   if (m.method === 'ui/initialize') {
     setTimeout(async () => {
-      const open = await fetch('/tool', { method: 'POST', body: JSON.stringify({ name: 'open_marketing_dashboard', arguments: {} }) }).then(r => r.json());
+      // ?business=example.com plays "Open my marketing dashboard for example.com".
+      const business = new URLSearchParams(location.search).get('business');
+      const open = await fetch('/tool', { method: 'POST', body: JSON.stringify({ name: 'open_marketing_dashboard', arguments: business ? { business } : {} }) }).then(r => r.json());
       f.contentWindow.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: open }, '*');
     }, 100);
     return reply({ result: { protocolVersion: m.params.protocolVersion, hostInfo: { name: 'dev-host', version: '1' }, hostCapabilities: {}, hostContext: { theme, displayMode: 'fullscreen', availableDisplayModes: ['fullscreen'] } } });

@@ -329,9 +329,17 @@ test("install, privacy and terms pages are public and the OpenAI challenge serve
   const install = await (await fetch(`${baseUrl}/install`)).text();
   assert.ok(!install.includes("http://"), "install guide never shows a plain-HTTP address");
   assert.ok(install.includes("claude mcp add --transport http marketer-companion https://ga4mcpjs.vercel.app/mcp"), "a local run shows the public HTTPS address");
-  assert.ok(!install.includes("plugin directory"), "directory route stays hidden until the listing is live");
+  assert.ok(!install.includes("Install plugin"), "directory route stays hidden until the listing is live");
+  assert.ok(install.includes("https://claude.ai/customize/connectors?modal=add-custom-connector&amp;connectorName=Marketer%20Companion&amp;connectorUrl=https%3A%2F%2Fga4mcpjs.vercel.app%2Fmcp"), "Add to Claude prefills the connector form");
+  assert.ok(!install.includes("plugin-creator"), "no chat-based install for ChatGPT");
+  const zip = await fetch(`${baseUrl}/download/plugin.zip`);
+  assert.equal(zip.status, 200);
+  assert.equal(zip.headers.get("content-type"), "application/zip");
+  const zipBytes = Buffer.from(await zip.arrayBuffer());
+  assert.equal(zipBytes.readUInt32LE(0), 0x04034b50, "download is a ZIP");
+  assert.ok(zipBytes.includes(Buffer.from("plugin.json")));
   process.env.PLUGIN_DIRECTORY_LIVE = "true";
-  assert.ok((await (await fetch(`${baseUrl}/install`)).text()).includes("plugin directory"));
+  assert.ok((await (await fetch(`${baseUrl}/install`)).text()).includes("Install plugin"));
   delete process.env.PLUGIN_DIRECTORY_LIVE;
   assert.match(await (await fetch(`${baseUrl}/privacy`)).text(), /Limited Use/);
 
@@ -343,4 +351,15 @@ test("install, privacy and terms pages are public and the OpenAI challenge serve
   assert.equal(await challenge.text(), "test-challenge-token");
   if (previous === undefined) delete process.env.OPENAI_APPS_CHALLENGE;
   else process.env.OPENAI_APPS_CHALLENGE = previous;
+});
+
+test("short links send people straight to the right install step", async () => {
+  const claude = await fetch(`${baseUrl}/claude`, { redirect: "manual" });
+  assert.equal(claude.status, 302);
+  assert.equal(claude.headers.get("location"), "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Marketer%20Companion&connectorUrl=https%3A%2F%2Fga4mcpjs.vercel.app%2Fmcp");
+  assert.equal((await fetch(`${baseUrl}/chatgpt`, { redirect: "manual" })).headers.get("location"), "/install#chatgpt");
+  assert.equal((await fetch(`${baseUrl}/add`, { redirect: "manual" })).headers.get("location"), "/install");
+  process.env.CLAUDE_DIRECTORY_URL = "https://claude.ai/directory/connectors/marketer-companion";
+  assert.equal((await fetch(`${baseUrl}/claude`, { redirect: "manual" })).headers.get("location"), process.env.CLAUDE_DIRECTORY_URL);
+  delete process.env.CLAUDE_DIRECTORY_URL;
 });

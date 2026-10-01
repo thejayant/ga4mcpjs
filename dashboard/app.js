@@ -2,6 +2,7 @@ import { HostBridge } from './bridge.js';
 import { reveal, countUp, stopAll, slideIn, slideOut, fadeIn } from './motion.js';
 import { el, trendChart, sparkline, rankedTable, shareBar, gauge } from './charts.js';
 import { logo } from './logos.js';
+import { autoSelect, bestMatch, hintFrom } from './match.js';
 
 const host = new HostBridge({ name: 'Marketer Companion', version: '2.0.0' }, { availableDisplayModes: ['fullscreen'] });
 const $ = id => document.getElementById(id);
@@ -176,7 +177,9 @@ const state = {
   view: 'overview', snapshot: null, accounts: null, available: Object.keys(SOURCES),
   selection: loadSelection(), preset: 28, compare: true, busy: false, connected: false, trendMetric: {},
   // Per-source breakdown, row limit and filters, sent to the server with every load.
-  options: readStore(OPTIONS_KEY), tiles: readStore(TILES_KEY), customizing: false, loadingSource: null, filtersOpen: {}
+  options: readStore(OPTIONS_KEY), tiles: readStore(TILES_KEY), customizing: false, loadingSource: null, filtersOpen: {},
+  // The business the user asked about, used to pick matching accounts automatically.
+  hint: ''
 };
 function readStore(key) { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; } }
 function writeStore(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable in this host */ } }
@@ -225,11 +228,49 @@ async function loadAccounts() {
     state.accounts = result.structuredContent;
     renderSheet();
   } catch (error) { status(error.message, 'error'); } finally { $('sheet-body').classList.remove('loading'); }
+  return state.accounts;
+}
+
+const selectionParams = () => Object.fromEntries(state.available.map(key => [key, SOURCES[key].select]));
+const accountItems = key => state.accounts?.[key]?.status === 'ready' ? state.accounts[key].data : [];
+
+// Sets the picker's dropdowns to the given accounts and flags the ones chosen automatically.
+function markMatched(selection, { overwrite }) {
+  let count = 0;
+  for (const select of document.querySelectorAll('#sheet-body select[data-param]')) {
+    const value = selection[select.dataset.param];
+    if (!value || (!overwrite && select.value)) continue;
+    select.value = value;
+    select.closest('.field')?.classList.add('auto');
+    count++;
+  }
+  return count;
 }
 
 function renderSheet() {
   const body = $('sheet-body');
   body.replaceChildren();
+  // One box instead of six dropdowns: type the business and every matching account is picked.
+  const finder = el('form', undefined, 'field finder');
+  const finderLabel = el('label', 'Find your business', 'field-label'); finderLabel.htmlFor = 'business-finder';
+  const finderRow = el('div', undefined, 'finder-row');
+  const input = el('input'); input.id = 'business-finder'; input.type = 'search'; input.className = 'field-filter';
+  input.placeholder = 'Business name or website, e.g. getcarports.com'; input.value = state.hint || ''; input.autocomplete = 'off';
+  const go = el('button', 'Match', 'primary small'); go.type = 'submit';
+  const result = el('p', undefined, 'finder-result');
+  finderRow.append(input, go);
+  finder.append(finderLabel, finderRow, result);
+  finder.onsubmit = event => {
+    event.preventDefault();
+    const hint = input.value.trim();
+    if (!hint || !state.accounts) return;
+    state.hint = hint;
+    for (const field of body.querySelectorAll('.field.auto')) field.classList.remove('auto');
+    const { selection, matched } = autoSelect(state.accounts, selectionParams(), hint);
+    markMatched(selection, { overwrite: true });
+    result.textContent = matched.length ? `Matched ${matched.length} ${matched.length === 1 ? 'account' : 'accounts'}. Check them below, then build the dashboard.` : 'No accounts match that name. Try the website address, or pick below.';
+  };
+  body.append(finder);
   for (const key of state.available) {
     const config = SOURCES[key];
     const list = state.accounts?.[key];
@@ -252,6 +293,20 @@ function renderSheet() {
       }
       const select = el('select'); select.id = `pick-${key}`; select.dataset.param = config.select;
       fill(select, items, state.selection[config.select], '', !list);
+      // Picking one account fills in the other sources that belong to the same business.
+      select.onchange = () => {
+        field.classList.remove('auto');
+        const item = items.find(entry => entry.id === select.value);
+        if (!item) return;
+        const hint = hintFrom(item);
+        const siblings = {};
+        for (const other of state.available) {
+          if (other === key) continue;
+          const match = bestMatch(accountItems(other), hint);
+          if (match) siblings[SOURCES[other].select] = match.id;
+        }
+        markMatched(siblings, { overwrite: false });
+      };
       field.append(select);
     }
     if (key === 'google_ads') {
@@ -281,7 +336,9 @@ function openSheet() {
   $('scrim').hidden = false;
   slideIn(sheet.querySelector('.sheet-panel'));
   fadeIn($('scrim'), { duration: 200 });
-  if (!state.accounts) loadAccounts();
+  // Redraw from the current choices: they may have been picked automatically after the
+  // picker was last drawn, and stale dropdowns would drop them on "Build dashboard".
+  if (state.accounts) renderSheet(); else loadAccounts();
   setTimeout(() => sheet.querySelector('select, button')?.focus(), 60);
 }
 async function closeSheet() {
@@ -330,6 +387,7 @@ async function loadSource(key) {
     if (result.isError) throw new Error(result.structuredContent?.error || 'This source could not be loaded.');
     const data = result.structuredContent;
     if (!data?.sources?.[key]) throw new Error('The source returned no data.');
+    adoptCorrections({ [key]: data.sources[key] });
     snap.sources[key] = data.sources[key];
     snap.selection = { ...snap.selection, options: { ...(snap.selection.options || {}), [key]: options?.[key] } };
     render();
@@ -372,8 +430,23 @@ function setBusy(value) {
   if (value && !state.snapshot) renderSkeleton();
 }
 
+// The server can correct a requested account (for example a guessed Search Console address);
+// keep the corrected ID so the next load asks for the right one.
+function adoptCorrections(sources) {
+  let changed = false;
+  for (const [key, source] of Object.entries(sources || {})) {
+    const param = SOURCES[key]?.select;
+    if (param && source?.requestedAccount && source.account && state.selection[param] !== source.account) {
+      state.selection[param] = source.account;
+      changed = true;
+    }
+  }
+  if (changed) saveSelection();
+}
+
 function accept(data) {
   if (!data?.sources) return;
+  adoptCorrections(data.sources);
   state.snapshot = data;
   if (data.available) state.available = data.available.filter(key => SOURCES[key]);
   if (state.view !== 'overview' && !data.sources[state.view]) state.view = 'overview';
@@ -1039,6 +1112,14 @@ function summaryFor(key) {
   return out;
 }
 
+// The same dashboard runs in ChatGPT and Claude; name the assistant the user is talking to.
+function assistantName() {
+  const label = `${host.hostInfo?.name || ''} ${host.hostInfo?.title || ''}`;
+  if (/claude|anthropic/i.test(label)) return 'Claude';
+  if (/chatgpt|openai/i.test(label) || window.openai) return 'ChatGPT';
+  return 'your assistant';
+}
+
 async function ask() {
   if (!state.snapshot || state.busy) return;
   const label = state.view === 'overview' ? 'cross-channel overview' : `${SOURCES[state.view].full} view`;
@@ -1049,9 +1130,9 @@ async function ask() {
   catch { prompt += `\n\nDashboard data (JSON):\n${summary}`; }
   try {
     await host.sendMessage(prompt);
-    status('Sent to ChatGPT. The analysis appears in the conversation.', 'info');
+    status(`Sent to ${assistantName()}. The analysis appears in the conversation.`, 'info');
   } catch (error) {
-    status(`Could not send to ChatGPT (${error.message}). Ask it to analyse the loaded dashboard instead.`, 'error');
+    status(`Could not send to ${assistantName()} (${error.message}). Ask it to analyse the loaded dashboard instead.`, 'error');
   }
 }
 
@@ -1091,19 +1172,54 @@ function wire() {
   $('endDate').max = end; $('startDate').max = end;
 }
 
+// First open with nothing chosen: find the accounts instead of asking. With a business name
+// (from the user's request) every matching account is used; without one, sources that have a
+// single account are. Only when nothing can be chosen does the picker open.
+let autoStarted = false;
+async function autoStart() {
+  if (autoStarted) return;
+  autoStarted = true;
+  // Tells start-up the first load is handled, so it doesn't load a second time.
+  opened = true;
+  status('Finding your accounts…', 'info');
+  const accounts = await loadAccounts();
+  if (!accounts) { openSheet(); return; }
+  const { selection, matched } = autoSelect(accounts, selectionParams(), state.hint);
+  if (!matched.length) {
+    status(state.hint ? `No accounts matched “${state.hint}”. Choose them once below.` : 'Choose your accounts once to build the dashboard.', 'info');
+    openSheet();
+    return;
+  }
+  state.selection = selection;
+  saveSelection();
+  await load();
+  // load() clears the status line; say what was chosen once it has worked.
+  if (state.snapshot && $('status').hidden) {
+    const names = matched.map(key => SOURCES[key].name).join(', ');
+    status(`${state.hint ? `Showing “${state.hint}”` : 'Showing your accounts'}: ${names}. Not right? Use Accounts at the top to change.`, 'info');
+  }
+}
+
 let opened = false;
 host.ontoolresult = result => {
   const data = result.structuredContent;
   if (data?.sources && !Array.isArray(data.sources)) return accept(data);
   if (!Array.isArray(data?.sources)) return;
-  // Result of open_marketing_dashboard: which sources this server offers, plus any accounts the model preselected.
+  // Result of open_marketing_dashboard: which sources this server offers, any accounts the
+  // model preselected, and the business the user asked about.
   state.available = data.sources.filter(key => SOURCES[key]);
+  if (data.business) state.hint = String(data.business);
   renderNav();
   const preset = Object.fromEntries(Object.entries(data.selection || {}).filter(([, value]) => value));
   if (Object.keys(preset).length) {
     state.selection = preset;
     saveSelection();
     if (state.connected && !opened) { opened = true; closeSheet(); load(); }
+  } else if (data.business && state.connected && !state.snapshot) {
+    // The business name can arrive after start-up already opened the picker.
+    autoStarted = false;
+    closeSheet();
+    autoStart();
   }
 };
 host.onhostcontextchanged = context => applyTheme(context.theme);
@@ -1116,16 +1232,17 @@ async function start() {
   try {
     await host.connect();
     state.connected = true;
+    $('ask').textContent = `Ask ${assistantName()} ↗`;
     $('refresh').disabled = false;
     applyTheme(host.hostContext.theme);
     const context = host.hostContext;
     if (context.displayMode !== 'fullscreen' && context.availableDisplayModes?.includes('fullscreen')) host.requestDisplayMode('fullscreen').catch(() => {});
     // The opener's tool result can arrive just after connecting; give it a moment before asking the user.
     await new Promise(resolve => setTimeout(resolve, 350));
-    if (opened) { loadAccounts(); return; }
+    if (opened) { if (!state.accounts && !autoStarted) loadAccounts(); return; }
     opened = true;
     const remembered = Object.values(SOURCES).some(config => state.selection[config.select]);
-    if (remembered) { load(); loadAccounts(); } else openSheet();
+    if (remembered) { load(); loadAccounts(); } else autoStart();
   } catch {
     status('This host could not connect the dashboard. Reopen it from ChatGPT.', 'error');
   }

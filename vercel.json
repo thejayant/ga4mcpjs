@@ -1,7 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/index.js": { "includeFiles": "dashboard/dist/**" }
+    "api/index.js": { "includeFiles": "{dashboard/dist/**,plugin/marketer-companion-dashboard/**}" }
   },
   "rewrites": [
     {

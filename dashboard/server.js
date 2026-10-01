@@ -185,13 +185,13 @@ export function registerDashboard(server, deps) {
       _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } }, 'openai/ui': { availableDisplayModes: ['fullscreen'], preferredDisplayMode: 'fullscreen' } } }]
   }));
   server.registerTool('open_marketing_dashboard', {
-    title: 'Marketing Dashboard', description: 'Open the marketing dashboard in ChatGPT: website traffic (GA4), organic search (Search Console), Google Ads, Merchant Center, Google Business Profile and CallRail calls, with a cross-channel overview and period comparison. Optionally pass the account IDs for one business (GA4 property, Search Console site, Ads customer, Merchant account, Business Profile location as accounts/{id}/locations/{id}, CallRail account) to open it preloaded; otherwise the user picks accounts in the dashboard.',
-    inputSchema: selectionInputs, annotations: { readOnlyHint: true },
+    title: 'Marketing Dashboard', description: 'Open the marketing dashboard: website traffic (GA4), organic search (Search Console), Google Ads, Merchant Center, Google Business Profile and CallRail calls, with a cross-channel overview and period comparison. When the user names a business or website ("dashboard for getcarports.com"), pass it as `business`; the dashboard then picks that business\'s accounts in every source by itself, so no other argument is needed. Account IDs are optional: pass them only when they were returned by list_dashboard_accounts or the list tools, copied exactly; never build one from a site or business name (Search Console properties differ by http/https/www and sc-domain). With neither, the dashboard picks single accounts automatically and asks only if it must.',
+    inputSchema: { business: z.string().trim().min(2).max(200).optional(), ...selectionInputs }, annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: DASHBOARD_URI }, 'openai/ui': { entrypoints: [{ type: 'global' }, { type: 'thread' }] } }
   }, async (raw = {}) => {
-    // Account IDs the model already knows (for example from list tools) preselect the dashboard.
-    const selection = z.object(selectionInputs).parse(raw || {});
-    return result({ version: 2, defaults: { ...dashboardRange(), compare: true }, sources: availableSources(), selection });
+    // A business name lets the dashboard match accounts itself; IDs the model already knows preselect them.
+    const { business, ...selection } = z.object({ business: z.string().trim().min(2).max(200).optional(), ...selectionInputs }).parse(raw || {});
+    return result({ version: 2, defaults: { ...dashboardRange(), compare: true }, sources: availableSources(), selection, ...(business ? { business } : {}) });
   });
 
   function availableSources() {
@@ -212,7 +212,11 @@ export function registerDashboard(server, deps) {
   }, async () => {
     const tasks = {
       ga4: source(scopes.ga4, token => report(() => listGa4Properties(token), body => (body.accountSummaries || []).flatMap(a => (a.propertySummaries || []).map(p => ({ id: p.property, name: p.displayName, account: a.displayName }))))),
-      search_console: source(scopes.search_console, token => report(() => listSearchConsoleSites(token), body => (body.siteEntry || []).map(s => ({ id: s.siteUrl, name: s.siteUrl.replace(/^sc-domain:/, '') , account: s.siteUrl.startsWith('sc-domain:') ? 'Domain property' : 'URL prefix' })))),
+      // Unverified entries are listed by Google but always refuse queries, so they are not offered.
+      // The full URL is the name because http/https/www variants are separate properties.
+      search_console: source(scopes.search_console, token => report(() => listSearchConsoleSites(token), body => (body.siteEntry || []).filter(s => s.permissionLevel !== 'siteUnverifiedUser')
+        .map(s => ({ id: s.siteUrl, name: s.siteUrl.startsWith('sc-domain:') ? s.siteUrl.slice(10) : s.siteUrl, account: s.siteUrl.startsWith('sc-domain:') ? 'Domain property' : 'URL prefix' }))
+        .sort((a, b) => a.name.localeCompare(b.name)))),
       google_ads: source(scopes.google_ads, token => report(() => listGoogleAdsAccessibleCustomers(token), body => (body.resourceNames || []).map(id => ({ id: id.replace('customers/', ''), name: id.replace('customers/', '').replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3') })))),
       merchant_center: source(scopes.merchant_center, token => report(() => listMerchantAccounts(token, { pageSize: 500 }), body => (body.accounts || []).map(a => ({ id: a.accountId, name: a.accountName || a.accountId, account: a.homePageUri?.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '') }))))
     };
@@ -294,11 +298,17 @@ export function registerDashboard(server, deps) {
     }));
 
     if (params.siteUrl) add('search_console', source(scopes.search_console, async token => {
+      // The site may come from ChatGPT's guess ("getcarports.com") rather than the picker, and
+      // Search Console treats every protocol/www/domain variant as a separate property. Resolve
+      // it to a property this user can actually read before querying.
+      const listed = await listSearchConsoleSites(token).catch(() => null);
+      const siteUrl = listed?.ok ? matchSearchConsoleSite(params.siteUrl, listed.body?.siteEntry || []) : params.siteUrl;
+      if (!siteUrl) return { status: 'error', account: params.siteUrl, message: `No Search Console property you can read matches "${params.siteUrl}". Pick the site in Accounts.` };
       const o = options.search_console || {};
       const searchType = o.searchType || 'web';
       const filters = gscFilters(o);
       const run = (dimensions, dates = current, rowLimit = 10) => report(() => querySearchConsole(token, {
-        siteUrl: params.siteUrl, ...dates, dimensions, rowLimit, dataState: 'final', type: searchType, aggregationType: 'auto',
+        siteUrl, ...dates, dimensions, rowLimit, dataState: 'final', type: searchType, aggregationType: 'auto',
         dimensionFilterGroups: filters.length ? [{ groupType: 'and', filters }] : undefined
       }), body => ({ rows: (body.rows || []).map(row => ({ [dimensions[0] === 'date' ? 'date' : 'label']: row.keys?.[0] || '', clicks: row.clicks, impressions: row.impressions, ctr: row.ctr, position: row.position })), limited: (body.rows || []).length === rowLimit }));
       const breakdown = o.breakdown || 'query';
@@ -307,7 +317,7 @@ export function registerDashboard(server, deps) {
         run([]), compare ? run([], previous) : null, run(['date'], current, 366), compare ? run(['date'], previous, 366) : null,
         run([breakdown], current, o.limit || 10), breakdown === 'searchAppearance' ? null : run([secondary]), run(['device'], current, 5)
       ]);
-      return { status: 'ready', account: params.siteUrl, timeZone: 'America/Los_Angeles', options: { ...o, breakdown, searchType },
+      return { status: 'ready', account: siteUrl, ...(siteUrl !== params.siteUrl ? { requestedAccount: params.siteUrl } : {}), timeZone: 'America/Los_Angeles', options: { ...o, breakdown, searchType },
         totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, [secondary === 'page' ? 'pages' : 'queries']: second, devices };
     }));
 
@@ -429,6 +439,18 @@ export function registerDashboard(server, deps) {
         'Business Profile keyword counts below 15 are shown as a threshold, not an exact number.',
         'The default range ends three days ago to allow for reporting delay. Recent days may still be revised.'] });
   });
+}
+
+// Maps a requested site to a Search Console property the user can read. An exact, usable
+// match wins; otherwise any variant of the same host (domain property first, then
+// https://www, https, http). Unverified entries are skipped because they refuse queries.
+const siteKey = value => String(value || '').trim().toLowerCase().replace(/^sc-domain:/, '').replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+export function matchSearchConsoleSite(requested, entries) {
+  const usable = entries.filter(entry => entry.permissionLevel !== 'siteUnverifiedUser').map(entry => entry.siteUrl);
+  if (usable.includes(requested)) return requested;
+  const key = siteKey(requested);
+  const rank = url => url.startsWith('sc-domain:') ? 0 : url.startsWith('https://www.') ? 1 : url.startsWith('https://') ? 2 : 3;
+  return usable.filter(url => siteKey(url) === key).sort((a, b) => rank(a) - rank(b))[0] || null;
 }
 
 // GA4 filters: exact match for picked values, "contains" for typed ones.

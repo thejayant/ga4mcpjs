@@ -35,7 +35,7 @@ export function fixtureDeps(overrides = {}) {
     withVerifiedToolAuth: async (req, scopes, handler) => handler({ googleCredentials: { accessToken: 'test-only' } }),
     buildToolResult: (payload, isError = false) => ({ structuredContent: payload, isError }),
     listGa4Properties: async () => ({ ok: true, body: { accountSummaries: [{ displayName: 'Carport Direct', propertySummaries: [{ property: 'properties/269500556', displayName: 'Carport Direct GA4' }] }] } }),
-    listSearchConsoleSites: async () => ({ ok: true, body: { siteEntry: [{ siteUrl: 'sc-domain:carportdirect.com' }] } }),
+    listSearchConsoleSites: async () => ({ ok: true, body: { siteEntry: [{ siteUrl: 'sc-domain:carportdirect.com', permissionLevel: 'siteOwner' }, { siteUrl: 'https://www.getcarports.com/', permissionLevel: 'siteOwner' }, { siteUrl: 'https://unverified.example/', permissionLevel: 'siteUnverifiedUser' }] } }),
     listGoogleAdsAccessibleCustomers: async () => ({ ok: true, body: { resourceNames: ['customers/2756458445'] } }),
     runGa4Report: async (token, params) => { calls.ga4.push(params); return { ok: true, body: ga4Body(params) }; },
     querySearchConsole: async (token, params) => {
