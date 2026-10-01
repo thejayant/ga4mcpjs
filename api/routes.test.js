@@ -105,7 +105,7 @@ test("authenticated MCP exposes the dashboard resource and opener without upstre
   };
   const tools = await rpc('tools/list', {});
   const opener = tools.tools.find(tool => tool.name === 'open_marketing_dashboard');
-  assert.equal(opener._meta.ui.resourceUri, 'ui://marketing/dashboard-v1.html');
+  assert.equal(opener._meta.ui.resourceUri, 'ui://marketing/dashboard-v2.html');
   const read = await rpc('resources/read', { uri: opener._meta.ui.resourceUri });
   assert.match(read.contents[0].text, /Marketer Companion/);
   const opened = await rpc('tools/call', { name: opener.name, arguments: {} });

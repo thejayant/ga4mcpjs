@@ -5425,9 +5425,13 @@ function createServer(req) {
   const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" });
   if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
     req, withVerifiedToolAuth, buildToolResult,
-    scopes: { ga4: GA4_SCOPE, search_console: SEARCH_CONSOLE_SCOPE, google_ads: GOOGLE_ADS_SCOPE },
+    scopes: { ga4: GA4_SCOPE, search_console: SEARCH_CONSOLE_SCOPE, google_ads: GOOGLE_ADS_SCOPE, merchant_center: MERCHANT_CENTER_SCOPE, gbp: GBP_SCOPE },
     listGa4Properties, listSearchConsoleSites, listGoogleAdsAccessibleCustomers,
-    runGa4Report, querySearchConsole, queryGoogleAds
+    runGa4Report, querySearchConsole, queryGoogleAds,
+    listMerchantAccounts, searchMerchantReports, getMerchantProductStatusSummary,
+    gbpEnabled: GBP_ENABLED,
+    withCallRail: (handler) => withCallRailTool(req, handler),
+    listCallRailAccounts, getCallRailCallSummary, getCallRailCallTimeseries
   });
   if (GBP_ENABLED) registerGbpTools(server, { req, withVerifiedToolAuth, buildToolResult });
   server.registerTool("list_marketing_presets", {

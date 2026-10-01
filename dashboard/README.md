@@ -6,20 +6,34 @@ in place. No OpenAI API key or additional backend database is required.
 
 ## Included
 
-- `open_marketing_dashboard`: ChatGPT global sidebar and conversation panel entrypoints.
-- `list_dashboard_accounts`: available GA4 properties, Search Console sites and Ads IDs.
-- `get_marketing_dashboard`: authenticated reports for selected accounts.
-- Three views: website traffic, organic search, paid campaigns.
-- Dates, previous-period comparisons, trends, top-ten breakdowns and chat analysis.
-- Responsive layout and host-provided light/dark theme.
+- `open_marketing_dashboard`: ChatGPT global sidebar and conversation entrypoints.
+  ChatGPT can pass account IDs for one business so the dashboard opens preloaded.
+- `list_dashboard_accounts`: GA4 properties, Search Console sites, Google Ads
+  customers, Merchant Center accounts, Business Profile locations and CallRail accounts.
+- `get_marketing_dashboard`: authenticated reports for the selected accounts.
+- Views: a cross-channel **Overview** with ranked signals (biggest movers, product
+  disapprovals, unanswered reviews, missed calls, spend rising while conversions fall),
+  then Website (GA4), Organic search (GSC), Google Ads, Merchant Center, Business
+  Profile and Calls (CallRail).
+- Every view: animated stat tiles with period deltas, a trend chart with the previous
+  period overlaid and a hover/keyboard readout, ranked tables with inline bars, and
+  share bars. Merchant shows product status per destination and the issues to fix;
+  Business Profile shows reviews, actions and search keywords; CallRail shows answer
+  rate, sources and campaigns.
+- Motion: staggered reveals, count-up figures, line drawing and sheet transitions via
+  the Web Animations API. Readers who prefer reduced motion get the final view at once.
+- Light and dark themes from the host, responsive down to phone width.
 
-The first version includes GA4, Search Console and Google Ads. It does not
-include Meta, Merchant Center, CallRail or GBP dashboard views.
+Business Profile appears only when `ENABLE_GBP` is on. CallRail uses the connection's
+own CallRail token (or the internal server's token on `/cbx`); without one, that source
+reports "connect CallRail" and every other source still loads.
 
 ## Build and deploy
 
 1. Apply the supplied Git patch to the repository, or copy the changed source files.
-2. Run `npm ci`, `npm run build:dashboard`, and `npm test`.
+2. Run `npm run build:dashboard` (no packages needed; esbuild minifies if installed),
+   then `npm test`. `node dashboard/preview.mjs <playwright index.mjs> <out dir>` renders
+   every view in a simulated host with test fixtures and saves screenshots.
 3. Commit and push the change to the branch Vercel deploys, or merge the reviewed
    feature branch into that branch. Keep all existing Vercel environment variables.
 4. The dashboard is disabled by default. Test the existing MCP tools first.
@@ -85,11 +99,12 @@ they do not prove live Google reporting or OAuth compatibility.
 
 ## Maintain
 
-The frontend uses MCP Apps SDK `@modelcontextprotocol/ext-apps` 1.2.0, compatible
-with this repository's Zod 3 stack. The HTML has no external script, font or
-image dependencies. OpenAI UI metadata follows the published MCP Extensions
-display-mode and entrypoint definitions.
+The frontend has no runtime dependencies. `bridge.js` speaks the MCP Apps protocol
+(JSON-RPC over `postMessage`: `ui/initialize`, `tools/call`, `ui/message`,
+`ui/update-model-context`, tool-result and host-context notifications) directly, and
+`motion.js` uses the Web Animations API, so the built page is about 90 KB instead of
+500 KB and makes no external requests. `build.js` inlines `app.js` and the modules it
+imports, each in its own scope.
 
-## Dashboard motion
-
-GSAP is bundled into the dashboard HTML at build time; the deployed widget loads no animation CDN and makes no extra server calls. Source changes use a short staggered KPI reveal, a gentle panel rise and an SVG line draw. Values always show the final reported numbers. Switching sources cancels and restores the previous animation before rendering the next view. Motion is disabled for `prefers-reduced-motion`, including when the preference changes while the widget is open.
+The resource URI carries a version (`ui://marketing/dashboard-v2.html`) because hosts
+cache UI resources by URI. Bump it whenever the HTML changes in a way users must see.
