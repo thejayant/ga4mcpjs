@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { GBP_SCOPE } from "../MCP GBP/client.js";
 import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
+import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
 
 const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
@@ -5422,6 +5423,12 @@ function isToolCall(body) {
 
 function createServer(req) {
   const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" });
+  if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
+    req, withVerifiedToolAuth, buildToolResult,
+    scopes: { ga4: GA4_SCOPE, search_console: SEARCH_CONSOLE_SCOPE, google_ads: GOOGLE_ADS_SCOPE },
+    listGa4Properties, listSearchConsoleSites, listGoogleAdsAccessibleCustomers,
+    runGa4Report, querySearchConsole, queryGoogleAds
+  });
   if (GBP_ENABLED) registerGbpTools(server, { req, withVerifiedToolAuth, buildToolResult });
   server.registerTool("list_marketing_presets", {
     title: "List Marketing Presets",
@@ -8152,7 +8159,7 @@ app.get("/", (req, res) => {
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
     scopes: GOOGLE_SCOPES,
-    tools: [...Object.keys(TOOL_SCOPE_MAP), ...EXPERT_TOOL_NAMES, ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])],
+    tools: [...Object.keys(TOOL_SCOPE_MAP), ...EXPERT_TOOL_NAMES, ...(isFeatureEnabled("ENABLE_MARKETING_DASHBOARD") ? DASHBOARD_TOOLS : []), ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])],
     optionalCallRailTools: CALLRAIL_TOOL_NAMES,
     presets: buildMarketingPresetCatalog()
   });

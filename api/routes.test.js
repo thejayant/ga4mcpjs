@@ -89,6 +89,50 @@ test("public catalog does not advertise shared CallRail tools", async () => {
   assert.equal(body.optionalCallRailTools.includes("list_callrail_calls"), true);
 });
 
+test("authenticated MCP exposes the dashboard resource and opener without upstream requests", async () => {
+  const previousDashboardFlag = process.env.ENABLE_MARKETING_DASHBOARD;
+  process.env.ENABLE_MARKETING_DASHBOARD = 'true';
+  try {
+  const resource = `${baseUrl}/mcp`;
+  const token = issueToken(resource);
+  const rpc = async (method, params) => {
+    const response = await fetch(resource, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+    });
+    assert.equal(response.status, 200);
+    const json = await response.json(); assert.equal(json.error, undefined); return json.result;
+  };
+  const tools = await rpc('tools/list', {});
+  const opener = tools.tools.find(tool => tool.name === 'open_marketing_dashboard');
+  assert.equal(opener._meta.ui.resourceUri, 'ui://marketing/dashboard-v1.html');
+  const read = await rpc('resources/read', { uri: opener._meta.ui.resourceUri });
+  assert.match(read.contents[0].text, /Marketer Companion/);
+  const opened = await rpc('tools/call', { name: opener.name, arguments: {} });
+  assert.equal(opened.structuredContent.defaults.days, 28);
+  } finally {
+    if (previousDashboardFlag === undefined) delete process.env.ENABLE_MARKETING_DASHBOARD;
+    else process.env.ENABLE_MARKETING_DASHBOARD = previousDashboardFlag;
+  }
+});
+
+test("dashboard is absent from the catalog and authenticated tools when disabled", async () => {
+  const previousDashboardFlag = process.env.ENABLE_MARKETING_DASHBOARD;
+  process.env.ENABLE_MARKETING_DASHBOARD = 'false';
+  try {
+    const catalog = await (await fetch(baseUrl)).json();
+    assert.equal(catalog.tools.includes('open_marketing_dashboard'), false);
+    const resource = `${baseUrl}/mcp`;
+    const tools = await listTools(resource, issueToken(resource));
+    assert.equal(tools.includes('get_marketing_dashboard'), false);
+    assert.equal(tools.includes('run_ga4_report'), true);
+    assert.equal(tools.includes('list_search_console_sites'), true);
+  } finally {
+    if (previousDashboardFlag === undefined) delete process.env.ENABLE_MARKETING_DASHBOARD;
+    else process.env.ENABLE_MARKETING_DASHBOARD = previousDashboardFlag;
+  }
+});
+
 test("internal route starts OAuth and requires a separate approval after Google", async () => {
   const noOauth = await fetch(`${baseUrl}/cbx`);
   assert.equal(noOauth.status, 401);

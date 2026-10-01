@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "marketer-companion-dashboard",
+  "version": "0.1.0",
+  "description": "A marketing dashboard using the existing Marketing Data MCP server.",
+  "author": {
+    "name": "TheJayant"
+  },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Marketer Companion Dashboard",
+        "shortDescription": "Traffic, search & ad insights",
+        "longDescription": "Review GA4, Search Console and Google Ads with date comparisons, trend charts and account selectors. The dashboard UI requires the accompanying server update to be deployed to ga4mcpjs.vercel.app. Connect your account through the server\u2019s existing OAuth flow.",
+        "developerName": "TheJayant",
+        "category": "Productivity",
+        "capabilities": [
+          "Interactive"
+        ],
+        "defaultPrompt": "Open my marketing dashboard using open_marketing_dashboard.",
+        "logo": "./assets/icon.svg",
+        "composerIcon": "./assets/icon.svg"
+      }
+    }
+  }
+}
