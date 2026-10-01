@@ -13,8 +13,24 @@ in place. No OpenAI API key or additional backend database is required.
 - `get_marketing_dashboard`: authenticated reports for the selected accounts.
 - Views: a cross-channel **Overview** with ranked signals (biggest movers, product
   disapprovals, unanswered reviews, missed calls, spend rising while conversions fall),
-  then Website (GA4), Organic search (GSC), Google Ads, Merchant Center, Business
-  Profile and Calls (CallRail).
+  then GA4, GSC, Google Ads, Merchant Center, Business Profile and CallRail, each shown
+  with its official product logo. Full width shows logo and name; below 1100px the
+  navigation is a single row of logos (name in the tooltip and accessible label).
+- Per-source filters and breakdowns, applied server-side to totals, trends and tables:
+  - GA4: key event, channel group, source, medium, campaign, landing page, device,
+    country; break down by channel, source, medium, source/medium, campaign, landing
+    page, device, country, city, event name or new vs returning.
+  - GSC: search type, query and page (contains, excludes, exact, regex), country,
+    device; break down by query, page, country, device or search appearance.
+  - Google Ads: campaign status, type and name; break down by campaign, ad group,
+    keyword, search term, device, network, conversion action or weekday. Totals are
+    summed from the daily query, so a view costs two or three Ads requests.
+  - Merchant Center: listing type and country; break down by product, brand, category,
+    product type, country or listing type.
+  - CallRail: direction, caller device and lead status; break down by source, campaign,
+    keyword, referrer, landing page or company.
+- Top 10/25/50 rows, sortable columns and a Customize panel to choose KPI tiles.
+  Filters, breakdowns and tile choices are remembered on the device.
 - Every view: animated stat tiles with period deltas, a trend chart with the previous
   period overlaid and a hover/keyboard readout, ranked tables with inline bars, and
   share bars. Merchant shows product status per destination and the issues to fix;
@@ -32,7 +48,9 @@ reports "connect CallRail" and every other source still loads.
 
 1. Apply the supplied Git patch to the repository, or copy the changed source files.
 2. Run `npm run build:dashboard` (no packages needed; esbuild minifies if installed),
-   then `npm test`. `node dashboard/preview.mjs <playwright index.mjs> <out dir>` renders
+   then `npm test`. `node dashboard/devhost.mjs` serves the built dashboard at
+   http://localhost:4318 inside a simulated host backed by the test fixtures.
+   `node dashboard/preview.mjs <playwright index.mjs> <out dir>` renders
    every view in a simulated host with test fixtures and saves screenshots.
 3. Commit and push the change to the branch Vercel deploys, or merge the reviewed
    feature branch into that branch. Keep all existing Vercel environment variables.
@@ -102,9 +120,11 @@ they do not prove live Google reporting or OAuth compatibility.
 The frontend has no runtime dependencies. `bridge.js` speaks the MCP Apps protocol
 (JSON-RPC over `postMessage`: `ui/initialize`, `tools/call`, `ui/message`,
 `ui/update-model-context`, tool-result and host-context notifications) directly, and
-`motion.js` uses the Web Animations API, so the built page is about 90 KB instead of
+`motion.js` uses the Web Animations API, so the built page is about 120 KB instead of
 500 KB and makes no external requests. `build.js` inlines `app.js` and the modules it
-imports, each in its own scope.
+imports, each in its own scope. `logos.js` embeds the official product marks as data URIs: GA4, Google Ads,
+Search Console, Merchant Center and Business Profile from Google's gstatic.com
+product-logo files, CallRail from callrail.com. Replace them there if a brand changes.
 
-The resource URI carries a version (`ui://marketing/dashboard-v2.html`) because hosts
+The resource URI carries a version (`ui://marketing/dashboard-v3.html`) because hosts
 cache UI resources by URI. Bump it whenever the HTML changes in a way users must see.

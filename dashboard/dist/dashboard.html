@@ -44,18 +44,27 @@ button:disabled{cursor:default;opacity:.5}
 [hidden]{display:none!important}
 
 /* Shell */
-.app{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100vh}
+.app{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:100vh}
 .sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:22px;padding:22px 14px;border-right:1px solid var(--border);background:var(--surface)}
 .brand{display:flex;align-items:center;gap:11px;padding:0 8px}
-.mark{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;font-weight:800;font-size:13px;letter-spacing:-.3px;color:#fff;background:conic-gradient(from 200deg,var(--s1),var(--s3),var(--s4),var(--s2),var(--s1));box-shadow:0 6px 16px -6px var(--s1)}
+.mark{width:34px;height:34px;flex:none;display:block;border-radius:9px;box-shadow:0 6px 16px -6px #22b45c}
 .brand-name{font-weight:700;letter-spacing:-.2px}
 .brand-tag{font-size:11.5px;color:var(--muted)}
+.credit-link{color:var(--accent);text-decoration:none;font-weight:600}
+.credit-link:hover{text-decoration:underline}
+.brand-credit{display:inline-block;margin-top:2px;font-size:11.5px}
+.credit{margin:18px 0 0;padding-top:14px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
 nav{display:flex;flex-direction:column;gap:2px}
 .nav-item{position:relative;display:flex;align-items:center;gap:11px;border:0;background:transparent;padding:9px 10px;border-radius:10px;color:var(--ink-2);text-align:left;transition:background .2s,color .2s}
 .nav-item:hover{background:var(--surface-2);color:var(--ink)}
 .nav-item[aria-current=true]{background:var(--accent-wash);color:var(--ink);font-weight:600}
 .nav-item[aria-current=true]::before{content:"";position:absolute;left:-14px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
-.nav-label{flex:1}
+.nav-text{display:flex;flex-direction:column;flex:1;min-width:0;line-height:1.25}
+.nav-label{font-weight:600;color:var(--ink)}
+.nav-sub{font-size:11px;color:var(--muted);font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nav-badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;display:grid;place-items:center}
+.logo{width:22px;height:22px;flex:none;display:block;object-fit:contain}.logo.sm{width:16px;height:16px}.logo.lg{width:40px;height:40px}.logo.mono{color:var(--ink-2)}
+.title-logo{width:26px;height:26px}
 .nav-dot{width:7px;height:7px;border-radius:50%;background:var(--axis)}
 .nav-dot.ready{background:var(--status-good)}
 .nav-dot.error{background:var(--critical)}
@@ -63,7 +72,11 @@ nav{display:flex;flex-direction:column;gap:2px}
 .icon.sm{width:15px;height:15px}.icon.lg{width:34px;height:34px;color:var(--muted)}
 .sidebar-foot{margin-top:auto;font-size:11.5px;color:var(--muted);padding:0 8px;line-height:1.6}
 
-main{min-width:0;position:relative}
+/* Desktop: the date bar and the actions share one sticky row above the content. */
+main{min-width:0;position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;align-content:start}
+.content{grid-column:1/-1}
+.actions{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:8px;padding:14px 28px 14px 0;background:color-mix(in srgb,var(--page) 82%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--border)}
+.btn-label{white-space:nowrap}
 main::before{content:"";position:absolute;inset:0 0 auto;height:320px;pointer-events:none;background:radial-gradient(60% 100% at 15% 0,var(--accent-wash),transparent 70%),radial-gradient(40% 80% at 90% 0,rgba(27,175,122,.07),transparent 70%)}
 .topbar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:14px 28px;background:color-mix(in srgb,var(--page) 82%,transparent);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--border)}
 .period{flex:1;min-width:200px;font-size:12.5px;color:var(--ink-2);font-variant-numeric:tabular-nums}
@@ -86,9 +99,10 @@ main::before{content:"";position:absolute;inset:0 0 auto;height:320px;pointer-ev
 .primary{border:0;background:var(--accent);color:var(--accent-ink);padding:9px 16px;border-radius:10px;font-weight:600;box-shadow:0 6px 18px -8px var(--accent);transition:transform .15s,filter .2s}
 .primary:hover:not(:disabled){filter:brightness(1.08)}
 .primary:active:not(:disabled){transform:scale(.97)}
+.primary.small{padding:7px 14px;font-size:12.5px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-.content{position:relative;max-width:1320px;margin:0 auto;padding:26px 28px 40px}
+.content{position:relative;width:100%;max-width:1320px;margin:0 auto;padding:26px 28px 40px}
 .status{margin:0 0 16px;padding:11px 14px;border-radius:12px;font-size:13px;background:var(--surface);border:1px solid var(--border);color:var(--ink-2);white-space:pre-line}
 .status[data-tone=error]{border-color:color-mix(in srgb,var(--critical) 45%,transparent);background:var(--bad-wash);color:var(--ink)}
 #view{transition:opacity .3s}
@@ -96,7 +110,7 @@ body.busy #view:not(.skeleton-view){opacity:.5;pointer-events:none}
 
 /* Headings */
 .view-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:18px}
-.view-title{margin:0;font-size:26px;font-weight:700;letter-spacing:-.7px}
+.view-title{margin:0;font-size:26px;font-weight:700;letter-spacing:-.7px;display:flex;align-items:center;gap:11px}
 .view-sub{margin:4px 0 0;color:var(--ink-2);font-size:13px;overflow-wrap:anywhere}
 .eyebrow{font-size:11px;letter-spacing:1.6px;text-transform:uppercase;font-weight:700;color:var(--accent)}
 
@@ -121,6 +135,7 @@ body.busy #view:not(.skeleton-view){opacity:.5;pointer-events:none}
 .panel.wide{grid-column:1/-1}
 .panel-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
 .panel-head h3{margin:0}
+.panel-head .segmented{flex-wrap:wrap;max-width:100%}
 .panel-note{margin:10px 0 0;font-size:11.5px;color:var(--muted)}
 .panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px;align-items:start}
 #view > .panel{margin-bottom:0}
@@ -156,10 +171,42 @@ body.busy #view:not(.skeleton-view){opacity:.5;pointer-events:none}
 .legend-key{width:16px;height:0;border-top:2.2px solid var(--series-1)}
 .legend-key.previous{border-top:2px dashed var(--muted)}
 
+/* Filters, breakdowns, customise */
+.filter-panel,.customizer{margin-bottom:14px}
+.filter-panel .panel-head{margin-bottom:14px;flex-wrap:nowrap}
+.filter-panel.collapsed{padding:12px 18px}
+.filter-panel.collapsed .panel-head{margin-bottom:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px;flex:1;min-width:0;justify-content:flex-end}
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);background:var(--accent-wash);border-radius:999px;padding:3px 5px 3px 10px;font-size:12px;max-width:100%}
+.chip strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
+.chip-key{color:var(--ink-2);white-space:nowrap}
+.chip-x{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;color:var(--ink-2);font-size:14px;line-height:1}
+.chip:hover .chip-x{background:var(--surface);color:var(--ink)}
+.chips-empty{font-size:12px;color:var(--muted)}
+.filter-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;align-items:end}
+.filter-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.filter-label{font-size:11.5px;font-weight:600;color:var(--ink-2)}
+.filter-field input,.filter-field select,.inline-select{width:100%;min-width:0;padding:7px 9px;border-radius:9px;border:1px solid var(--border);background:var(--raise);font-size:12.5px}
+.filter-field input:invalid{border-color:var(--critical)}
+.filter-match{display:flex;gap:6px;min-width:0}
+.filter-match select{width:auto;max-width:48%;flex:none}
+.filter-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px}
+.panel-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.inline-select{width:auto;font-weight:600;background:var(--surface-2)}
+.toggle-list{display:flex;flex-wrap:wrap;gap:8px}
+.toggle{border:1px solid var(--border);background:var(--surface);border-radius:999px;padding:5px 12px;font-size:12.5px;color:var(--ink-2);transition:background .2s,color .2s}
+.toggle[aria-pressed=true]{background:var(--accent);border-color:transparent;color:var(--accent-ink);font-weight:600}
+.filtered-tag{font-size:10.5px;font-weight:700;color:var(--accent);background:var(--accent-wash);padding:2px 8px;border-radius:999px}
+.hidden-slot{display:none}
+
 /* Ranked table */
 .table-scroll{overflow-x:auto}
 .ranked{width:100%;border-collapse:collapse;font-size:12.5px}
-.ranked th{font-size:11px;font-weight:600;color:var(--muted);text-align:left;padding:0 8px 8px;border-bottom:1px solid var(--grid)}
+.ranked th{font-size:11px;font-weight:600;color:var(--muted);text-align:left;padding:0 8px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+.sort{border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer}
+.sort:hover,th[aria-sort] .sort{color:var(--ink)}
+th[aria-sort=descending] .sort::after{content:' \2193'}th[aria-sort=ascending] .sort::after{content:' \2191'}
+.label-detail{display:block;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ranked td{padding:9px 8px;border-bottom:1px solid var(--grid);vertical-align:middle}
 .ranked tr:last-child td{border-bottom:0}
 .ranked tbody tr{transition:background .15s}
@@ -273,26 +320,86 @@ body.busy #view:not(.skeleton-view){opacity:.5;pointer-events:none}
 .sheet-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px;border-top:1px solid var(--border)}
 .footer{margin-top:28px;font-size:11.5px;color:var(--muted);line-height:1.8}
 
-@media (max-width:920px){
-  .app{grid-template-columns:1fr}
-  .sidebar{position:sticky;top:0;z-index:6;height:auto;flex-direction:row;align-items:center;gap:10px;padding:10px 12px;border-right:0;border-bottom:1px solid var(--border);overflow-x:auto}
-  .brand-text,.sidebar-foot{display:none}
-  nav{flex-direction:row}
-  .nav-item{white-space:nowrap;padding:7px 10px}
+/* Below desktop width the sidebar becomes a single header row of logo-only tabs.
+   Names stay available as the tab's accessible name and tooltip; the view title
+   below the header always names the open source. */
+@media (max-width:1100px){
+  /* One app bar: tabs on the left, actions on the right; dates and Compare below. */
+  .app{grid-template-columns:minmax(0,1fr) auto}
+  main{display:contents}
+  main::before{display:none}
+  .sidebar{grid-column:1;grid-row:1;position:sticky;top:0;z-index:6;height:auto;flex-direction:row;align-items:center;gap:14px;padding:10px 20px;border-right:0;border-bottom:1px solid var(--border);min-width:0}
+  .actions{grid-column:2;grid-row:1;z-index:6;padding:10px 20px 10px 0;background:var(--surface);backdrop-filter:none;-webkit-backdrop-filter:none}
+  .topbar{grid-column:1/-1;grid-row:2;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none}
+  .content{grid-row:3;width:100%}
+  .brand{padding:0}
+  .brand-text,.sidebar-foot,.nav-text{display:none}
+  /* The open tab names itself; the others stay logo-only. */
+  .nav-item[aria-current=true]{width:auto;padding:0 14px 0 10px;gap:8px}
+  .nav-item[aria-current=true] .nav-text{display:flex}
+  .nav-sub{display:none}
+  .btn-label{display:none}
+  #accounts{padding:7px 9px}
+  nav{flex-direction:row;gap:6px;min-width:0}
+  .nav-item{position:relative;width:44px;height:44px;padding:0;justify-content:center;border:1px solid transparent;border-radius:12px}
+  .nav-item[aria-current=true]{background:var(--accent-wash);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
   .nav-item[aria-current=true]::before{display:none}
-  .topbar{position:static;padding:12px 16px}
+  .nav-item .logo{width:24px;height:24px}
+  .nav-dot{display:none}
+  .nav-dot.error{display:block;position:absolute;right:2px;top:2px;width:10px;height:10px;border:2px solid var(--surface)}
+  .nav-badge{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;font-size:10px;border:2px solid var(--surface)}
+  .topbar{position:static;padding:12px 20px}
+}
+@media (max-width:920px){
   .content{padding:18px 16px 32px}
+  .topbar{padding:12px 16px}
+  .sidebar{padding:10px 16px}
   .panels{grid-template-columns:1fr}
   .tile-value{font-size:24px}
   .welcome{padding:28px 20px}.welcome h2{font-size:26px}
 }
-@media (max-width:620px){.signal-list{grid-template-columns:1fr}.signal{grid-template-columns:26px 1fr;align-items:start}.signal-source{grid-column:2;justify-self:start}}
-@media (max-width:480px){.tiles{grid-template-columns:1fr 1fr}.nav-label{display:none}.nav-item[aria-current=true] .nav-label{display:inline}}
+.view-period{display:none;margin:6px 0 0;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+@media (max-width:1100px){
+  .app.one-row{grid-template-columns:minmax(0,1fr) auto auto}
+  .app.one-row .topbar{grid-column:2;grid-row:1;position:sticky;top:0;z-index:6;padding:10px 14px;background:var(--surface);border-bottom:1px solid var(--border)}
+  .app.one-row .actions{grid-column:3}
+  .app.one-row .content{grid-row:2}
+  .app.one-row .period{display:none}
+  .app.one-row .view-period{display:block}
+  .app.tight .nav-item[aria-current=true]{width:44px;padding:0}
+  .app.tight .nav-item[aria-current=true] .nav-text{display:none}
+  .nav-item{flex-shrink:0}
+}
+@media (max-width:800px){
+  .nav-item[aria-current=true]{width:44px;padding:0}
+  .nav-item[aria-current=true] .nav-text{display:none}
+  .btn-label{display:none}
+  #accounts{padding:7px 9px}
+}
+@media (max-width:620px){
+  .app{grid-template-columns:minmax(0,1fr)}
+  .sidebar{position:static;gap:10px;border-bottom:0;padding-bottom:4px}
+  .actions{grid-column:1;grid-row:2;position:static;padding:6px 16px 10px;border-bottom:1px solid var(--border)}
+  .actions .primary{flex:1}
+  .topbar{grid-row:3}
+  .content{grid-row:4}
+  .nav-item[aria-current=true]{width:38px}
+  nav{gap:4px}
+  .nav-item{width:38px;height:38px;border-radius:10px}
+  .nav-item .logo{width:22px;height:22px}
+  .mark{width:30px;height:30px}
+  .signal-list{grid-template-columns:1fr}.signal{grid-template-columns:26px 1fr;align-items:start}.signal-source{grid-column:2;justify-self:start}
+  .chips{justify-content:flex-start}
+  .filter-panel .panel-head{flex-wrap:wrap}
+  .view-head{flex-wrap:wrap;align-items:center}
+}
+@media (max-width:360px){.mark{display:none}}
+@media (max-width:480px){.tiles{grid-template-columns:1fr 1fr!important}.filter-grid{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 </style></head><body>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand"><div class="mark" aria-hidden="true">MC</div><div class="brand-text"><div class="brand-name">Marketer Companion</div><div class="brand-tag">All channels, one view</div></div></div>
+    <div class="brand"><svg class="mark" viewBox="0 0 600 600" aria-hidden="true"><defs><linearGradient id="mark-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2dcb6f"/><stop offset="1" stop-color="#21b35b"/></linearGradient></defs><rect width="600" height="600" rx="150" fill="url(#mark-bg)"/><path d="M162 293h62l43-128 78 250 40-122h60" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/></svg><div class="brand-text"><div class="brand-name">Marketer Companion</div><div class="brand-tag">All channels, one view</div><a class="credit-link brand-credit" href="https://thejayant.in" target="_blank" rel="noopener">by Jayant Solanki ↗</a></div></div>
     <nav id="nav" aria-label="Dashboard views"></nav>
     <div class="sidebar-foot">Read-only. Data stays in your connected accounts.</div>
   </aside>
@@ -311,15 +418,18 @@ body.busy #view:not(.skeleton-view){opacity:.5;pointer-events:none}
           <button type="button" class="btn" id="apply-custom">Apply</button>
         </div>
         <label class="switch"><input type="checkbox" id="compare" checked>Compare</label>
-        <button type="button" class="btn" id="accounts"><svg class="icon sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M4 17h6M18 7h2M14 17h6M14 5v4M10 15v4"/></svg>Accounts</button>
-        <button type="button" class="btn icon-only" id="refresh" aria-label="Reload data" disabled><svg class="icon sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
-        <button type="button" class="primary" id="ask">Ask ChatGPT ↗</button>
       </div>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn" id="accounts" aria-label="Accounts" title="Choose accounts"><svg class="icon sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M4 17h6M18 7h2M14 17h6M14 5v4M10 15v4"/></svg><span class="btn-label">Accounts</span></button>
+      <button type="button" class="btn icon-only" id="refresh" aria-label="Reload data" title="Reload data" disabled><svg class="icon sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>
+      <button type="button" class="primary" id="ask">Ask ChatGPT ↗</button>
     </div>
     <div class="content">
       <div id="status" class="status" role="status" aria-live="polite" hidden></div>
       <div id="view"></div>
       <footer id="footer" class="footer">Live reports through your Marketing Data connection. Default: 28 days ending three days ago.</footer>
+      <p class="credit">Built by <a class="credit-link" href="https://thejayant.in" target="_blank" rel="noopener">Jayant Solanki · thejayant.in ↗</a></p>
     </div>
   </main>
 </div>
@@ -405,7 +515,15 @@ class HostBridge {
 
   callServerTool(name, args = {}) { return this.request('tools/call', { name, arguments: args }); }
   updateModelContext(params) { return this.request('ui/update-model-context', params); }
-  sendMessage(text) { return this.request('ui/message', { role: 'user', content: [{ type: 'text', text }] }); }
+  // ChatGPT also exposes its Apps SDK global; use it when the MCP Apps request is refused.
+  async sendMessage(text) {
+    try {
+      return await this.request('ui/message', { role: 'user', content: [{ type: 'text', text }] });
+    } catch (error) {
+      if (typeof window.openai?.sendFollowUpMessage !== 'function') throw error;
+      return window.openai.sendFollowUpMessage({ prompt: text });
+    }
+  }
   requestDisplayMode(mode) { return this.request('ui/request-display-mode', { mode }); }
   openLink(url) { return this.request('ui/open-link', { url }); }
 
@@ -671,35 +789,65 @@ function sparkline(values) {
  * Ranked rows with an inline magnitude bar. columns: [{ key, label, format, bar? }]
  * The first column is the label; one column may carry the bar.
  */
+// Rows may carry a `detail` string, shown under the label. Headers sort the loaded rows
+// (click again to reverse); sorting never fetches, so it only reorders what is shown.
 function rankedTable(rows, columns, { emptyText = 'No activity in this period.' } = {}) {
   if (!rows.length) return el('p', emptyText, 'empty-note');
   const barColumn = columns.find(column => column.bar) || columns[1];
-  const max = Math.max(...rows.map(row => Number(row[barColumn.key]) || 0), 1);
   const wrap = el('div', undefined, 'table-scroll');
   const table = el('table', undefined, 'ranked');
   const head = el('tr');
-  columns.forEach((column, index) => { const th = el('th', column.label); th.scope = 'col'; if (index) th.className = 'num'; head.append(th); });
-  const thead = el('thead'); thead.append(head); table.append(thead);
   const body = el('tbody');
-  const bars = [];
-  for (const row of rows) {
-    const tr = el('tr');
-    columns.forEach((column, index) => {
-      const value = row[column.key];
-      if (!index) {
-        const td = el('td', undefined, 'label-cell');
-        td.append(el('span', column.format ? column.format(value, row) : String(value ?? '—'), 'label-text'));
-        const track = el('span', undefined, 'bar-track');
-        const bar = el('span', undefined, 'bar');
-        const share = (Number(row[barColumn.key]) || 0) / max;
-        bar.style.width = share > 0 ? `${Math.max(1.5, share * 100)}%` : '0';
-        track.append(bar); td.append(track); bars.push(bar);
-        td.title = String(value ?? '');
-        tr.append(td);
-      } else tr.append(el('td', column.format ? column.format(value, row) : String(value ?? '—'), 'num'));
-    });
-    body.append(tr);
-  }
+  let bars = [];
+  let sort = { key: null, desc: true };
+  const compare = (a, b) => {
+    const x = a[sort.key], y = b[sort.key];
+    const nx = typeof x === 'number' ? x : x === null || x === undefined ? -Infinity : NaN;
+    const ny = typeof y === 'number' ? y : y === null || y === undefined ? -Infinity : NaN;
+    const result = Number.isNaN(nx) || Number.isNaN(ny) ? String(x ?? '').localeCompare(String(y ?? '')) : nx - ny;
+    return sort.desc ? -result : result;
+  };
+  const fill = () => {
+    const ordered = sort.key ? [...rows].sort(compare) : rows;
+    const max = Math.max(...rows.map(row => Number(row[barColumn.key]) || 0), 1);
+    body.replaceChildren();
+    bars = [];
+    for (const row of ordered) {
+      const tr = el('tr');
+      columns.forEach((column, index) => {
+        const value = row[column.key];
+        if (!index) {
+          const td = el('td', undefined, 'label-cell');
+          const text = column.format ? column.format(value, row) : String(value ?? '');
+          td.append(el('span', text === '' ? '(not set)' : text, 'label-text'));
+          if (row.detail) td.append(el('span', row.detail, 'label-detail'));
+          const track = el('span', undefined, 'bar-track');
+          const bar = el('span', undefined, 'bar');
+          const share = (Number(row[barColumn.key]) || 0) / max;
+          bar.style.width = share > 0 ? `${Math.max(1.5, share * 100)}%` : '0';
+          track.append(bar); td.append(track); bars.push(bar);
+          td.title = String(value ?? '');
+          tr.append(td);
+        } else tr.append(el('td', column.format ? column.format(value, row) : String(value ?? '—'), 'num'));
+      });
+      body.append(tr);
+    }
+  };
+  columns.forEach((column, index) => {
+    const th = el('th'); th.scope = 'col';
+    if (index) th.className = 'num';
+    const button = el('button', column.label, 'sort'); button.type = 'button';
+    button.onclick = () => {
+      sort = { key: column.key, desc: sort.key === column.key ? !sort.desc : index > 0 };
+      for (const other of head.querySelectorAll('th')) other.removeAttribute('aria-sort');
+      th.setAttribute('aria-sort', sort.desc ? 'descending' : 'ascending');
+      fill();
+    };
+    th.append(button);
+    head.append(th);
+  });
+  const thead = el('thead'); thead.append(head); table.append(thead);
+  fill();
   table.append(body); wrap.append(table);
   wrap.animateIn = () => growX(bars, { delay: 200 });
   return wrap;
@@ -749,10 +897,48 @@ function gauge(rate, label) {
 
 return { el, niceScale, trendChart, sparkline, rankedTable, shareBar, gauge };
 })();
+const __module_logos = (() => {
+// Official product marks, embedded as data URIs so the page makes no external requests
+// and each mark keeps its own SVG ids. Sources: GA4, Google Ads, Search Console, Merchant
+// Center and Business Profile from Google's gstatic.com product-logo files; CallRail from
+// callrail.com. They are used unmodified to identify each connected product.
+const MARKS = {
+  ga4: "data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIHg9IjBweCIgeT0iMHB4IiB3aWR0aD0iMTkycHgiIGhlaWdodD0iMTkycHgiIHZpZXdCb3g9IjAgMCAxOTIgMTkyIiBlbmFibGUtYmFja2dyb3VuZD0ibmV3IDAgMCAxOTIgMTkyIiB4bWw6c3BhY2U9InByZXNlcnZlIj48cmVjdCB4PSIwIiB5PSIwIiBmaWxsPSJub25lIiB3aWR0aD0iMTkyIiBoZWlnaHQ9IjE5MiIvPjxnPjxnPjxwYXRoIGZpbGw9IiNGOUFCMDAiIGQ9Ik0xMzAsMjl2MTMyYzAsMTQuNzcsMTAuMTksMjMsMjEsMjNjMTAsMCwyMS03LDIxLTIzVjMwYzAtMTMuNTQtMTAtMjItMjEtMjJTMTMwLDE3LjMzLDEzMCwyOXoiLz48L2c+PGc+PHBhdGggZmlsbD0iI0UzNzQwMCIgZD0iTTc1LDk2djY1YzAsMTQuNzcsMTAuMTksMjMsMjEsMjNjMTAsMCwyMS03LDIxLTIzVjk3YzAtMTMuNTQtMTAtMjItMjEtMjJTNzUsODQuMzMsNzUsOTZ6Ii8+PC9nPjxnPjxjaXJjbGUgZmlsbD0iI0UzNzQwMCIgY3g9IjQxIiBjeT0iMTYzIiByPSIyMSIvPjwvZz48L2c+PC9zdmc+",
+  search_console: "data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIGlkPSJTdGFuZGFyZF9wcm9kdWN0X2ljb24iIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIHg9IjBweCIgeT0iMHB4IiB3aWR0aD0iMTkycHgiIGhlaWdodD0iMTkycHgiIHZpZXdCb3g9IjAgMCAxOTIgMTkyIiBlbmFibGUtYmFja2dyb3VuZD0ibmV3IDAgMCAxOTIgMTkyIiB4bWw6c3BhY2U9InByZXNlcnZlIj48cmVjdCBpZD0iYm91bmRpbmdfYm94XzAwMDAwMTQ3MjEzMDg4NjcwNjc3OTM3MzgwMDAwMDA0MzE3MTQ4ODU3MzExMjY5MDM0XyIgZmlsbD0ibm9uZSIgd2lkdGg9IjE5MiIgaGVpZ2h0PSIxOTIiLz48ZyBpZD0iYXJ0X2xheWVyIj48L2c+PGc+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTUzLjE5LDE0Ni41M2wtMjIuNjYsMjIuNjZjLTEuNzQsMS43NC00LjU3LDEuNzQtNi4zMiwwbC0xLjQtMS40Yy0xLjc0LTEuNzQtMS43NC00LjU3LDAtNi4zMmwyMi42Ni0yMi42NiBjMS43NC0xLjc0LDQuNTctMS43NCw2LjMyLDBsMS40LDEuNEM1NC45NCwxNDEuOTUsNTQuOTQsMTQ0Ljc4LDUzLjE5LDE0Ni41M3oiLz48cGF0aCBmaWxsPSIjNDI4NUY0IiBkPSJNMTE0LDE1NmgyOWMxNi4wMiwwLDI5LTEyLjk4LDI5LTI5VjQ5YzAtMTYuMDItMTIuOTgtMjktMjktMjloMGMtMTYuMDIsMC0yOSwxMi45OC0yOSwyOVYxNTZ6Ii8+PHBhdGggZmlsbD0iI0ZCQkMwNCIgZD0iTTY2LDE1Nkw2NiwxNTZjMTYuMDIsMCwyOS0xMi45OCwyOS0yOXYwYzAtMTYuMDItMTIuOTgtMjktMjktMjloMGMtMTYuMDIsMC0yOSwxMi45OC0yOSwyOXYwIEMzNywxNDMuMDIsNDkuOTgsMTU2LDY2LDE1NnoiLz48cGF0aCBmaWxsPSIjMzRBODUzIiBkPSJNMTM0LjI2LDE1NkgxMDZjLTE2LjAyLDAtMjktMTIuOTgtMjktMjlWODljMC0xNi4wMiwxMi45OC0yOSwyOS0yOWgwYzE2LjAyLDAsMjksMTIuOTgsMjksMjl2NjYuMjYgQzEzNSwxNTUuNjcsMTM0LjY3LDE1NiwxMzQuMjYsMTU2eiIvPjxnPjxwYXRoIGZpbGw9Im5vbmUiIGQ9Ik0xMDYsNjBjLTE2LjAyLDAtMjksMTIuOTgtMjksMjl2MzhjMCwxNi4wMiwxMi45OCwyOSwyOSwyOWg4VjYxLjEzQzExMS40Niw2MC40LDEwOC43OCw2MCwxMDYsNjB6Ii8+PHBhdGggZmlsbD0iIzE5NjdEMiIgZD0iTTEzNSwxNTUuMjZWODljMC0xMy4yNC04Ljg4LTI0LjQtMjEtMjcuODdWMTU2aDIwLjI2QzEzNC42NywxNTYsMTM1LDE1NS42NywxMzUsMTU1LjI2eiIvPjwvZz48Zz48cGF0aCBmaWxsPSJub25lIiBkPSJNMTA2LDYwLjU2Yy0xNi4wMiwwLTI5LDEyLjk4LTI5LDI5djExLjE3YzEwLjU2LDQuMzMsMTgsMTQuNzEsMTgsMjYuODN2MGMwLDguMjYtMy40NiwxNS43MS05LDIwLjk5IGM1LjIsNC45NiwxMi4yNCw4LjAxLDIwLDguMDFoMjguMjZjMC40MSwwLDAuNzQtMC4zMywwLjc0LTAuNzRWODkuNTZDMTM1LDczLjU1LDEyMi4wMiw2MC41NiwxMDYsNjAuNTZ6Ii8+PHBhdGggZmlsbD0iI0VBNDMzNSIgZD0iTTk1LDEyNy41Nkw5NSwxMjcuNTZjMC0xMi4xMi03LjQ0LTIyLjUtMTgtMjYuODN2MjYuODNjMCw4LjI2LDMuNDYsMTUuNzEsOSwyMC45OSBDOTEuNTQsMTQzLjI3LDk1LDEzNS44Miw5NSwxMjcuNTZ6Ii8+PC9nPjwvZz48L3N2Zz4=",
+  google_ads: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGVuYWJsZS1iYWNrZ3JvdW5kPSJuZXcgMCAwIDE5MiAxOTIiIGhlaWdodD0iMTkyIiB2aWV3Qm94PSIwIDAgMTkyIDE5MiIgd2lkdGg9IjE5MiI+PGc+PHJlY3QgZmlsbD0ibm9uZSIgaGVpZ2h0PSIxOTIiIHdpZHRoPSIxOTIiLz48Zz48cmVjdCBmaWxsPSIjRkJCQzA0IiBoZWlnaHQ9IjU4LjY3IiB0cmFuc2Zvcm09Im1hdHJpeCgwLjUgLTAuODY2IDAuODY2IDAuNSAtNDYuMjEyNyAxMDMuNjY2KSIgd2lkdGg9IjExNy4zMyIgeD0iOCIgeT0iNjIuNTIiLz48cGF0aCBkPSJNMTgwLjA3LDEyNy45OUwxMjEuNCwyNi4zOGMtOC4xLTE0LjAzLTI2LjA0LTE4Ljg0LTQwLjA3LTEwLjc0Yy0xNC4wMyw4LjEtMTguODQsMjYuMDQtMTAuNzQsNDAuMDcgbDU4LjY3LDEwMS42MWM4LjEsMTQuMDMsMjYuMDQsMTguODMsNDAuMDcsMTAuNzRDMTgzLjM2LDE1OS45NiwxODguMTYsMTQyLjAyLDE4MC4wNywxMjcuOTl6IiBmaWxsPSIjNDI4NUY0Ii8+PGNpcmNsZSBjeD0iMzcuMzQiIGN5PSIxNDIuNjYiIGZpbGw9IiMzNEE4NTMiIHI9IjI5LjMzIi8+PC9nPjwvZz48L3N2Zz4=",
+  merchant_center: "data:image/png;base64,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",
+  gbp: "data:image/png;base64,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",
+  callrail: "data:image/png;base64,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"
+};
+
+// Overview is not a product, so it keeps a plain line icon in the text colour.
+const OVERVIEW = '<path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>';
+
+function logo(name, cls = 'logo') {
+  if (!MARKS[name]) {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    node.setAttribute('viewBox', '0 0 24 24');
+    node.setAttribute('class', `${cls} mono`);
+    node.setAttribute('aria-hidden', 'true');
+    node.innerHTML = OVERVIEW;
+    return node;
+  }
+  const img = document.createElement('img');
+  img.src = MARKS[name];
+  img.alt = '';
+  img.className = cls;
+  img.decoding = 'async';
+  img.draggable = false;
+  return img;
+}
+
+return { logo };
+})();
 const __module_app = (() => {
 const { HostBridge } = __module_bridge;
 const { reveal, countUp, stopAll, slideIn, slideOut, fadeIn } = __module_motion;
 const { el, trendChart, sparkline, rankedTable, shareBar, gauge } = __module_charts;
+const { logo } = __module_logos;
 const host = new HostBridge({ name: 'Marketer Companion', version: '2.0.0' }, { availableDisplayModes: ['fullscreen'] });
 const $ = id => document.getElementById(id);
 const STORE_KEY = 'marketer-companion.selection.v2';
@@ -791,45 +977,57 @@ const shortUrl = value => String(value || '').replace(/^https?:\/\/[^/]+/, '') |
 
 /* ---------------- Sources ---------------- */
 
-const ICONS = {
-  overview: 'M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z',
-  ga4: 'M5 20V10m7 10V4m7 16v-7',
-  search_console: 'M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Zm5-2 4.5 4.5',
-  google_ads: 'M4 18 10 6l4 8 2-4 4 8M4 18h16',
-  merchant_center: 'M5 8h14l-1.5 11h-11L5 8Zm4 0V6a3 3 0 0 1 6 0v2',
-  gbp: 'M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21Zm0-9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z',
-  callrail: 'M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1L6.6 10.8Z'
-};
-const icon = (name, cls = 'icon') => {
-  const node = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  node.setAttribute('viewBox', '0 0 24 24'); node.setAttribute('class', cls); node.setAttribute('aria-hidden', 'true');
-  const path = document.createElementNS(node.namespaceURI, 'path'); path.setAttribute('d', ICONS[name]); node.append(path);
-  return node;
-};
+const icon = (name, cls = 'logo') => logo(name, cls);
 
+// name: the short label people know the product by; full: the product's own name.
 // better: which direction is an improvement. 'neutral' for spend, where more is not good or bad by itself.
+// hidden: KPI tiles that start switched off; Customize turns them on.
 const SOURCES = {
   ga4: {
-    name: 'Website', full: 'Google Analytics 4', select: 'propertyId', pick: 'a GA4 property',
+    name: 'GA4', full: 'Google Analytics 4', select: 'propertyId', pick: 'a GA4 property',
     kpis: [
       { key: 'sessions', label: 'Sessions', format: 'num', better: 'up' },
       { key: 'activeUsers', label: 'Active users', format: 'num', better: 'up' },
       { key: 'keyEvents', label: 'Key events', format: 'num', better: 'up' },
       { key: 'totalRevenue', label: 'Revenue', format: 'money', better: 'up' },
       { key: 'engagementRate', label: 'Engagement rate', format: 'pct', better: 'up' },
-      { key: 'keyEventRate', label: 'Key events / session', format: 'pct', better: 'up', derive: r => r.sessions ? r.keyEvents / r.sessions : 0 }
+      { key: 'keyEventRate', label: 'Key events / session', format: 'pct', better: 'up', derive: r => r.sessions ? r.keyEvents / r.sessions : 0 },
+      { key: 'newUsers', label: 'New users', format: 'num', better: 'up', hidden: true },
+      { key: 'screenPageViews', label: 'Views', format: 'num', better: 'up', hidden: true },
+      { key: 'bounceRate', label: 'Bounce rate', format: 'pct', better: 'down', hidden: true },
+      { key: 'averageSessionDuration', label: 'Avg. session duration', format: 'seconds', better: 'up', hidden: true }
     ],
-    trend: ['sessions', 'activeUsers', 'keyEvents', 'totalRevenue']
+    trend: ['sessions', 'activeUsers', 'newUsers', 'keyEvents', 'totalRevenue', 'screenPageViews'],
+    breakdowns: [['sessionDefaultChannelGroup', 'Channel group'], ['sessionSource', 'Source'], ['sessionMedium', 'Medium'], ['sessionSourceMedium', 'Source / medium'], ['sessionCampaignName', 'Campaign'],
+      ['landingPagePlusQueryString', 'Landing page'], ['deviceCategory', 'Device'], ['country', 'Country'], ['city', 'City'], ['eventName', 'Event name'], ['newVsReturning', 'New vs returning']],
+    filters: [
+      { key: 'keyEvent', label: 'Key event', type: 'select', choices: source => [['', 'All key events'], ...(source?.facets?.keyEvents || []).map(e => [e.name, e.name])] },
+      { key: 'channel', label: 'Channel group', type: 'suggest', suggest: () => GA4_CHANNELS, placeholder: 'Any channel' },
+      { key: 'source', label: 'Source', type: 'suggest', suggest: source => source?.facets?.sources || [], placeholder: 'e.g. google' },
+      { key: 'medium', label: 'Medium', type: 'suggest', suggest: source => source?.facets?.mediums || [], placeholder: 'e.g. cpc' },
+      { key: 'campaign', label: 'Campaign contains', type: 'text', placeholder: 'Campaign name' },
+      { key: 'landingPage', label: 'Landing page contains', type: 'text', placeholder: '/pricing' },
+      { key: 'device', label: 'Device', type: 'select', choices: () => [['', 'All devices'], ['desktop', 'Desktop'], ['mobile', 'Mobile'], ['tablet', 'Tablet']] },
+      { key: 'country', label: 'Country', type: 'text', placeholder: 'e.g. United States' }
+    ]
   },
   search_console: {
-    name: 'Organic search', full: 'Search Console', select: 'siteUrl', pick: 'a Search Console site',
+    name: 'GSC', full: 'Google Search Console', select: 'siteUrl', pick: 'a Search Console site',
     kpis: [
       { key: 'clicks', label: 'Clicks', format: 'num', better: 'up' },
       { key: 'impressions', label: 'Impressions', format: 'num', better: 'up' },
       { key: 'ctr', label: 'Click-through rate', format: 'pct', better: 'up' },
       { key: 'position', label: 'Average position', format: 'dec', better: 'down' }
     ],
-    trend: ['clicks', 'impressions', 'ctr', 'position']
+    trend: ['clicks', 'impressions', 'ctr', 'position'],
+    breakdowns: [['query', 'Query'], ['page', 'Page'], ['country', 'Country'], ['device', 'Device'], ['searchAppearance', 'Search appearance']],
+    filters: [
+      { key: 'searchType', label: 'Search type', type: 'select', choices: () => [['', 'Web'], ['image', 'Image'], ['video', 'Video'], ['news', 'News']] },
+      { key: 'query', label: 'Query', type: 'text', placeholder: 'brand name', match: 'queryMatch' },
+      { key: 'page', label: 'Page URL', type: 'text', placeholder: '/blog/', match: 'pageMatch' },
+      { key: 'country', label: 'Country (ISO-3)', type: 'text', placeholder: 'usa', pattern: '[A-Za-z]{3}' },
+      { key: 'device', label: 'Device', type: 'select', choices: () => [['', 'All devices'], ['DESKTOP', 'Desktop'], ['MOBILE', 'Mobile'], ['TABLET', 'Tablet']] }
+    ]
   },
   google_ads: {
     name: 'Google Ads', full: 'Google Ads', select: 'customerId', pick: 'a Google Ads account',
@@ -839,9 +1037,19 @@ const SOURCES = {
       { key: 'conversions', label: 'Conversions', format: 'num', better: 'up' },
       { key: 'cpa', label: 'Cost / conversion', format: 'money', better: 'down', derive: r => r.conversions ? r.cost / r.conversions : 0 },
       { key: 'conversionValue', label: 'Conversion value', format: 'money', better: 'up' },
-      { key: 'roas', label: 'ROAS', format: 'ratio', better: 'up', derive: r => r.cost ? r.conversionValue / r.cost : 0 }
+      { key: 'roas', label: 'ROAS', format: 'ratio', better: 'up', derive: r => r.cost ? r.conversionValue / r.cost : 0 },
+      { key: 'impressions', label: 'Impressions', format: 'num', better: 'up', hidden: true },
+      { key: 'ctr', label: 'CTR', format: 'pct', better: 'up', hidden: true, derive: r => r.impressions ? r.clicks / r.impressions : 0 },
+      { key: 'cpc', label: 'Avg. CPC', format: 'money', better: 'down', hidden: true, derive: r => r.clicks ? r.cost / r.clicks : 0 },
+      { key: 'conversionRate', label: 'Conversion rate', format: 'pct', better: 'up', hidden: true, derive: r => r.clicks ? r.conversions / r.clicks : 0 }
     ],
-    trend: ['cost', 'clicks', 'conversions', 'conversionValue']
+    trend: ['cost', 'clicks', 'impressions', 'conversions', 'conversionValue'],
+    breakdowns: [['campaign', 'Campaign'], ['ad_group', 'Ad group'], ['keyword', 'Keyword'], ['search_term', 'Search term'], ['device', 'Device'], ['network', 'Network'], ['conversion_action', 'Conversion action'], ['day_of_week', 'Day of week']],
+    filters: [
+      { key: 'status', label: 'Campaign status', type: 'select', choices: () => [['', 'All statuses'], ['ENABLED', 'Enabled'], ['PAUSED', 'Paused']] },
+      { key: 'channel', label: 'Campaign type', type: 'select', choices: () => [['', 'All types'], ['SEARCH', 'Search'], ['PERFORMANCE_MAX', 'Performance Max'], ['SHOPPING', 'Shopping'], ['DISPLAY', 'Display'], ['VIDEO', 'Video'], ['DEMAND_GEN', 'Demand Gen'], ['LOCAL_SERVICES', 'Local Services']] },
+      { key: 'campaign', label: 'Campaign contains', type: 'text', placeholder: 'Brand' }
+    ]
   },
   merchant_center: {
     name: 'Merchant Center', full: 'Google Merchant Center', select: 'merchantAccountId', pick: 'a Merchant Center account',
@@ -849,9 +1057,15 @@ const SOURCES = {
       { key: 'clicks', label: 'Product clicks', format: 'num', better: 'up' },
       { key: 'impressions', label: 'Impressions', format: 'num', better: 'up' },
       { key: 'ctr', label: 'Click-through rate', format: 'pct', better: 'up', derive: r => r.impressions ? r.clicks / r.impressions : 0 },
-      { key: 'conversions', label: 'Conversions', format: 'num', better: 'up' }
+      { key: 'conversions', label: 'Conversions', format: 'num', better: 'up' },
+      { key: 'conversionValue', label: 'Conversion value', format: 'money', better: 'up', hidden: true }
     ],
-    trend: ['clicks', 'impressions', 'conversions']
+    trend: ['clicks', 'impressions', 'conversions'],
+    breakdowns: [['product', 'Product'], ['brand', 'Brand'], ['category_l1', 'Google category'], ['product_type_l1', 'Product type'], ['customer_country_code', 'Country'], ['marketing_method', 'Listing type']],
+    filters: [
+      { key: 'method', label: 'Listing type', type: 'select', choices: () => [['', 'Ads and free listings'], ['ADS', 'Shopping ads'], ['ORGANIC', 'Free listings']] },
+      { key: 'country', label: 'Country (ISO-2)', type: 'text', placeholder: 'US', pattern: '[A-Za-z]{2}', upper: true }
+    ]
   },
   gbp: {
     name: 'Business Profile', full: 'Google Business Profile', select: 'gbpLocation', pick: 'a Business Profile location',
@@ -860,12 +1074,15 @@ const SOURCES = {
       { key: 'actions', label: 'Customer actions', format: 'num', better: 'up' },
       { key: 'calls', label: 'Call clicks', format: 'num', better: 'up' },
       { key: 'websiteClicks', label: 'Website clicks', format: 'num', better: 'up' },
-      { key: 'directions', label: 'Direction requests', format: 'num', better: 'up' }
+      { key: 'directions', label: 'Direction requests', format: 'num', better: 'up' },
+      { key: 'conversations', label: 'Messages', format: 'num', better: 'up', hidden: true },
+      { key: 'bookings', label: 'Bookings', format: 'num', better: 'up', hidden: true },
+      { key: 'actionRate', label: 'Actions / view', format: 'pct', better: 'up', hidden: true, derive: r => r.impressions ? r.actions / r.impressions : 0 }
     ],
     trend: ['impressions', 'actions', 'calls', 'websiteClicks', 'directions']
   },
   callrail: {
-    name: 'Calls', full: 'CallRail', select: 'callrailAccountId', pick: 'a CallRail account',
+    name: 'CallRail', full: 'CallRail', select: 'callrailAccountId', pick: 'a CallRail account',
     kpis: [
       { key: 'calls', label: 'Calls', format: 'num', better: 'up' },
       { key: 'firstTime', label: 'First-time callers', format: 'num', better: 'up' },
@@ -873,20 +1090,42 @@ const SOURCES = {
       { key: 'missed', label: 'Missed calls', format: 'num', better: 'down' },
       { key: 'averageDuration', label: 'Average duration', format: 'seconds', better: 'up' }
     ],
-    trend: ['calls', 'firstTime', 'missed']
+    trend: ['calls', 'firstTime', 'missed'],
+    breakdowns: [['source', 'Source'], ['campaign', 'Campaign'], ['keywords', 'Keyword'], ['referrer', 'Referrer'], ['landing_page', 'Landing page'], ['company', 'Company']],
+    filters: [
+      { key: 'direction', label: 'Direction', type: 'select', choices: () => [['', 'All calls'], ['inbound', 'Inbound'], ['outbound', 'Outbound']] },
+      { key: 'device', label: 'Caller device', type: 'select', choices: () => [['', 'All devices'], ['desktop', 'Desktop'], ['mobile', 'Mobile']] },
+      { key: 'leadStatus', label: 'Lead status', type: 'select', choices: () => [['', 'Any status'], ['good_lead', 'Good lead'], ['not_a_lead', 'Not a lead'], ['not_scored', 'Not scored']] }
+    ]
   }
 };
-const LABEL = { sessions: 'Sessions', activeUsers: 'Active users', keyEvents: 'Key events', totalRevenue: 'Revenue', clicks: 'Clicks', impressions: 'Impressions', ctr: 'CTR', position: 'Avg. position',
+const GA4_CHANNELS = ['Direct', 'Organic Search', 'Paid Search', 'Organic Social', 'Paid Social', 'Email', 'Referral', 'Affiliates', 'Display', 'Organic Video', 'Paid Video', 'Organic Shopping', 'Paid Shopping', 'Cross-network', 'Paid Other', 'SMS', 'Mobile Push Notifications', 'Audio', 'Unassigned'];
+const MATCHES = [['contains', 'contains'], ['notContains', 'does not contain'], ['equals', 'is exactly'], ['includingRegex', 'matches regex'], ['excludingRegex', 'excludes regex']];
+const LABEL = { sessions: 'Sessions', activeUsers: 'Active users', newUsers: 'New users', keyEvents: 'Key events', totalRevenue: 'Revenue', screenPageViews: 'Views', clicks: 'Clicks', impressions: 'Impressions', ctr: 'CTR', position: 'Avg. position',
   cost: 'Spend', conversions: 'Conversions', conversionValue: 'Conv. value', actions: 'Actions', calls: 'Calls', websiteClicks: 'Website clicks', directions: 'Directions', firstTime: 'First-time', missed: 'Missed' };
 
 /* ---------------- State ---------------- */
 
+const OPTIONS_KEY = 'marketer-companion.options.v1';
+const TILES_KEY = 'marketer-companion.tiles.v1';
 const state = {
   view: 'overview', snapshot: null, accounts: null, available: Object.keys(SOURCES),
-  selection: loadSelection(), preset: 28, compare: true, busy: false, connected: false, trendMetric: {}
+  selection: loadSelection(), preset: 28, compare: true, busy: false, connected: false, trendMetric: {},
+  // Per-source breakdown, row limit and filters, sent to the server with every load.
+  options: readStore(OPTIONS_KEY), tiles: readStore(TILES_KEY), customizing: false, loadingSource: null, filtersOpen: {}
 };
-function loadSelection() { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } }
-function saveSelection() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state.selection)); } catch { /* storage unavailable in this host */ } }
+function readStore(key) { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; } }
+function writeStore(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable in this host */ } }
+function loadSelection() { return readStore(STORE_KEY); }
+function saveSelection() { writeStore(STORE_KEY, state.selection); }
+
+// Options without empty values, so a cleared filter is dropped rather than sent as "".
+function cleanOptions(key) {
+  return Object.fromEntries(Object.entries(state.options[key] || {}).filter(([, value]) => value !== '' && value !== undefined && value !== null));
+}
+const FILTER_ONLY = ['breakdown', 'limit', 'queryMatch', 'pageMatch'];
+const activeFilters = key => Object.keys(cleanOptions(key)).filter(name => !FILTER_ONLY.includes(name) && !(key === 'search_console' && name === 'searchType' && state.options[key][name] === 'web'));
+const visibleKpis = key => SOURCES[key].kpis.filter(kpi => state.tiles[key] ? state.tiles[key].includes(kpi.key) : !kpi.hidden);
 
 const formatter = (source, format) => format === 'money' ? moneyFormatter(currencyOf(source)) : fmt[format] || fmt.num;
 function currencyOf(source) {
@@ -933,7 +1172,7 @@ function renderSheet() {
     const field = el('div', undefined, 'field');
     const head = el('div', undefined, 'field-head');
     const title = el('label', undefined, 'field-label'); title.htmlFor = `pick-${key}`;
-    title.append(icon(key, 'icon sm'), document.createTextNode(config.full));
+    title.append(icon(key, 'logo sm'), document.createTextNode(config.full));
     head.append(title);
     if (list?.status === 'ready') head.append(el('span', `${list.data.length} available`, 'field-count'));
     field.append(head);
@@ -1004,9 +1243,49 @@ function range() {
   return { startDate: addDays(end, -(state.preset - 1)), endDate: end };
 }
 
+function optionsArg(keys) {
+  const options = {};
+  for (const key of keys) { const o = cleanOptions(key); if (Object.keys(o).length) options[key] = o; }
+  return Object.keys(options).length ? options : undefined;
+}
+
+// Reloads one source with its current options, keeping the rest of the dashboard as is.
+async function loadSource(key) {
+  const snap = state.snapshot;
+  const config = SOURCES[key];
+  if (!snap || !state.selection[config.select] || state.busy) return;
+  const args = { startDate: snap.range.startDate, endDate: snap.range.endDate, compare: snap.selection.compare !== false, [config.select]: state.selection[config.select] };
+  if (key === 'google_ads' && state.selection.loginCustomerId) args.loginCustomerId = state.selection.loginCustomerId;
+  const options = optionsArg([key]);
+  if (options) args.options = options;
+  state.loadingSource = key;
+  setBusy(true);
+  status('');
+  try {
+    const result = await host.callServerTool('get_marketing_dashboard', args);
+    if (result.isError) throw new Error(result.structuredContent?.error || 'This source could not be loaded.');
+    const data = result.structuredContent;
+    if (!data?.sources?.[key]) throw new Error('The source returned no data.');
+    snap.sources[key] = data.sources[key];
+    snap.selection = { ...snap.selection, options: { ...(snap.selection.options || {}), [key]: options?.[key] } };
+    render();
+    renderNav();
+  } catch (error) {
+    status(`${error.message} The previous ${config.name} view is unchanged.`, 'error');
+  } finally { state.loadingSource = null; setBusy(false); }
+}
+
+function setOptions(key, patch, { reload = true } = {}) {
+  state.options[key] = { ...(state.options[key] || {}), ...patch };
+  writeStore(OPTIONS_KEY, state.options);
+  if (reload) loadSource(key);
+}
+
 async function load() {
   const args = { ...range(), compare: state.compare };
   for (const [key, value] of Object.entries(state.selection)) if (value) args[key] = value;
+  const options = optionsArg(state.available.filter(key => args[SOURCES[key].select]));
+  if (options) args.options = options;
   const picked = state.available.some(key => args[SOURCES[key].select]);
   if (!picked) { status('Choose at least one account to build your dashboard.', 'info'); openSheet(); return; }
   if (!args.startDate || !args.endDate || args.startDate > args.endDate) { status('Choose a valid date range.', 'error'); return; }
@@ -1116,22 +1395,31 @@ function renderNav() {
   const nav = $('nav');
   nav.replaceChildren();
   const sources = state.snapshot?.sources || {};
-  const item = (key, label) => {
+  const item = (key, label, full) => {
     const button = el('button', undefined, 'nav-item');
     button.type = 'button';
     button.dataset.view = key;
+    button.title = full === label ? label : `${label} · ${full}`;
+    // On narrow screens the tab shows only its logo, so the name must live on the button.
+    button.setAttribute('aria-label', full === label ? label : `${label}, ${full}`);
     button.setAttribute('aria-current', String(state.view === key));
-    button.append(icon(key), el('span', label, 'nav-label'));
+    const text = el('span', undefined, 'nav-text');
+    text.append(el('span', label, 'nav-label'));
+    if (full !== label) text.append(el('span', full, 'nav-sub'));
+    button.append(icon(key, key === 'overview' ? 'logo mono' : 'logo'), text);
     if (key !== 'overview') {
+      const filtered = activeFilters(key).length;
+      if (filtered) button.append(el('span', String(filtered), 'nav-badge'));
       const dot = el('span', undefined, `nav-dot ${sources[key] ? sources[key].status : 'idle'}`);
       dot.title = sources[key] ? (sources[key].status === 'ready' ? 'Loaded' : 'Error') : 'Not selected';
       button.append(dot);
     }
-    button.onclick = () => { if (state.view === key) return; state.view = key; renderNav(); render(); $('main').scrollTo?.({ top: 0 }); };
+    button.onclick = () => { if (state.view === key) return; state.view = key; state.customizing = false; renderNav(); render(); window.scrollTo?.({ top: 0 }); };
     nav.append(button);
   };
-  item('overview', 'Overview');
-  for (const key of state.available) item(key, SOURCES[key].name);
+  item('overview', 'Overview', 'All channels');
+  for (const key of state.available) item(key, SOURCES[key].name, SOURCES[key].full);
+  fitHeader();
 }
 
 function header(title, subtitle) {
@@ -1145,6 +1433,7 @@ function header(title, subtitle) {
 
 function render() {
   stopAll();
+  resetBalancers();
   const view = $('view');
   view.replaceChildren();
   view.classList.remove('skeleton-view');
@@ -1155,6 +1444,11 @@ function render() {
   else renderSource(view, state.view);
   $('footer').replaceChildren(el('div', `Live data · loaded ${new Date(snap.fetchedAt).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' })}`));
   for (const note of snap.notes || []) $('footer').append(el('div', note));
+  // The range also sits under the title, for the one-row header where the bar has no room for it.
+  view.querySelector('.view-head > div')?.append(el('p', $('period').textContent, 'view-period'));
+  fitHeader();
+  for (const grid of view.querySelectorAll('.tiles')) balance(grid, 150);
+  for (const grid of view.querySelectorAll('.source-grid')) balance(grid, 290, 14);
   reveal(view.querySelectorAll('.reveal'));
   for (const node of view.querySelectorAll('[data-count]')) countUp(node, Number(node.dataset.count), node.formatFn, { delay: 120 });
   for (const node of view.querySelectorAll('.trend')) node.mount();
@@ -1239,7 +1533,9 @@ function renderOverview(view) {
     const config = SOURCES[key];
     const card = el('section', undefined, `source-card reveal ${source.status}`);
     const head = el('button', undefined, 'source-card-head'); head.type = 'button';
-    head.append(icon(key), el('span', config.name, 'source-card-name'), el('span', 'Open →', 'source-card-link'));
+    head.append(icon(key), el('span', config.full, 'source-card-name'));
+    if (activeFilters(key).length) head.append(el('span', 'Filtered', 'filtered-tag'));
+    head.append(el('span', 'Open →', 'source-card-link'));
     head.onclick = () => { state.view = key; renderNav(); render(); };
     card.append(head);
     if (source.status === 'error') { card.append(el('p', source.message, 'field-error')); grid.append(card); continue; }
@@ -1286,20 +1582,33 @@ function renderSource(view, key) {
   if (!source) {
     view.append(header(config.full));
     const empty = el('div', undefined, 'empty-card reveal');
-    empty.append(icon(key, 'icon lg'), el('p', `Add ${config.pick} to see this view.`));
+    empty.append(icon(key, 'logo lg'), el('p', `Add ${config.pick} to see this view.`));
     const pick = el('button', 'Choose accounts', 'primary'); pick.type = 'button'; pick.onclick = openSheet; empty.append(pick);
     view.append(empty);
     return;
   }
   const accountName = state.accounts?.[key]?.data?.find(item => item.id === source.account)?.name || source.account;
-  view.append(header(config.full, `${accountName}${source.timeZone ? ` · ${source.timeZone}` : ''}${currencyOf(source) ? ` · ${currencyOf(source)}` : ''}`));
+  const head = header(config.full, `${accountName}${source.timeZone ? ` · ${source.timeZone}` : ''}${currencyOf(source) ? ` · ${currencyOf(source)}` : ''}`);
+  head.querySelector('.view-title').prepend(icon(key, 'logo title-logo'));
+  const customize = el('button', state.customizing ? 'Done' : 'Customize', 'btn'); customize.type = 'button';
+  customize.setAttribute('aria-expanded', String(state.customizing));
+  customize.onclick = () => { state.customizing = !state.customizing; render(); };
+  head.append(customize);
+  view.append(head);
+  if (config.filters) view.append(filterBar(key, source));
   if (source.status === 'error') { view.append(el('div', source.message, 'inline-error reveal')); return; }
 
   const now = rowsOf(source.totals)?.[0], before = rowsOf(source.comparison)?.[0];
+  if (state.customizing) view.append(customizer(key));
   if (!now) view.append(failed(source.totals));
   else {
     const tiles = el('div', undefined, 'tiles');
-    for (const kpi of config.kpis) tiles.append(statTile(source, kpi, now, before));
+    const kpis = visibleKpis(key);
+    for (const kpi of kpis) {
+      const label = kpi.key === 'keyEvents' && source.options?.keyEvent ? { ...kpi, label: `Key events: ${source.options.keyEvent}` } : kpi;
+      tiles.append(statTile(source, label, now, before));
+    }
+    if (!kpis.length) tiles.append(el('p', 'No metrics selected. Use Customize to pick some.', 'empty-note'));
     view.append(tiles);
   }
 
@@ -1333,19 +1642,16 @@ function renderSource(view, key) {
 
   const grid = el('div', undefined, 'panels');
   const money = moneyFormatter(currencyOf(source));
+  grid.append(breakdownPanel(key, source));
+  const gscColumns = label => [{ key: 'label', label, format: label === 'Page' ? shortUrl : undefined }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'ctr', label: 'CTR', format: fmt.pct }, { key: 'position', label: 'Pos.', format: fmt.dec }];
   if (key === 'ga4') {
-    grid.append(panel('Acquisition channels', tableFrom(source.channels, [{ key: 'sessionDefaultChannelGroup', label: 'Channel' }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'keyEvents', label: 'Key events', format: fmt.num }, { key: 'engagementRate', label: 'Engaged', format: fmt.pct0 }])));
-    grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: row.deviceCategory, value: row.sessions })), fmt.num) : failed(source.devices)));
-    grid.append(panel('Top landing pages', tableFrom(source.pages, [{ key: 'landingPagePlusQueryString', label: 'Page', format: shortUrl }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'keyEvents', label: 'Key events', format: fmt.num }, { key: 'engagementRate', label: 'Engaged', format: fmt.pct0 }]), { wide: true }));
+    grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: row.deviceCategory, value: row.sessions })), fmt.num) : failed(source.devices), { note: 'Share of sessions.' }));
+    if (source.pages) grid.append(panel('Top landing pages', tableFrom(source.pages, [{ key: 'landingPagePlusQueryString', label: 'Page', format: shortUrl }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Users', format: fmt.num }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num }, { key: 'engagementRate', label: 'Engaged', format: fmt.pct0 }])));
   }
   if (key === 'search_console') {
-    grid.append(panel('Top queries', tableFrom(source.queries, [{ key: 'label', label: 'Query' }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'ctr', label: 'CTR', format: fmt.pct }, { key: 'position', label: 'Pos.', format: fmt.dec }])));
     grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: row.label.charAt(0) + row.label.slice(1).toLowerCase(), value: row.clicks })), fmt.num) : failed(source.devices), { note: 'Share of clicks.' }));
-    grid.append(panel('Top pages', tableFrom(source.pages, [{ key: 'label', label: 'Page', format: shortUrl }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'ctr', label: 'CTR', format: fmt.pct }, { key: 'position', label: 'Pos.', format: fmt.dec }]), { wide: true }));
-  }
-  if (key === 'google_ads') {
-    const campaigns = rowsOf(source.campaigns)?.map(row => ({ ...row, cpa: row.conversions ? row.cost / row.conversions : null, roas: row.cost ? row.conversionValue / row.cost : null }));
-    grid.append(panel('Campaigns by spend', campaigns ? (() => { const w = el('div'); w.append(rankedTable(campaigns, [{ key: 'label', label: 'Campaign' }, { key: 'cost', label: 'Spend', format: money, bar: true }, { key: 'clicks', label: 'Clicks', format: fmt.num }, { key: 'conversions', label: 'Conv.', format: fmt.num }, { key: 'cpa', label: 'Cost / conv.', format: v => v === null ? '—' : money(v) }, { key: 'roas', label: 'ROAS', format: v => v === null ? '—' : fmt.ratio(v) }])); return w; })() : failed(source.campaigns), { wide: true }));
+    if (source.pages) grid.append(panel('Top pages', tableFrom(source.pages, gscColumns('Page'))));
+    if (source.queries) grid.append(panel('Top queries', tableFrom(source.queries, gscColumns('Query'))));
   }
   if (key === 'merchant_center') {
     const health = source.health;
@@ -1373,7 +1679,6 @@ function renderSource(view, key) {
       grid.append(panel('Issues to fix', health.data.issues.length ? issues : el('p', 'No item issues reported.', 'empty-note')));
     } else grid.append(panel('Product status', failed(health)));
     grid.append(panel('Free listings vs Shopping ads', rowsOf(source.methods) ? shareBar(rowsOf(source.methods).map(row => ({ label: row.label, value: row.clicks, slot: row.label === 'Free listings' ? 0 : 1 })), fmt.num) : failed(source.methods), { note: 'Share of product clicks.' }));
-    grid.append(panel('Top products', tableFrom(source.products, [{ key: 'label', label: 'Product' }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'conversions', label: 'Conv.', format: fmt.num }])));
   }
   if (key === 'gbp') {
     const reviews = source.reviews;
@@ -1397,7 +1702,7 @@ function renderSource(view, key) {
       grid.append(panel('Latest reviews', r.latest.length ? latest : el('p', 'No reviews yet.', 'empty-note')));
     } else grid.append(panel('Reviews', failed(reviews)));
     const totals = now || {};
-    grid.append(panel('Where customers found you', shareBar([{ label: 'Google Maps', value: totals.mapsImpressions || 0 }, { label: 'Google Search', value: totals.searchImpressions || 0 }], fmt.num), { note: 'Share of profile views.' }));
+    grid.append(panel('Where customers found you', shareBar([{ label: 'Search · mobile', value: totals.searchMobile || 0, slot: 0 }, { label: 'Search · desktop', value: totals.searchDesktop || 0, slot: 1 }, { label: 'Maps · mobile', value: totals.mapsMobile || 0, slot: 2 }, { label: 'Maps · desktop', value: totals.mapsDesktop || 0, slot: 3 }].filter(part => part.value), fmt.num), { note: 'Share of profile views by Google surface and device.' }));
     grid.append(panel('What customers did', shareBar([{ label: 'Calls', value: totals.calls || 0, slot: 0 }, { label: 'Website', value: totals.websiteClicks || 0, slot: 1 }, { label: 'Directions', value: totals.directions || 0, slot: 2 }, { label: 'Messages', value: totals.conversations || 0, slot: 3 }, { label: 'Bookings', value: totals.bookings || 0, slot: 4 }].filter(part => part.value), fmt.num)));
     const keywords = rowsOf(source.keywords);
     grid.append(panel('Search keywords', keywords ? rankedTable(keywords, [{ key: 'label', label: 'Keyword' }, { key: 'impressions', label: 'Impressions', format: (v, row) => row.threshold ? `< ${v}` : fmt.num(v), bar: true }]) : failed(source.keywords), { wide: true, note: keywords ? `Monthly data, ${monthSpan(state.snapshot.range)}. Counts below 15 are shown as a threshold.` : undefined }));
@@ -1410,10 +1715,237 @@ function renderSource(view, key) {
     caption.append(el('strong', fmt.pct0(rate)), el('span', `${fmt.num(now?.answered || 0)} answered · ${fmt.num(now?.missed || 0)} missed`));
     answered.append(g, caption);
     grid.append(panel('Answer rate', answered));
-    grid.append(panel('Calls by source', tableFrom(source.sources, [{ key: 'label', label: 'Source' }, { key: 'calls', label: 'Calls', format: fmt.num, bar: true }, { key: 'firstTime', label: 'First-time', format: fmt.num }, { key: 'answerRate', label: 'Answered', format: fmt.pct0 }])));
-    grid.append(panel('Calls by campaign', tableFrom(source.campaigns, [{ key: 'label', label: 'Campaign' }, { key: 'calls', label: 'Calls', format: fmt.num, bar: true }, { key: 'firstTime', label: 'First-time', format: fmt.num }, { key: 'answerRate', label: 'Answered', format: fmt.pct0 }]), { wide: true }));
+    if (source.options?.breakdown !== 'source') grid.append(panel('Calls by source', rowsOf(source.sources) ? shareBar(rowsOf(source.sources).slice(0, 6).map((row, i) => ({ label: row.label, value: row.calls, slot: i })), fmt.num) : failed(source.sources), { note: 'Top sources by calls.' }));
   }
+  closeGaps(grid);
   view.append(grid);
+}
+
+/* ---------------- Filters, breakdowns and customisation ---------------- */
+
+const keyLabel = source => source?.options?.keyEvent ? `Key events: ${source.options.keyEvent}` : 'Key events';
+const choiceLabel = (filter, source, value) => (filter.choices?.(source) || []).find(([v]) => v === value)?.[1] || value;
+
+function filterBar(key, source) {
+  const config = SOURCES[key];
+  const current = state.options[key] || {};
+  const box = el('section', undefined, 'panel filter-panel reveal');
+  const top = el('div', undefined, 'panel-head');
+  top.append(el('h3', 'Filters'));
+  const chips = el('div', undefined, 'chips');
+  for (const name of activeFilters(key)) {
+    const filter = config.filters.find(f => f.key === name);
+    if (!filter) continue;
+    const value = current[name];
+    const match = filter.match && current[filter.match] && current[filter.match] !== 'contains' ? ` ${MATCHES.find(([v]) => v === current[filter.match])?.[1] || ''}` : '';
+    const chip = el('button', undefined, 'chip'); chip.type = 'button';
+    chip.setAttribute('aria-label', `Remove filter ${filter.label}`);
+    chip.append(el('span', `${filter.label}${match}: `, 'chip-key'), el('strong', filter.type === 'select' ? choiceLabel(filter, source, value) : value), el('span', '×', 'chip-x'));
+    chip.onclick = () => setOptions(key, { [name]: '' });
+    chips.append(chip);
+  }
+  if (!chips.children.length) chips.append(el('span', 'Showing all data', 'chips-empty'));
+  const open = Boolean(state.filtersOpen[key]);
+  const toggle = el('button', open ? 'Hide' : activeFilters(key).length ? 'Edit filters' : 'Add filters', 'btn'); toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.onclick = () => { state.filtersOpen[key] = !open; render(); };
+  top.append(chips, toggle);
+  box.append(top);
+  if (!open) { box.classList.add('collapsed'); return box; }
+
+  const form = el('form', undefined, 'filter-grid');
+  form.noValidate = false;
+  for (const filter of config.filters) {
+    const field = el('label', undefined, 'filter-field');
+    field.append(el('span', filter.label, 'filter-label'));
+    const value = current[filter.key] || '';
+    let control;
+    if (filter.type === 'select') {
+      control = el('select');
+      for (const [v, text] of filter.choices(source)) control.add(new Option(text, v));
+      if (value && ![...control.options].some(option => option.value === value)) control.add(new Option(value, value));
+      control.value = value;
+    } else {
+      control = el('input');
+      control.type = 'text';
+      control.value = value;
+      control.placeholder = filter.placeholder || '';
+      control.maxLength = 120;
+      control.autocomplete = 'off';
+      if (filter.pattern) control.pattern = filter.pattern;
+      if (filter.type === 'suggest') {
+        const list = el('datalist'); list.id = `dl-${key}-${filter.key}`;
+        for (const option of filter.suggest(source)) list.append(new Option(option));
+        control.setAttribute('list', list.id);
+        field.append(list);
+      }
+    }
+    control.name = filter.key;
+    if (filter.match) {
+      const row = el('span', undefined, 'filter-match');
+      const operator = el('select'); operator.name = filter.match; operator.setAttribute('aria-label', `${filter.label} match`);
+      for (const [v, text] of MATCHES) operator.add(new Option(text, v));
+      operator.value = current[filter.match] || 'contains';
+      row.append(operator, control);
+      field.append(row);
+    } else field.append(control);
+    form.append(field);
+  }
+  const actions = el('div', undefined, 'filter-actions');
+  const apply = el('button', 'Apply filters', 'primary small'); apply.type = 'submit';
+  const clear = el('button', 'Clear all', 'btn'); clear.type = 'button';
+  clear.disabled = !activeFilters(key).length;
+  clear.onclick = () => setOptions(key, Object.fromEntries(config.filters.flatMap(f => [[f.key, ''], ...(f.match ? [[f.match, '']] : [])])));
+  actions.append(clear, apply);
+  form.append(actions);
+  form.onsubmit = event => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const patch = {};
+    for (const filter of config.filters) {
+      let value = form.elements[filter.key].value.trim();
+      if (filter.upper) value = value.toUpperCase();
+      patch[filter.key] = value;
+      if (filter.match) patch[filter.match] = value ? form.elements[filter.match].value : '';
+    }
+    state.filtersOpen[key] = false;
+    setOptions(key, patch);
+  };
+  box.append(form);
+  return box;
+}
+
+function customizer(key) {
+  const config = SOURCES[key];
+  const shown = new Set(visibleKpis(key).map(kpi => kpi.key));
+  const box = el('section', undefined, 'panel customizer reveal');
+  const top = el('div', undefined, 'panel-head');
+  top.append(el('h3', 'Metrics to show'));
+  const reset = el('button', 'Reset to default', 'btn'); reset.type = 'button';
+  reset.onclick = () => { delete state.tiles[key]; writeStore(TILES_KEY, state.tiles); render(); };
+  top.append(reset);
+  box.append(top);
+  const list = el('div', undefined, 'toggle-list');
+  for (const kpi of config.kpis) {
+    const toggle = el('button', kpi.label, 'toggle'); toggle.type = 'button';
+    toggle.setAttribute('aria-pressed', String(shown.has(kpi.key)));
+    toggle.onclick = () => {
+      if (shown.has(kpi.key)) shown.delete(kpi.key); else shown.add(kpi.key);
+      state.tiles[key] = config.kpis.map(k => k.key).filter(k => shown.has(k));
+      writeStore(TILES_KEY, state.tiles);
+      render();
+    };
+    list.append(toggle);
+  }
+  box.append(list, el('p', 'Saved on this device. Trend metrics are picked on the chart.', 'panel-note'));
+  return box;
+}
+
+function breakdownColumns(key, source) {
+  const money = moneyFormatter(currencyOf(source));
+  const orDash = f => v => v === null || v === undefined ? '—' : f(v);
+  const dimension = source.options?.breakdown;
+  const label = SOURCES[key].breakdowns?.find(([v]) => v === dimension)?.[1] || 'Item';
+  if (key === 'ga4') return [{ key: 'label', label, format: dimension === 'landingPagePlusQueryString' ? shortUrl : undefined }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Users', format: fmt.num },
+    { key: 'keyEvents', label: keyLabel(source), format: fmt.num }, { key: 'keyEventRate', label: 'Key event rate', format: fmt.pct }, { key: 'totalRevenue', label: 'Revenue', format: money }, { key: 'engagementRate', label: 'Engaged', format: fmt.pct0 }];
+  if (key === 'search_console') return [{ key: 'label', label, format: dimension === 'page' ? shortUrl : undefined }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'ctr', label: 'CTR', format: fmt.pct }, { key: 'position', label: 'Pos.', format: fmt.dec }];
+  if (key === 'google_ads') {
+    if (dimension === 'conversion_action') return [{ key: 'label', label }, { key: 'conversions', label: 'Conversions', format: fmt.num, bar: true }, { key: 'conversionValue', label: 'Conv. value', format: money }, { key: 'allConversions', label: 'All conv.', format: fmt.num }];
+    return [{ key: 'label', label }, { key: 'cost', label: 'Spend', format: money, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'clicks', label: 'Clicks', format: fmt.num }, { key: 'ctr', label: 'CTR', format: orDash(fmt.pct) },
+      { key: 'cpc', label: 'Avg. CPC', format: orDash(money) }, { key: 'conversions', label: 'Conv.', format: fmt.num }, { key: 'cpa', label: 'Cost / conv.', format: orDash(money) }, { key: 'conversionValue', label: 'Conv. value', format: money }, { key: 'roas', label: 'ROAS', format: orDash(fmt.ratio) }];
+  }
+  if (key === 'merchant_center') return [{ key: 'label', label }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'ctr', label: 'CTR', format: orDash(fmt.pct) }, { key: 'conversions', label: 'Conv.', format: fmt.num }, { key: 'conversionValue', label: 'Conv. value', format: money }];
+  return [{ key: 'label', label }, { key: 'calls', label: 'Calls', format: fmt.num, bar: true }, { key: 'answered', label: 'Answered', format: fmt.num }, { key: 'firstTime', label: 'First-time', format: fmt.num }, { key: 'answerRate', label: 'Answer rate', format: fmt.pct0 }, { key: 'averageDuration', label: 'Avg. duration', format: fmt.seconds }];
+}
+
+// Derived columns are computed per row so sorting works on them too.
+function breakdownRows(key, source) {
+  const dimension = source.options?.breakdown;
+  return (rowsOf(source.breakdown) || []).map(row => {
+    if (key === 'ga4') return { ...row, label: row[dimension] ?? '', keyEventRate: row.sessions ? row.keyEvents / row.sessions : 0 };
+    if (key === 'google_ads') return { ...row, ctr: row.impressions ? row.clicks / row.impressions : null, cpc: row.clicks ? row.cost / row.clicks : null, cpa: row.conversions ? row.cost / row.conversions : null, roas: row.cost ? row.conversionValue / row.cost : null };
+    if (key === 'merchant_center') return { ...row, ctr: row.impressions ? row.clicks / row.impressions : null };
+    return row;
+  });
+}
+
+function breakdownPanel(key, source) {
+  const config = SOURCES[key];
+  if (!config.breakdowns || !source.breakdown) return el('div', undefined, 'hidden-slot');
+  const node = el('section', undefined, 'panel wide reveal');
+  const head = el('div', undefined, 'panel-head');
+  const title = el('div', undefined, 'panel-title');
+  title.append(el('h3', 'Breakdown'));
+  const picker = el('select', undefined, 'inline-select');
+  picker.setAttribute('aria-label', 'Break down by');
+  for (const [value, text] of config.breakdowns) picker.add(new Option(`by ${text}`, value));
+  picker.value = source.options?.breakdown || config.breakdowns[0][0];
+  picker.onchange = () => setOptions(key, { breakdown: picker.value });
+  title.append(picker);
+  head.append(title);
+  const rowsSwitch = el('div', undefined, 'segmented');
+  rowsSwitch.setAttribute('role', 'radiogroup'); rowsSwitch.setAttribute('aria-label', 'Rows to show');
+  const limit = Number(state.options[key]?.limit) || 10;
+  for (const count of [10, 25, 50]) {
+    const chip = el('button', `Top ${count}`); chip.type = 'button';
+    chip.setAttribute('role', 'radio'); chip.setAttribute('aria-checked', String(count === limit));
+    chip.onclick = () => { if (count !== limit) setOptions(key, { limit: count }); };
+    rowsSwitch.append(chip);
+  }
+  head.append(rowsSwitch);
+  node.append(head);
+  const rows = rowsOf(source.breakdown);
+  if (!rows) node.append(failed(source.breakdown));
+  else {
+    node.append(rankedTable(breakdownRows(key, source), breakdownColumns(key, source)));
+    node.append(el('p', `${source.breakdown.data.limited ? `Top ${limit} rows only, not a full total. ` : ''}Click a column to sort.${key === 'google_ads' && source.options?.breakdown === 'conversion_action' ? ' Conversion actions report conversion metrics only.' : ''}`, 'panel-note'));
+  }
+  return node;
+}
+
+// Picks a column count that fills every row evenly (6 tiles → 3+3 or 6, never 4+2),
+// within the widest layout the container allows. Re-runs when the container resizes.
+const balancers = new Set();
+function balance(grid, minWidth, gap = 12) {
+  const fit = () => {
+    const items = grid.children.length;
+    if (!items || !grid.isConnected) return;
+    const max = Math.max(1, Math.min(items, Math.floor((grid.clientWidth + gap) / (minWidth + gap))));
+    const rows = Math.ceil(items / max);
+    grid.style.gridTemplateColumns = `repeat(${Math.ceil(items / rows)}, minmax(0, 1fr))`;
+  };
+  fit();
+  const observer = new ResizeObserver(fit);
+  observer.observe(grid);
+  balancers.add(observer);
+}
+function resetBalancers() { for (const observer of balancers) observer.disconnect(); balancers.clear(); }
+
+// Below desktop width, put tabs, date controls and actions on one bar when they fit;
+// otherwise the date controls drop to a second row. Measured, not guessed, because the
+// open tab's label and a custom date range change the widths.
+// Tries, in order: one row with the open tab's name, one row with logos only (the page
+// title still names the view), then two rows.
+let activeLabelWidth = 90;
+function fitHeader() {
+  const app = document.querySelector('.app');
+  const width = window.innerWidth;
+  if (width > 1100 || width <= 620) { app.classList.remove('one-row', 'tight'); return; }
+  const active = $('nav').querySelector('[aria-current=true]');
+  if (active && !app.classList.contains('tight')) activeLabelWidth = active.offsetWidth - 44;
+  const logosOnly = $('nav').scrollWidth - (active ? active.offsetWidth - 44 : 0);
+  // Brand, side paddings and gaps between the three groups.
+  const fixed = document.querySelector('.brand').offsetWidth + document.querySelector('.controls').scrollWidth + document.querySelector('.actions').scrollWidth + 110;
+  const labelled = fixed + logosOnly + activeLabelWidth <= width;
+  const compact = fixed + logosOnly <= width;
+  app.classList.toggle('one-row', compact);
+  app.classList.toggle('tight', compact && !labelled);
+}
+
+// A lone half-width panel at the end of a two-column grid takes the full row instead.
+function closeGaps(grid) {
+  const halves = [...grid.children].filter(node => node.classList.contains('panel') && !node.classList.contains('wide'));
+  if (halves.length % 2) halves.at(-1).classList.add('wide');
 }
 
 function legendItem(kind, text) {
@@ -1438,7 +1970,7 @@ function summaryFor(key) {
     for (const [field, report] of Object.entries(source)) if (report?.status === 'ready' && Array.isArray(report.data?.rows) && !['totals', 'comparison', 'daily', 'dailyPrevious'].includes(field)) tables[field] = report.data.rows.slice(0, 8);
     if (source.health?.status === 'ready') tables.productIssues = source.health.data.issues.slice(0, 6);
     if (source.reviews?.status === 'ready') tables.reviews = { ...source.reviews.data, latest: source.reviews.data.latest.slice(0, 3) };
-    out.sources[name] = { account: source.account, currency: currencyOf(source), kpis, tables };
+    out.sources[name] = { account: source.account, currency: currencyOf(source), filters: source.options || {}, kpis, tables };
   }
   return out;
 }
@@ -1446,11 +1978,17 @@ function summaryFor(key) {
 async function ask() {
   if (!state.snapshot || state.busy) return;
   const label = state.view === 'overview' ? 'cross-channel overview' : `${SOURCES[state.view].full} view`;
+  const summary = JSON.stringify(summaryFor(state.view));
+  let prompt = `Analyse the ${label} on my marketing dashboard for ${state.snapshot.range.startDate} to ${state.snapshot.range.endDate}. Compare with the previous period, explain the three strongest signals with their figures, and suggest three practical next actions. Separate evidence from hypotheses, and say where a source failed or its attribution differs.${state.view !== 'overview' && activeFilters(state.view).length ? ' The view is filtered; the filters are listed in the data.' : ''}`;
+  // Model context is optional: hosts that refuse it still get the data inline with the prompt.
+  try { await host.updateModelContext({ content: [{ type: 'text', text: summary }] }); }
+  catch { prompt += `\n\nDashboard data (JSON):\n${summary}`; }
   try {
-    await host.updateModelContext({ content: [{ type: 'text', text: JSON.stringify(summaryFor(state.view)) }] });
-    await host.sendMessage(`Analyse the ${label} on my marketing dashboard for ${state.snapshot.range.startDate} to ${state.snapshot.range.endDate}. Compare with the previous period, explain the three strongest signals with their figures, and suggest three practical next actions. Separate evidence from hypotheses, and say where a source failed or its attribution differs.`);
+    await host.sendMessage(prompt);
     status('Sent to ChatGPT. The analysis appears in the conversation.', 'info');
-  } catch { status('Could not send to ChatGPT. Ask it to analyse the loaded dashboard instead.', 'error'); }
+  } catch (error) {
+    status(`Could not send to ChatGPT (${error.message}). Ask it to analyse the loaded dashboard instead.`, 'error');
+  }
 }
 
 /* ---------------- Controls ---------------- */
@@ -1459,15 +1997,23 @@ function setPreset(value) {
   state.preset = value;
   for (const button of document.querySelectorAll('[data-preset]')) button.setAttribute('aria-checked', String(String(value) === button.dataset.preset));
   $('custom-range').hidden = value !== 'custom';
+  fitHeader();
   if (value !== 'custom' && state.snapshot) load();
 }
 
 function applyTheme(theme) { if (theme) document.documentElement.dataset.theme = theme; }
 
 function wire() {
+  window.addEventListener('resize', fitHeader);
   for (const button of document.querySelectorAll('[data-preset]')) button.onclick = () => setPreset(button.dataset.preset === 'custom' ? 'custom' : Number(button.dataset.preset));
   $('apply-custom').onclick = load;
   $('compare').onchange = () => { state.compare = $('compare').checked; if (state.snapshot) load(); };
+  // Sandboxed hosts can block plain links, so ask the host to open them; fall back to a new tab.
+  for (const link of document.querySelectorAll('.credit-link')) link.onclick = event => {
+    if (!state.connected) return;
+    event.preventDefault();
+    host.openLink(link.href).catch(() => window.open(link.href, '_blank', 'noopener'));
+  };
   $('accounts').onclick = openSheet;
   $('refresh').onclick = load;
   $('ask').onclick = ask;

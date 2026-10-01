@@ -29,7 +29,10 @@ test('GA4 uses period user totals, normalises dates and loads the previous daily
   const data = await load(h, { propertyId: '269500556' });
   const ga4 = data.sources.ga4;
   assert.deepEqual(h.calls.ga4[0].dimensions, []);
-  assert.equal(h.calls.ga4.length, 7);
+  assert.equal(h.calls.ga4.length, 9);
+  assert.equal(ga4.breakdown.data.rows[0].sessionDefaultChannelGroup, 'Organic Search');
+  assert.deepEqual(ga4.facets.mediums.slice(0, 2), ['organic', '(none)']);
+  assert.equal(ga4.facets.keyEvents[0].name, 'generate_lead');
   assert.ok(ga4.totals.data.rows[0].activeUsers > 0);
   assert.equal(ga4.daily.data.rows[0].date, '2026-09-01');
   assert.equal(ga4.dailyPrevious.data.rows[0].date, '2026-08-04');
@@ -46,12 +49,58 @@ test('Search Console totals are unsegmented and final', async () => {
 test('Ads converts micros once, keeps fractional conversions and the MCC ID', async () => {
   const h = harness();
   const data = await load(h, { customerId: '2756458445', loginCustomerId: '9999999999', compare: false });
-  assert.equal(data.sources.google_ads.totals.data.rows[0].cost, 4210);
-  assert.equal(data.sources.google_ads.totals.data.rows[0].conversions, 61.5);
-  assert.equal(data.sources.google_ads.comparison, null);
-  assert.equal(h.calls.ads.length, 3);
+  const ads = data.sources.google_ads;
+  const daily = ads.daily.data.rows;
+  assert.equal(ads.totals.data.rows[0].cost, daily.reduce((sum, row) => sum + row.cost, 0));
+  assert.ok(daily.some(row => !Number.isInteger(row.conversions)));
+  assert.equal(ads.comparison, null);
+  assert.equal(h.calls.ads.length, 2, 'Basic Access: totals come from the daily query');
   assert.equal(h.calls.ads[0].loginCustomerId, '9999999999');
-  assert.match(h.calls.ads[2].query, /FROM campaign/);
+  assert.ok(h.calls.ads.some(call => /^SELECT segments\.date.* FROM customer /.test(call.query)));
+  assert.ok(h.calls.ads.some(call => /^SELECT campaign\.name.* FROM campaign /.test(call.query)));
+  assert.equal(ads.breakdown.data.rows[1].detail, 'Performance max · Enabled');
+});
+test('Ads campaign filters scope every query and escape LIKE wildcards; segment breakdowns fold', async () => {
+  const h = harness();
+  const data = await load(h, { customerId: '2756458445', options: { google_ads: { status: 'ENABLED', channel: 'SEARCH', campaign: '50%_off', breakdown: 'device' } } });
+  for (const call of h.calls.ads) {
+    assert.match(call.query, /campaign\.status = 'ENABLED' AND campaign\.advertising_channel_type = 'SEARCH' AND campaign\.name LIKE '%50\[%\]\[_\]off%'/);
+  }
+  assert.ok(h.calls.ads.some(call => /^SELECT segments\.date.* FROM campaign /.test(call.query)));
+  assert.deepEqual(data.sources.google_ads.breakdown.data.rows.map(row => row.label), ['Mobile', 'Desktop']);
+  const bad = harness();
+  await assert.rejects(load(bad, { customerId: '1', options: { google_ads: { campaign: "x' OR 1=1" } } }));
+  assert.equal(bad.calls.ads.length, 0);
+});
+test('GA4 filters apply to totals, a chosen key event keeps the keyEvents column, suggestions stay unfiltered', async () => {
+  const h = harness();
+  const data = await load(h, { propertyId: '1', options: { ga4: { medium: 'cpc', landingPage: '/carports', keyEvent: 'generate_lead', breakdown: 'sessionSource' } } });
+  const totals = h.calls.ga4[0];
+  assert.equal(totals.dimensionFilter.andGroup.expressions.length, 2);
+  assert.ok(totals.metrics.some(m => m.name === 'keyEvents:generate_lead'));
+  assert.ok('keyEvents' in data.sources.ga4.totals.data.rows[0]);
+  const suggestions = h.calls.ga4.find(call => call.dimensions.length === 2);
+  assert.equal(suggestions.dimensionFilter, undefined);
+  const events = h.calls.ga4.find(call => call.dimensions[0]?.name === 'eventName');
+  assert.deepEqual(events.metrics, [{ name: 'keyEvents' }]);
+  assert.equal(data.sources.ga4.options.breakdown, 'sessionSource');
+});
+test('Search Console filters and search type reach every query', async () => {
+  const h = harness();
+  await load(h, { siteUrl: 'sc-domain:x.com', options: { search_console: { query: 'carport', queryMatch: 'notContains', country: 'USA', searchType: 'image', breakdown: 'page' } } });
+  for (const call of h.calls.gsc) {
+    assert.equal(call.type, 'image');
+    assert.deepEqual(call.dimensionFilterGroups[0].filters, [{ dimension: 'query', operator: 'notContains', expression: 'carport' }, { dimension: 'country', operator: 'equals', expression: 'usa' }]);
+  }
+});
+test('Merchant and CallRail filters reach their queries', async () => {
+  const h = harness();
+  const data = await load(h, { merchantAccountId: '1', callrailAccountId: 'ACC1', options: { merchant_center: { method: 'ADS', country: 'US', breakdown: 'brand' }, callrail: { device: 'mobile', breakdown: 'campaign' } } });
+  for (const call of h.calls.merchant) assert.match(call.query, /marketing_method = 'ADS' AND customer_country_code = 'US'/);
+  assert.ok(h.calls.merchant.some(call => /^SELECT brand,/.test(call.query)));
+  assert.ok(h.calls.callrail.every(call => call.query.device === 'mobile'));
+  assert.equal(data.sources.callrail.breakdown.data.rows[0].label, '(none)');
+  assert.equal(data.sources.callrail.sources.data.rows[0].label, 'Google Ads');
 });
 test('Merchant totals are summed from daily rows and health folds duplicate contexts', async () => {
   const h = harness();
@@ -60,6 +109,7 @@ test('Merchant totals are summed from daily rows and health folds duplicate cont
   const daily = merchant.daily.data.rows;
   assert.equal(merchant.totals.data.rows[0].impressions, daily.reduce((sum, row) => sum + row.impressions, 0));
   assert.equal(merchant.methods.data.rows[0].label, 'Free listings');
+  assert.equal(merchant.breakdown.data.rows[0].label, '20x41 Vertical Roof Carport');
   assert.deepEqual(merchant.health.data.contexts.map(c => c.context), ['FREE_LOCAL_LISTINGS', 'SHOPPING_ADS']);
   assert.equal(merchant.health.data.issues[0].severity, 'DISAPPROVED');
   assert.equal(merchant.health.data.issues.at(-1).severity, 'NOT_IMPACTED');
@@ -100,7 +150,7 @@ test('CallRail summarises calls, answer rate and grouped sources', async () => {
   assert.equal(calls.totals.data.rows[0].answerRate, 1079 / 1173);
   assert.equal(calls.comparison.data.rows[0].calls, 1020);
   assert.equal(calls.sources.data.rows[0].label, 'Google Ads');
-  assert.equal(calls.campaigns.data.rows[0].label, '(none)');
+  assert.equal(calls.breakdown.data.rows[0].label, 'Google Ads');
   assert.equal(calls.daily.data.rows.length, 28);
 });
 test('CallRail without a connected token fails alone', async () => {
@@ -137,7 +187,7 @@ test('merchant health ranks disapprovals before notices', () => {
 test('registered resource is self-contained, versioned and the opener declares both entrypoints', async () => {
   const h = harness();
   const resource = (await h.resources[DASHBOARD_URI]()).contents[0];
-  assert.equal(DASHBOARD_URI, 'ui://marketing/dashboard-v2.html');
+  assert.equal(DASHBOARD_URI, 'ui://marketing/dashboard-v3.html');
   assert.equal(resource.mimeType, 'text/html;profile=mcp-app');
   assert.match(resource.text, /Marketer Companion/);
   assert.ok(!resource.text.includes('/* APP_SCRIPT */'));

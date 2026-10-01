@@ -1,24 +1,33 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "marketer-companion-dashboard",
-  "version": "0.1.0",
-  "description": "A marketing dashboard using the existing Marketing Data MCP server.",
+  "version": "1.0.0",
+  "description": "Live marketing dashboard and reporting for GA4, Search Console, Google Ads, Merchant Center, Google Business Profile and CallRail.",
   "author": {
-    "name": "TheJayant"
+    "name": "Jayant Solanki",
+    "url": "https://thejayant.in"
   },
+  "homepage": "https://ga4mcpjs.vercel.app/install",
+  "keywords": ["marketing", "analytics", "ga4", "search console", "google ads", "merchant center", "business profile", "callrail", "dashboard", "seo", "ppc"],
   "extensions": {
     "com.openai": {
       "interface": {
-        "displayName": "Marketer Companion Dashboard",
-        "shortDescription": "Traffic, search & ad insights",
-        "longDescription": "Review GA4, Search Console and Google Ads with date comparisons, trend charts and account selectors. The dashboard UI requires the accompanying server update to be deployed to ga4mcpjs.vercel.app. Connect your account through the server\u2019s existing OAuth flow.",
-        "developerName": "TheJayant",
+        "displayName": "Marketer Companion",
+        "shortDescription": "GA4, Search, Ads & local insights",
+        "longDescription": "Open a live marketing dashboard in ChatGPT for one business across GA4, Search Console, Google Ads, Merchant Center, Google Business Profile and CallRail. Compare periods, filter each source (channels, sources, mediums, key events, campaigns, queries, devices and more), break results down by any dimension, and ask ChatGPT to analyse the view you are looking at. Connect with your own Google account; CallRail is optional. Reporting is read-only.",
+        "developerName": "Jayant Solanki",
         "category": "Productivity",
-        "capabilities": [
-          "Interactive"
+        "capabilities": ["Interactive", "Read", "Write"],
+        "websiteURL": "https://ga4mcpjs.vercel.app/install",
+        "privacyPolicyURL": "https://ga4mcpjs.vercel.app/privacy",
+        "termsOfServiceURL": "https://ga4mcpjs.vercel.app/terms",
+        "defaultPrompt": [
+          "Open my marketing dashboard.",
+          "Compare my GA4 sessions and key events with the previous 28 days.",
+          "Which Google Ads campaigns spent the most last month, and what did they convert?"
         ],
-        "defaultPrompt": "Open my marketing dashboard using open_marketing_dashboard.",
-        "logo": "./assets/icon.svg",
+        "brandColor": "#25BD63",
+        "logo": "./assets/logo.png",
         "composerIcon": "./assets/icon.svg"
       }
     }

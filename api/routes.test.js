@@ -105,7 +105,7 @@ test("authenticated MCP exposes the dashboard resource and opener without upstre
   };
   const tools = await rpc('tools/list', {});
   const opener = tools.tools.find(tool => tool.name === 'open_marketing_dashboard');
-  assert.equal(opener._meta.ui.resourceUri, 'ui://marketing/dashboard-v2.html');
+  assert.equal(opener._meta.ui.resourceUri, 'ui://marketing/dashboard-v3.html');
   const read = await rpc('resources/read', { uri: opener._meta.ui.resourceUri });
   assert.match(read.contents[0].text, /Marketer Companion/);
   const opened = await rpc('tools/call', { name: opener.name, arguments: {} });
@@ -318,4 +318,29 @@ test("CBX screen requires the internal secret and seals approval into OAuth toke
   } finally {
     process.env.CBX_INTERNAL_SECRET = "test-only-internal-secret";
   }
+});
+
+test("install, privacy and terms pages are public and the OpenAI challenge serves only a configured token", async () => {
+  for (const path of ["/install", "/support", "/privacy", "/terms"]) {
+    const response = await fetch(`${baseUrl}${path}`);
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get("content-type"), /text\/html/);
+  }
+  const install = await (await fetch(`${baseUrl}/install`)).text();
+  assert.ok(!install.includes("http://"), "install guide never shows a plain-HTTP address");
+  assert.ok(install.includes("claude mcp add --transport http marketer-companion https://ga4mcpjs.vercel.app/mcp"), "a local run shows the public HTTPS address");
+  assert.ok(!install.includes("plugin directory"), "directory route stays hidden until the listing is live");
+  process.env.PLUGIN_DIRECTORY_LIVE = "true";
+  assert.ok((await (await fetch(`${baseUrl}/install`)).text()).includes("plugin directory"));
+  delete process.env.PLUGIN_DIRECTORY_LIVE;
+  assert.match(await (await fetch(`${baseUrl}/privacy`)).text(), /Limited Use/);
+
+  const previous = process.env.OPENAI_APPS_CHALLENGE;
+  delete process.env.OPENAI_APPS_CHALLENGE;
+  assert.equal((await fetch(`${baseUrl}/.well-known/openai-apps-challenge`)).status, 404);
+  process.env.OPENAI_APPS_CHALLENGE = " test-challenge-token\n";
+  const challenge = await fetch(`${baseUrl}/.well-known/openai-apps-challenge`);
+  assert.equal(await challenge.text(), "test-challenge-token");
+  if (previous === undefined) delete process.env.OPENAI_APPS_CHALLENGE;
+  else process.env.OPENAI_APPS_CHALLENGE = previous;
 });

@@ -69,7 +69,15 @@ export class HostBridge {
 
   callServerTool(name, args = {}) { return this.request('tools/call', { name, arguments: args }); }
   updateModelContext(params) { return this.request('ui/update-model-context', params); }
-  sendMessage(text) { return this.request('ui/message', { role: 'user', content: [{ type: 'text', text }] }); }
+  // ChatGPT also exposes its Apps SDK global; use it when the MCP Apps request is refused.
+  async sendMessage(text) {
+    try {
+      return await this.request('ui/message', { role: 'user', content: [{ type: 'text', text }] });
+    } catch (error) {
+      if (typeof window.openai?.sendFollowUpMessage !== 'function') throw error;
+      return window.openai.sendFollowUpMessage({ prompt: text });
+    }
+  }
   requestDisplayMode(mode) { return this.request('ui/request-display-mode', { mode }); }
   openLink(url) { return this.request('ui/open-link', { url }); }
 

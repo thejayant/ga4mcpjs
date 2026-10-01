@@ -7,6 +7,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { GBP_SCOPE } from "../MCP GBP/client.js";
 import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
 import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
+import { registerPublicPages } from "./pages.js";
 
 const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
@@ -8142,6 +8143,7 @@ const app = express();
 app.set("trust proxy", true);
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
+registerPublicPages(app, { getBaseUrl });
 
 app.get("/", (req, res) => {
   const baseUrl = getBaseUrl(req);

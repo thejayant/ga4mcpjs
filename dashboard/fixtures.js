@@ -18,8 +18,11 @@ function ga4Body(params) {
     const days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
     rows = Array.from({ length: days }, (_, i) => ({ dimensionValues: [{ value: day(startDate, i).replace(/-/g, '') }], metricValues: metrics.map(m => ({ value: String(value(m, i)) })) }));
   } else {
-    const labels = { sessionDefaultChannelGroup: ['Organic Search', 'Direct', 'Paid Search', 'Referral', 'AI Assistant', 'Organic Social'], landingPagePlusQueryString: ['/', '/carports', '/garages/residential', '/barns', '/financing?utm=x', '/contact'], deviceCategory: ['mobile', 'desktop', 'tablet'] }[dims[0]] || ['a'];
-    rows = labels.map((label, i) => ({ dimensionValues: [{ value: label }], metricValues: metrics.map(m => ({ value: String(m === 'engagementRate' ? 0.5 + i / 20 : Math.round(2000 / (i + 1))) })) }));
+    const pool = { sessionDefaultChannelGroup: ['Organic Search', 'Direct', 'Paid Search', 'Referral', 'AI Assistant', 'Organic Social'], landingPagePlusQueryString: ['/', '/carports', '/garages/residential', '/barns', '/financing?utm=x', '/contact'], deviceCategory: ['mobile', 'desktop', 'tablet'],
+      sessionSource: ['google', '(direct)', 'bing', 'chatgpt.com', 'facebook.com'], sessionMedium: ['organic', '(none)', 'cpc', 'referral', 'social'], eventName: ['generate_lead', 'phone_call', 'form_submit'], country: ['United States', 'Canada'] };
+    const labels = pool[dims[0]] || ['(not set)', 'a', 'b'];
+    rows = labels.map((label, i) => ({ dimensionValues: dims.map((d, j) => ({ value: j ? (pool[d] || ['x'])[i % (pool[d] || ['x']).length] : label })),
+      metricValues: metrics.map(m => ({ value: String(['engagementRate', 'bounceRate'].includes(m) ? 0.5 + i / 20 : Math.round(2000 / (i + 1))) })) }));
   }
   return { dimensionHeaders: dims.map(name => ({ name })), metricHeaders: metrics.map(name => ({ name })), rows, rowCount: rows.length, metadata: { currencyCode: 'USD', timeZone: 'America/Los_Angeles' } };
 }
@@ -51,9 +54,9 @@ export function fixtureDeps(overrides = {}) {
       const prior = /BETWEEN '2026-08/.test(params.query);
       const metrics = (scale = 1) => ({ impressions: String(Math.round(52000 * scale)), clicks: String(Math.round(1830 * scale)), costMicros: String(Math.round(4210e6 * scale)), conversions: (61.5 * scale * (prior ? 1.1 : 1)).toFixed(1), conversionsValue: 0 });
       const customer = { currencyCode: 'USD', timeZone: 'America/New_York' };
-      if (/, segments\.date FROM/.test(params.query)) return { ok: true, body: { results: Array.from({ length: 28 }, (_, i) => ({ customer, segments: { date: day(prior ? '2026-08-04' : '2026-09-01', i) }, metrics: metrics(wave(i, prior ? 90 : 100, 22, prior ? 2 : 1) / 2800) })) } };
-      if (/FROM campaign/.test(params.query)) return { ok: true, body: { results: ['Search | Carports | Exact', 'PMax | All products', 'Search | Brand', 'Demand Gen | Retargeting'].map((name, i) => ({ customer, campaign: { name }, metrics: metrics(0.5 / (i + 1)) })) } };
-      return { ok: true, body: { results: [{ customer, metrics: metrics(prior ? 0.93 : 1) }] } };
+      if (/^SELECT segments\.date/.test(params.query)) return { ok: true, body: { results: Array.from({ length: 28 }, (_, i) => ({ customer, segments: { date: day(prior ? '2026-08-04' : '2026-09-01', i) }, metrics: metrics(wave(i, prior ? 90 : 100, 22, prior ? 2 : 1) / 2800) })) } };
+      if (/segments\.device/.test(params.query)) return { ok: true, body: { results: ['MOBILE', 'DESKTOP', 'MOBILE'].map((device, i) => ({ segments: { device }, metrics: metrics(0.3 / (i + 1)) })) } };
+      return { ok: true, body: { results: ['Search | Carports | Exact', 'PMax | All products', 'Search | Brand', 'Demand Gen | Retargeting'].map((name, i) => ({ customer, campaign: { name, status: 'ENABLED', advertisingChannelType: i === 1 ? 'PERFORMANCE_MAX' : 'SEARCH' }, adGroup: { name: `Ad group ${i + 1}` }, metrics: metrics(0.5 / (i + 1)) })) } };
     },
     listMerchantAccounts: async () => ({ ok: true, body: { accounts: [{ accountId: '121515117', accountName: 'Carport Direct', homePageUri: 'https://www.carportdirect.com/' }] } }),
     searchMerchantReports: async (token, params) => {

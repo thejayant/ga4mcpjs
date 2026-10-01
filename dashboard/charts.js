@@ -164,35 +164,65 @@ export function sparkline(values) {
  * Ranked rows with an inline magnitude bar. columns: [{ key, label, format, bar? }]
  * The first column is the label; one column may carry the bar.
  */
+// Rows may carry a `detail` string, shown under the label. Headers sort the loaded rows
+// (click again to reverse); sorting never fetches, so it only reorders what is shown.
 export function rankedTable(rows, columns, { emptyText = 'No activity in this period.' } = {}) {
   if (!rows.length) return el('p', emptyText, 'empty-note');
   const barColumn = columns.find(column => column.bar) || columns[1];
-  const max = Math.max(...rows.map(row => Number(row[barColumn.key]) || 0), 1);
   const wrap = el('div', undefined, 'table-scroll');
   const table = el('table', undefined, 'ranked');
   const head = el('tr');
-  columns.forEach((column, index) => { const th = el('th', column.label); th.scope = 'col'; if (index) th.className = 'num'; head.append(th); });
-  const thead = el('thead'); thead.append(head); table.append(thead);
   const body = el('tbody');
-  const bars = [];
-  for (const row of rows) {
-    const tr = el('tr');
-    columns.forEach((column, index) => {
-      const value = row[column.key];
-      if (!index) {
-        const td = el('td', undefined, 'label-cell');
-        td.append(el('span', column.format ? column.format(value, row) : String(value ?? '—'), 'label-text'));
-        const track = el('span', undefined, 'bar-track');
-        const bar = el('span', undefined, 'bar');
-        const share = (Number(row[barColumn.key]) || 0) / max;
-        bar.style.width = share > 0 ? `${Math.max(1.5, share * 100)}%` : '0';
-        track.append(bar); td.append(track); bars.push(bar);
-        td.title = String(value ?? '');
-        tr.append(td);
-      } else tr.append(el('td', column.format ? column.format(value, row) : String(value ?? '—'), 'num'));
-    });
-    body.append(tr);
-  }
+  let bars = [];
+  let sort = { key: null, desc: true };
+  const compare = (a, b) => {
+    const x = a[sort.key], y = b[sort.key];
+    const nx = typeof x === 'number' ? x : x === null || x === undefined ? -Infinity : NaN;
+    const ny = typeof y === 'number' ? y : y === null || y === undefined ? -Infinity : NaN;
+    const result = Number.isNaN(nx) || Number.isNaN(ny) ? String(x ?? '').localeCompare(String(y ?? '')) : nx - ny;
+    return sort.desc ? -result : result;
+  };
+  const fill = () => {
+    const ordered = sort.key ? [...rows].sort(compare) : rows;
+    const max = Math.max(...rows.map(row => Number(row[barColumn.key]) || 0), 1);
+    body.replaceChildren();
+    bars = [];
+    for (const row of ordered) {
+      const tr = el('tr');
+      columns.forEach((column, index) => {
+        const value = row[column.key];
+        if (!index) {
+          const td = el('td', undefined, 'label-cell');
+          const text = column.format ? column.format(value, row) : String(value ?? '');
+          td.append(el('span', text === '' ? '(not set)' : text, 'label-text'));
+          if (row.detail) td.append(el('span', row.detail, 'label-detail'));
+          const track = el('span', undefined, 'bar-track');
+          const bar = el('span', undefined, 'bar');
+          const share = (Number(row[barColumn.key]) || 0) / max;
+          bar.style.width = share > 0 ? `${Math.max(1.5, share * 100)}%` : '0';
+          track.append(bar); td.append(track); bars.push(bar);
+          td.title = String(value ?? '');
+          tr.append(td);
+        } else tr.append(el('td', column.format ? column.format(value, row) : String(value ?? '—'), 'num'));
+      });
+      body.append(tr);
+    }
+  };
+  columns.forEach((column, index) => {
+    const th = el('th'); th.scope = 'col';
+    if (index) th.className = 'num';
+    const button = el('button', column.label, 'sort'); button.type = 'button';
+    button.onclick = () => {
+      sort = { key: column.key, desc: sort.key === column.key ? !sort.desc : index > 0 };
+      for (const other of head.querySelectorAll('th')) other.removeAttribute('aria-sort');
+      th.setAttribute('aria-sort', sort.desc ? 'descending' : 'ascending');
+      fill();
+    };
+    th.append(button);
+    head.append(th);
+  });
+  const thead = el('thead'); thead.append(head); table.append(thead);
+  fill();
   table.append(body); wrap.append(table);
   wrap.animateIn = () => growX(bars, { delay: 200 });
   return wrap;

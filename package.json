@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build:dashboard": "node dashboard/build.js",
+    "package:plugin": "node plugin/package.mjs",
     "test": "node --test",
     "dev": "vercel dev",
     "start": "node server.js"
