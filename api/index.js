@@ -9,6 +9,30 @@ import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
 import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
 import { registerPublicPages } from "./pages.js";
 
+// Every outbound call gets a deadline, so one hung upstream request fails clearly instead of
+// holding the function until the platform kills it. 50s leaves room for BigQuery's 45s wait.
+const OUTBOUND_TIMEOUT_MS = 50_000;
+const fetch = async (url, init = {}) => {
+  try {
+    return await globalThis.fetch(url, { ...init, signal: init.signal || AbortSignal.timeout(OUTBOUND_TIMEOUT_MS) });
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      throw new Error(`${new URL(String(url)).host} did not respond within ${OUTBOUND_TIMEOUT_MS / 1000}s. Try again.`);
+    }
+    throw error;
+  }
+};
+
+// API logs record what was called and how it went, never the data that came back: response
+// bodies hold users' analytics, search, ads and call data (see the privacy policy). Failures
+// keep the provider's error message for debugging.
+function apiErrorSummary(response, body) {
+  if (response.ok) return undefined;
+  const message = typeof body === "string" ? body
+    : body?.error?.message || body?.error?.error_user_msg || body?.error_description || body?.message || (typeof body?.error === "string" ? body.error : "");
+  return String(message || "").slice(0, 300) || undefined;
+}
+
 const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 const GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const MERCHANT_CENTER_SCOPE = "https://www.googleapis.com/auth/content";
@@ -1228,7 +1252,7 @@ async function callMetaGraphApi(pathOrUrl, accessToken, params = {}) {
   const safeUrl = new URL(url.toString());
   safeUrl.searchParams.delete("access_token");
   safeUrl.searchParams.delete("appsecret_proof");
-  console.log(JSON.stringify({ type: "meta_api_debug", url: safeUrl.toString(), status: response.status, body: parsedBody }));
+  console.log(JSON.stringify({ type: "meta_api_debug", url: safeUrl.toString(), status: response.status, error: apiErrorSummary(response, parsedBody) }));
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -1977,7 +2001,7 @@ async function callGoogleApi(url, accessToken, options = {}) {
   try {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
-  console.log(JSON.stringify({ type: "google_api_debug", url, status: response.status, body: parsedBody }));
+  console.log(JSON.stringify({ type: "google_api_debug", url, status: response.status, error: apiErrorSummary(response, parsedBody) }));
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -2022,7 +2046,7 @@ async function callGoogleAdsApi(path, accessToken, options = {}) {
   try {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
-  console.log(JSON.stringify({ type: "google_ads_api_debug", url, status: response.status, body: parsedBody }));
+  console.log(JSON.stringify({ type: "google_ads_api_debug", url, status: response.status, error: apiErrorSummary(response, parsedBody) }));
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
@@ -4416,7 +4440,7 @@ async function callMetaGraphApiPost(pathOrUrl, accessToken, params = {}) {
     parsedBody = rawBody ? JSON.parse(rawBody) : null;
   } catch {}
   // The token travels in the body, so the logged URL carries no credential.
-  console.log(JSON.stringify({ type: "meta_api_debug", method: "POST", url: url.toString(), status: response.status, body: parsedBody }));
+  console.log(JSON.stringify({ type: "meta_api_debug", method: "POST", url: url.toString(), status: response.status, error: apiErrorSummary(response, parsedBody) }));
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 

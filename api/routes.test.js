@@ -363,3 +363,42 @@ test("short links send people straight to the right install step", async () => {
   assert.equal((await fetch(`${baseUrl}/claude`, { redirect: "manual" })).headers.get("location"), process.env.CLAUDE_DIRECTORY_URL);
   delete process.env.CLAUDE_DIRECTORY_URL;
 });
+
+// Calls one tool through the real MCP endpoint while Google is replaced by `upstream`.
+async function callWithUpstream(toolName, args, upstream) {
+  const realFetch = globalThis.fetch;
+  const logs = [];
+  const realLog = console.log;
+  globalThis.fetch = (url, init) => String(url).startsWith(baseUrl) ? realFetch(url, init) : upstream(url, init);
+  console.log = (line) => logs.push(String(line));
+  try {
+    const resource = `${baseUrl}/mcp`;
+    const response = await realFetch(resource, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${issueToken(resource)}`, Accept: "application/json, text/event-stream", "Content-Type": "application/json", "MCP-Protocol-Version": "2025-06-18" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: args } })
+    });
+    return { result: (await response.json()).result, logs };
+  } finally {
+    globalThis.fetch = realFetch;
+    console.log = realLog;
+  }
+}
+
+test("API logs never contain response data, and failures keep only the provider's message", async () => {
+  const ok = await callWithUpstream("list_ga4_properties", {}, async () => new Response(JSON.stringify({ accountSummaries: [{ displayName: "Secret Client Ltd", propertySummaries: [{ property: "properties/1", displayName: "secret-client GA4" }] }] }), { status: 200 }));
+  assert.match(JSON.stringify(ok.result.structuredContent), /secret-client GA4/, "the tool still returns the data");
+  assert.ok(ok.logs.some((line) => line.includes("google_api_debug")), "the call is still logged");
+  assert.ok(!ok.logs.join("\n").includes("secret-client"), "response data is not in the logs");
+
+  const denied = await callWithUpstream("list_ga4_properties", {}, async () => new Response(JSON.stringify({ error: { code: 403, message: "User does not have sufficient permission" } }), { status: 403 }));
+  const line = denied.logs.find((entry) => entry.includes("google_api_debug"));
+  assert.match(line, /"status":403/);
+  assert.match(line, /sufficient permission/);
+});
+
+test("an upstream that never answers fails with a clear timeout message", async () => {
+  const { result } = await callWithUpstream("list_ga4_properties", {}, async () => { const error = new Error("timed out"); error.name = "TimeoutError"; throw error; });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.structuredContent), /did not respond within 50s/);
+});

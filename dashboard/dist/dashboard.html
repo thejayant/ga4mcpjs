@@ -1790,7 +1790,11 @@ function renderSource(view, key) {
   else {
     const tiles = el('div', undefined, 'tiles');
     const kpis = visibleKpis(key);
+    // Money and ratio tiles that are zero in both periods (revenue on a lead-generation site,
+    // ROAS without conversion values) only take space; hide them unless chosen in Customize.
+    const empty = kpi => !state.tiles[key] && ['money', 'ratio'].includes(kpi.format) && !valueOf(kpi, now) && !(before && valueOf(kpi, before));
     for (const kpi of kpis) {
+      if (empty(kpi)) continue;
       const label = kpi.key === 'keyEvents' && source.options?.keyEvent ? { ...kpi, label: `Key events: ${source.options.keyEvent}` } : kpi;
       tiles.append(statTile(source, label, now, before));
     }
@@ -2332,10 +2336,12 @@ function applyInsets(context = host.hostContext || {}) {
   const phone = context.platform === 'mobile' || window.openai?.userAgent?.device?.type === 'mobile'
     || ((context.deviceCapabilities?.touch || window.matchMedia('(pointer: coarse)').matches) && window.innerWidth < 760);
   const fullscreen = (context.displayMode || window.openai?.displayMode) === 'fullscreen';
-  const pick = (value, fallback) => Number(value) > 0 ? Number(value) : phone && fullscreen ? fallback : 0;
+  // On a phone in fullscreen ChatGPT draws a title bar (about 105px) over the top and its message
+  // box over the bottom. A reported inset may cover only the status bar, so never go below these.
+  const pick = (value, fallback) => phone && fullscreen ? Math.max(Number(value) || 0, fallback) : Number(value) || 0;
   const root = document.documentElement.style;
-  root.setProperty('--safe-top', `${pick(reported.top, 64)}px`);
-  root.setProperty('--safe-bottom', `${pick(reported.bottom, 96)}px`);
+  root.setProperty('--safe-top', `${pick(reported.top, 112)}px`);
+  root.setProperty('--safe-bottom', `${pick(reported.bottom, 104)}px`);
   root.setProperty('--safe-left', `${Number(reported.left) || 0}px`);
   root.setProperty('--safe-right', `${Number(reported.right) || 0}px`);
 }
