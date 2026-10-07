@@ -403,6 +403,14 @@ th[aria-sort=descending] .sort::after{content:' \2193'}th[aria-sort=ascending] .
 @media (max-width:360px){.mark{display:none}}
 @media (max-width:480px){.tiles{grid-template-columns:1fr 1fr!important}.filter-grid{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+/* Room for what the host draws over the app (ChatGPT's close button and message box on phones).
+   The variables are set from the host's safe-area insets; they are 0 elsewhere. */
+body{padding:var(--safe-top,0px) var(--safe-right,0px) var(--safe-bottom,0px) var(--safe-left,0px)}
+body::before{content:"";position:fixed;inset:0 0 auto;height:var(--safe-top,0px);background:var(--surface);z-index:7;pointer-events:none}
+.sidebar,.actions,.topbar{top:var(--safe-top,0px)!important}
+.sidebar{max-height:calc(100vh - var(--safe-top,0px) - var(--safe-bottom,0px))}
+.sheet{top:var(--safe-top,0px);bottom:var(--safe-bottom,0px)}
+.blended{margin:0 0 14px}
 </style></head><body>
 <div class="app">
   <aside class="sidebar">
@@ -435,7 +443,7 @@ th[aria-sort=descending] .sort::after{content:' \2193'}th[aria-sort=ascending] .
     <div class="content">
       <div id="status" class="status" role="status" aria-live="polite" hidden></div>
       <div id="view"></div>
-      <footer id="footer" class="footer">Live reports through your Marketing Data connection. Default: 28 days ending three days ago.</footer>
+      <footer id="footer" class="footer">Live reports through your Marketing Data connection. Default: the last 28 days, ending yesterday.</footer>
       <p class="credit">Built by <a class="credit-link" href="https://thejayant.in" target="_blank" rel="noopener">Jayant Solanki · thejayant.in ↗</a></p>
     </div>
   </main>

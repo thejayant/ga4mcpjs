@@ -19,7 +19,9 @@ function ga4Body(params) {
     rows = Array.from({ length: days }, (_, i) => ({ dimensionValues: [{ value: day(startDate, i).replace(/-/g, '') }], metricValues: metrics.map(m => ({ value: String(value(m, i)) })) }));
   } else {
     const pool = { sessionDefaultChannelGroup: ['Organic Search', 'Direct', 'Paid Search', 'Referral', 'AI Assistant', 'Organic Social'], landingPagePlusQueryString: ['/', '/carports', '/garages/residential', '/barns', '/financing?utm=x', '/contact'], deviceCategory: ['mobile', 'desktop', 'tablet'],
-      sessionSource: ['google', '(direct)', 'bing', 'chatgpt.com', 'facebook.com'], sessionMedium: ['organic', '(none)', 'cpc', 'referral', 'social'], eventName: ['generate_lead', 'phone_call', 'form_submit'], country: ['United States', 'Canada'] };
+      sessionSource: ['google', '(direct)', 'bing', 'chatgpt.com', 'facebook.com'], sessionMedium: ['organic', '(none)', 'cpc', 'referral', 'social'], eventName: ['generate_lead', 'phone_call', 'form_submit'], country: ['United States', 'Canada'],
+      defaultChannelGroup: ['Paid Search', 'Organic Search', 'Direct', 'Referral'], firstUserDefaultChannelGroup: ['Organic Search', 'Paid Search', 'Direct'], sourceMedium: ['google / cpc', 'google / organic', '(direct) / (none)'],
+      campaignName: ['Search | Carports', 'PMax | All products', '(organic)'], pagePath: ['/', '/carports', '/garages'] };
     const labels = pool[dims[0]] || ['(not set)', 'a', 'b'];
     rows = labels.map((label, i) => ({ dimensionValues: dims.map((d, j) => ({ value: j ? (pool[d] || ['x'])[i % (pool[d] || ['x']).length] : label })),
       metricValues: metrics.map(m => ({ value: String(['engagementRate', 'bounceRate'].includes(m) ? 0.5 + i / 20 : Math.round(2000 / (i + 1))) })) }));
@@ -28,7 +30,7 @@ function ga4Body(params) {
 }
 
 export function fixtureDeps(overrides = {}) {
-  const calls = { ga4: [], gsc: [], ads: [], merchant: [], gbp: [], callrail: [] };
+  const calls = { ga4: [], ga4Batches: [], gsc: [], ads: [], merchant: [], gbp: [], callrail: [] };
   const deps = {
     req: {}, gbpEnabled: true,
     scopes: { ga4: 'ga4', search_console: 'gsc', google_ads: 'ads', merchant_center: 'merchant', gbp: 'gbp' },
@@ -38,6 +40,11 @@ export function fixtureDeps(overrides = {}) {
     listSearchConsoleSites: async () => ({ ok: true, body: { siteEntry: [{ siteUrl: 'sc-domain:carportdirect.com', permissionLevel: 'siteOwner' }, { siteUrl: 'https://www.getcarports.com/', permissionLevel: 'siteOwner' }, { siteUrl: 'https://unverified.example/', permissionLevel: 'siteUnverifiedUser' }] } }),
     listGoogleAdsAccessibleCustomers: async () => ({ ok: true, body: { resourceNames: ['customers/2756458445'] } }),
     runGa4Report: async (token, params) => { calls.ga4.push(params); return { ok: true, body: ga4Body(params) }; },
+    batchRunGa4Reports: async (token, params) => {
+      calls.ga4Batches.push(params);
+      for (const request of params.requests) calls.ga4.push({ ...request, propertyId: params.propertyId, batched: true });
+      return { ok: true, body: { reports: params.requests.map(ga4Body) } };
+    },
     querySearchConsole: async (token, params) => {
       calls.gsc.push(params);
       const prior = params.startDate < '2026-09-01';
@@ -46,7 +53,7 @@ export function fixtureDeps(overrides = {}) {
         const days = (new Date(params.endDate) - new Date(params.startDate)) / 86400000 + 1;
         return { ok: true, body: { rows: Array.from({ length: days - 2 }, (_, i) => ({ keys: [day(params.startDate, i)], clicks: wave(i, prior ? 92 : 112, 25), impressions: wave(i, 4200, 900), ctr: 0.026, position: 13 })) } };
       }
-      const labels = { query: ['carport direct', 'metal carports', 'carports near me', '24x30 metal building', 'garage kits'], page: ['https://www.carportdirect.com/', 'https://www.carportdirect.com/carports', 'https://www.carportdirect.com/garages'], device: ['MOBILE', 'DESKTOP', 'TABLET'] }[params.dimensions[0]];
+      const labels = { query: ['carport direct', 'metal carports', 'carports near me', '24x30 metal building', 'garage kits'], page: ['https://www.carportdirect.com/', 'https://www.carportdirect.com/carports', 'https://www.carportdirect.com/garages'], device: ['MOBILE', 'DESKTOP', 'TABLET'], country: ['usa', 'can'], searchAppearance: ['AMP_BLUE_LINK', 'VIDEO'] }[params.dimensions[0]] || ['other'];
       return { ok: true, body: { rows: labels.map((label, i) => ({ keys: [label], clicks: Math.round(900 / (i + 1)), impressions: Math.round(30000 / (i + 1)), ctr: 0.03 / (i + 1), position: 3 + i * 2.4 })) } };
     },
     queryGoogleAds: async (token, params) => {
@@ -98,6 +105,7 @@ export function fixtureDeps(overrides = {}) {
     },
     withCallRail: async handler => handler('test-callrail-token'),
     listCallRailAccounts: async () => ({ ok: true, body: { accounts: [{ id: 'ACCd5d9a974d27b4400bb7b69240fdb7e11', name: 'Coast to Coast Carports' }, { id: 'ACCcd60e1949b284b5bbc9a1d7527d3691f', name: 'Boss Buildings ' }] } }),
+    listCallRailCompanies: async (token, params) => ({ ok: true, body: { companies: params.accountId === 'ACCd5d9a974d27b4400bb7b69240fdb7e11' ? [{ id: 'COMgetcarports', name: 'Get Carports' }, { id: 'COMc2c', name: 'Coast to Coast Carports' }] : [] } }),
     getCallRailCallSummary: async (token, params) => {
       calls.callrail.push(params);
       const prior = params.query.start_date < '2026-09-01';

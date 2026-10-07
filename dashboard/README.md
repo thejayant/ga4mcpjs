@@ -109,7 +109,7 @@ they do not prove live Google reporting or OAuth compatibility.
 - Google Ads spend converts cost micros once; fractional conversions are retained.
 - Conversion figures retain their source definitions and are not combined.
 - Revenue/spend currency and source reporting time zones remain source-specific.
-- Defaults are 28 days ending three days ago, not a guarantee of finalized data.
+- Defaults are the last 28 days ending yesterday, matching GA4's "Last 28 days". The newest days can still be revised.
 - Tables explicitly identify limited results. Failed requests show errors, not zeros.
 - Data stays in the active app view. “Analyse this view” sends the selected
   source's report to the current ChatGPT conversation only when clicked.
@@ -126,5 +126,5 @@ imports, each in its own scope. `logos.js` embeds the official product marks as 
 Search Console, Merchant Center and Business Profile from Google's gstatic.com
 product-logo files, CallRail from callrail.com. Replace them there if a brand changes.
 
-The resource URI carries a version (`ui://marketing/dashboard-v3.html`) because hosts
+The resource URI carries a version (`ui://marketing/dashboard-v4.html`) because hosts
 cache UI resources by URI. Bump it whenever the HTML changes in a way users must see.

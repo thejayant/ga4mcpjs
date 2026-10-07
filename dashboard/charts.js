@@ -166,7 +166,7 @@ export function sparkline(values) {
  */
 // Rows may carry a `detail` string, shown under the label. Headers sort the loaded rows
 // (click again to reverse); sorting never fetches, so it only reorders what is shown.
-export function rankedTable(rows, columns, { emptyText = 'No activity in this period.' } = {}) {
+export function rankedTable(rows, columns, { emptyText = 'No activity in this period.', bars: showBars = true } = {}) {
   if (!rows.length) return el('p', emptyText, 'empty-note');
   const barColumn = columns.find(column => column.bar) || columns[1];
   const wrap = el('div', undefined, 'table-scroll');
@@ -196,6 +196,8 @@ export function rankedTable(rows, columns, { emptyText = 'No activity in this pe
           const text = column.format ? column.format(value, row) : String(value ?? '');
           td.append(el('span', text === '' ? '(not set)' : text, 'label-text'));
           if (row.detail) td.append(el('span', row.detail, 'label-detail'));
+          // Rows measured in different units (money next to counts) must not share one bar scale.
+          if (!showBars) { td.title = String(value ?? ''); tr.append(td); return; }
           const track = el('span', undefined, 'bar-track');
           const bar = el('span', undefined, 'bar');
           const share = (Number(row[barColumn.key]) || 0) / max;

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { GBP_DAILY_METRICS, gbpDate, gbpId, gbpRequest as gbpFetch } from '../MCP GBP/client.js';
 
 // The version is part of the URI because hosts cache UI resources by URI.
-export const DASHBOARD_URI = 'ui://marketing/dashboard-v3.html';
+export const DASHBOARD_URI = 'ui://marketing/dashboard-v4.html';
 export const DASHBOARD_TOOLS = ['open_marketing_dashboard', 'list_dashboard_accounts', 'get_marketing_dashboard'];
 const DAY = 86400000;
 const iso = (date) => date.toISOString().slice(0, 10);
@@ -19,11 +19,15 @@ const inputs = {
   merchantAccountId: z.string().regex(/^(accounts\/)?\d+$/).optional(),
   gbpLocation: z.string().regex(/^accounts\/[A-Za-z0-9_-]+\/locations\/[A-Za-z0-9_-]+$/).optional(),
   callrailAccountId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+  callrailCompanyId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
   startDate: date.optional(), endDate: date.optional(), compare: z.boolean().optional()
 };
 
 // Per-source breakdowns and filters. Every value is either an enum or a tightly
 // bounded string, because some of them end up inside GAQL or Merchant queries.
+// Views and sections the opener can jump to; the dashboard marks matching panels with data-section.
+export const DASHBOARD_VIEWS = ['ga4', 'search_console', 'google_ads', 'merchant_center', 'gbp', 'callrail'];
+export const DASHBOARD_SECTIONS = ['key_events', 'attribution', 'landing_pages', 'pages', 'countries', 'acquisition', 'queries', 'campaigns', 'calls', 'breakdown', 'trend'];
 export const GA4_BREAKDOWNS = ['sessionDefaultChannelGroup', 'sessionSource', 'sessionMedium', 'sessionSourceMedium', 'sessionCampaignName', 'landingPagePlusQueryString', 'deviceCategory', 'country', 'city', 'eventName', 'newVsReturning'];
 export const GSC_BREAKDOWNS = ['query', 'page', 'country', 'device', 'searchAppearance'];
 export const ADS_BREAKDOWNS = ['campaign', 'ad_group', 'keyword', 'search_term', 'device', 'network', 'conversion_action', 'day_of_week'];
@@ -62,10 +66,10 @@ export const optionsSchema = z.object({
   }).strict().optional()
 }).strict();
 inputs.options = optionsSchema.optional();
-const selectionInputs = Object.fromEntries(['propertyId', 'siteUrl', 'customerId', 'loginCustomerId', 'merchantAccountId', 'gbpLocation', 'callrailAccountId'].map(key => [key, inputs[key]]));
+const selectionInputs = Object.fromEntries(['propertyId', 'siteUrl', 'customerId', 'loginCustomerId', 'merchantAccountId', 'gbpLocation', 'callrailAccountId', 'callrailCompanyId'].map(key => [key, inputs[key]]));
 
 export function dashboardRange(params = {}, now = new Date()) {
-  const endDate = params.endDate || iso(new Date(+now - 3 * DAY));
+  const endDate = params.endDate || iso(new Date(+now - DAY));
   const startDate = params.startDate || iso(new Date(+new Date(`${endDate}T00:00:00Z`) - 27 * DAY));
   const start = +new Date(`${startDate}T00:00:00Z`);
   const end = +new Date(`${endDate}T00:00:00Z`);
@@ -175,23 +179,34 @@ export function merchantHealth(body) {
 
 export function registerDashboard(server, deps) {
   const { req, withVerifiedToolAuth: auth, buildToolResult: result, scopes, listGa4Properties,
-    listSearchConsoleSites, listGoogleAdsAccessibleCustomers, runGa4Report, querySearchConsole, queryGoogleAds,
+    listSearchConsoleSites, listGoogleAdsAccessibleCustomers, runGa4Report, batchRunGa4Reports, querySearchConsole, queryGoogleAds,
     listMerchantAccounts, searchMerchantReports, getMerchantProductStatusSummary,
-    withCallRail, listCallRailAccounts, getCallRailCallSummary, getCallRailCallTimeseries, gbpEnabled } = deps;
+    withCallRail, listCallRailAccounts, listCallRailCompanies, getCallRailCallSummary, getCallRailCallTimeseries, gbpEnabled } = deps;
   const gbpRequest = deps.gbpRequest || gbpFetch;
   const html = () => readFileSync(new URL('./dist/dashboard.html', import.meta.url), 'utf8');
   server.registerResource('marketing-dashboard', DASHBOARD_URI, { mimeType: 'text/html;profile=mcp-app' }, async () => ({
     contents: [{ uri: DASHBOARD_URI, mimeType: 'text/html;profile=mcp-app', text: html(),
       _meta: { ui: { csp: { connectDomains: [], resourceDomains: [] } }, 'openai/ui': { availableDisplayModes: ['fullscreen'], preferredDisplayMode: 'fullscreen' } } }]
   }));
+  // What the opener can ask for: the business, the exact view and section, and the dates.
+  const openerInputs = {
+    business: z.string().trim().min(2).max(200).optional(),
+    view: z.enum(['overview', ...DASHBOARD_VIEWS]).optional(),
+    section: z.enum(DASHBOARD_SECTIONS).optional(),
+    startDate: date.optional(), endDate: date.optional(), compare: z.boolean().optional(),
+    ...selectionInputs
+  };
   server.registerTool('open_marketing_dashboard', {
-    title: 'Marketing Dashboard', description: 'Open the marketing dashboard: website traffic (GA4), organic search (Search Console), Google Ads, Merchant Center, Google Business Profile and CallRail calls, with a cross-channel overview and period comparison. When the user names a business or website ("dashboard for getcarports.com"), pass it as `business`; the dashboard then picks that business\'s accounts in every source by itself, so no other argument is needed. Account IDs are optional: pass them only when they were returned by list_dashboard_accounts or the list tools, copied exactly; never build one from a site or business name (Search Console properties differ by http/https/www and sc-domain). With neither, the dashboard picks single accounts automatically and asks only if it must.',
-    inputSchema: { business: z.string().trim().min(2).max(200).optional(), ...selectionInputs }, annotations: { readOnlyHint: true },
+    title: 'Marketing Dashboard', description: 'Open the marketing dashboard: website traffic (GA4), organic search (Search Console), Google Ads, Merchant Center, Google Business Profile and CallRail calls, with a cross-channel overview and period comparison. When the user names a business or website ("dashboard for getcarports.com"), pass it as `business`; the dashboard then picks that business\'s accounts in every source by itself. Open exactly what was asked: `view` picks the report (ga4 for Google Analytics, search_console, google_ads, merchant_center, gbp, callrail, or overview for the blended report), `section` scrolls to a part of it (key_events for key events and their attribution, attribution, landing_pages, pages, countries, acquisition, queries, campaigns, calls, breakdown, trend), and `startDate`/`endDate` (YYYY-MM-DD, ending before today) set the period; omit them for the last 28 days ending yesterday (as in GA4). Account IDs are optional: pass them only when they were returned by list_dashboard_accounts or the list tools, copied exactly; never build one from a site or business name (Search Console properties differ by http/https/www and sc-domain). With neither, the dashboard picks single accounts automatically and asks only if it must.',
+    inputSchema: openerInputs, annotations: { readOnlyHint: true },
     _meta: { ui: { resourceUri: DASHBOARD_URI }, 'openai/ui': { entrypoints: [{ type: 'global' }, { type: 'thread' }] } }
   }, async (raw = {}) => {
     // A business name lets the dashboard match accounts itself; IDs the model already knows preselect them.
-    const { business, ...selection } = z.object({ business: z.string().trim().min(2).max(200).optional(), ...selectionInputs }).parse(raw || {});
-    return result({ version: 2, defaults: { ...dashboardRange(), compare: true }, sources: availableSources(), selection, ...(business ? { business } : {}) });
+    const { business, view, section, startDate, endDate, compare, ...selection } = z.object(openerInputs).parse(raw || {});
+    let defaults;
+    try { defaults = { ...dashboardRange({ startDate, endDate }), compare: compare !== false }; } catch (error) { return result({ error: error.message }, true); }
+    return result({ version: 2, defaults, sources: availableSources(), selection, ...(business ? { business } : {}), ...(view ? { view } : {}), ...(section ? { section } : {}),
+      ...(startDate || endDate ? { range: { startDate: defaults.startDate, endDate: defaults.endDate } } : {}) });
   });
 
   function availableSources() {
@@ -221,10 +236,26 @@ export function registerDashboard(server, deps) {
       merchant_center: source(scopes.merchant_center, token => report(() => listMerchantAccounts(token, { pageSize: 500 }), body => (body.accounts || []).map(a => ({ id: a.accountId, name: a.accountName || a.accountId, account: a.homePageUri?.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '') }))))
     };
     if (gbpEnabled) tasks.gbp = source(scopes.gbp, token => gbpLocations(token));
-    if (withCallRail) tasks.callrail = callrail(token => report(() => listCallRailAccounts(token, { query: { per_page: 250 } }), body => (body.accounts || []).map(a => ({ id: a.id, name: (a.name || a.id).trim() }))));
+    if (withCallRail) tasks.callrail = callrail(token => callRailCompanies(token));
     const entries = await Promise.all(Object.entries(tasks).map(async ([key, task]) => [key, await task]));
     return result(Object.fromEntries(entries));
   });
+
+  // CallRail accounts hold companies (one per business). Each account is offered as a whole and
+  // per company, with the company ID after a colon (ACC…:COM…). Capped like GBP locations.
+  async function callRailCompanies(token) {
+    const accounts = await listCallRailAccounts(token, { query: { per_page: 250 } });
+    if (!accounts.ok) return { status: 'error', httpStatus: accounts.status, message: accounts.body?.error || 'CallRail accounts unavailable' };
+    const list = await Promise.all((accounts.body.accounts || []).slice(0, 10).map(async account => {
+      const name = (account.name || account.id).trim();
+      const whole = { id: account.id, name: `${name} (all companies)`, account: 'CallRail account' };
+      if (!listCallRailCompanies) return [whole];
+      const response = await listCallRailCompanies(token, { accountId: account.id, query: { per_page: 250, status: 'active' } }).catch(() => null);
+      const companies = response?.ok ? (response.body.companies || []) : [];
+      return [whole, ...companies.map(company => ({ id: `${account.id}:${company.id}`, name: (company.name || company.id).trim(), account: name }))];
+    }));
+    return { status: 'ready', data: list.flat() };
+  }
 
   // Locations are listed per account; capped so one large agency login cannot stall the picker.
   async function gbpLocations(token) {
@@ -242,7 +273,7 @@ export function registerDashboard(server, deps) {
   }
 
   server.registerTool('get_marketing_dashboard', {
-    title: 'Load Marketing Dashboard', description: 'Fetch live marketing reports for the selected accounts across GA4, Search Console, Google Ads, Merchant Center, Business Profile and CallRail. Default: last 28 days ending three days ago, compared with the previous equal period. Optional `options` set a breakdown, row limit and filters per source (GA4 channel/source/medium/campaign/device/country/landing page and a single key event; Search Console search type, query/page match, country, device; Google Ads campaign status/type/name with campaign, ad group, keyword, search term, device, network, conversion action or weekday breakdowns; Merchant Center listing type and country; CallRail direction, device and lead status). Each source keeps its own definitions: GA4 users are period totals, GSC totals exclude query breakdowns, Ads and Merchant conversions keep their own attribution, CallRail counts calls by its account time zone.',
+    title: 'Load Marketing Dashboard', description: 'Fetch live marketing reports for the selected accounts across GA4, Search Console, Google Ads, Merchant Center, Business Profile and CallRail. Default: last 28 days ending yesterday (as in GA4), compared with the previous equal period. Optional `options` set a breakdown, row limit and filters per source (GA4 channel/source/medium/campaign/device/country/landing page and a single key event; Search Console search type, query/page match, country, device; Google Ads campaign status/type/name with campaign, ad group, keyword, search term, device, network, conversion action or weekday breakdowns; Merchant Center listing type and country; CallRail direction, device and lead status). Each source keeps its own definitions: GA4 users are period totals, GSC totals exclude query breakdowns, Ads and Merchant conversions keep their own attribution, CallRail counts calls by its account time zone.',
     inputSchema: inputs, annotations: { readOnlyHint: true }
   }, async raw => {
     const params = z.object(inputs).parse(raw);
@@ -261,12 +292,13 @@ export function registerDashboard(server, deps) {
       const o = options.ga4 || {};
       const keyMetric = o.keyEvent ? `keyEvents:${o.keyEvent}` : 'keyEvents';
       const filter = ga4Filter(o);
-      const run = (dimensions, metrics, { dates = current, limit = 10, filtered = true, metricFilter, plainKey = false } = {}) => report(() => runGa4Report(token, {
+      const request = (dimensions, metrics, { dates = current, limit = 10, filtered = true, metricFilter, plainKey = false } = {}) => ({
         propertyId: params.propertyId, dateRanges: [dates], dimensions: dimensions.map(name => ({ name })),
         metrics: metrics.map(name => ({ name: name === 'keyEvents' && !plainKey ? keyMetric : name })), limit: String(limit),
         dimensionFilter: filtered ? filter : undefined, metricFilter,
         orderBys: dimensions[0] === 'date' ? [{ dimension: { dimensionName: 'date' } }] : [{ metric: { metricName: metrics[0] === 'keyEvents' && !plainKey ? keyMetric : metrics[0] }, desc: true }]
-      }), body => {
+      });
+      const shape = limit => body => {
         // A chosen key event arrives as "keyEvents:<name>"; keep one column name for the UI.
         const rows = ga4Rows(body).map(row => {
           const out = row.date ? { ...row, date: compactDate(row.date) } : { ...row };
@@ -274,27 +306,63 @@ export function registerDashboard(server, deps) {
           return out;
         });
         return { rows, rowCount: body.rowCount || 0, metadata: body.metadata || {}, limited: (body.rowCount || 0) > limit };
-      });
+      };
+      const run = (dimensions, metrics, opts = {}) => report(() => runGa4Report(token, request(dimensions, metrics, opts)), shape(opts.limit || 10));
+      // Up to five reports in one batchRunReports call: GA4 allows ten concurrent requests per
+      // property, and the view needs more reports than that. Each entry keeps its own status.
+      const batch = async specs => {
+        const live = specs.filter(Boolean);
+        if (!live.length) return specs.map(() => null);
+        let reports;
+        if (batchRunGa4Reports) {
+          const response = await report(() => batchRunGa4Reports(token, { propertyId: params.propertyId, requests: live.map(([dims, mets, opts]) => { const { propertyId, ...body } = request(dims, mets, opts); return body; }) }), body => body.reports || []);
+          reports = response.status === 'ready'
+            ? live.map(([, , opts = {}], i) => ({ status: 'ready', data: shape(opts.limit || 10)(response.data[i] || {}) }))
+            : live.map(() => response);
+        } else reports = await Promise.all(live.map(([dims, mets, opts]) => run(dims, mets, opts)));
+        let next = 0;
+        return specs.map(spec => spec ? reports[next++] : null);
+      };
+      const onlyKeyEvents = { filter: { fieldName: 'keyEvents', numericFilter: { operation: 'GREATER_THAN', value: { int64Value: '0' } } } };
       const totals = ['sessions', 'activeUsers', 'newUsers', 'keyEvents', 'totalRevenue', 'engagementRate', 'averageSessionDuration', 'screenPageViews', 'bounceRate'];
       const daily = ['sessions', 'activeUsers', 'newUsers', 'keyEvents', 'totalRevenue', 'screenPageViews'];
       const table = ['sessions', 'activeUsers', 'keyEvents', 'totalRevenue', 'engagementRate'];
       const breakdown = o.breakdown || 'sessionDefaultChannelGroup';
-      const [t, c, d, dp, rows, pages, devices, traffic, events] = await Promise.all([
+      // Key-event and attribution reports use GA4's attributed dimensions (defaultChannelGroup,
+      // sourceMedium, campaignName): key events credited by the property's attribution model,
+      // as in GA4's Advertising reports, not by the session that happened to contain them.
+      const [t, c, d, dp, rows, [pages, devices, traffic, events, keyByName], [keyByNamePrevious, attributedChannels, attributedSources, attributedCampaigns], [topPages, countries, acquisition]] = await Promise.all([
         run([], totals), compare ? run([], totals, { dates: previous }) : null,
         run(['date'], daily, { limit: 366 }), compare ? run(['date'], daily, { dates: previous, limit: 366 }) : null,
         run([breakdown], table, { limit: o.limit || 10 }),
-        breakdown === 'landingPagePlusQueryString' ? null : run(['landingPagePlusQueryString'], table),
-        run(['deviceCategory'], ['sessions']),
-        // Filter suggestions come from unfiltered data so a filter never hides its own alternatives.
-        run(['sessionSource', 'sessionMedium'], ['sessions'], { limit: 100, filtered: false }),
-        run(['eventName'], ['keyEvents'], { limit: 50, filtered: false, plainKey: true, metricFilter: { filter: { fieldName: 'keyEvents', numericFilter: { operation: 'GREATER_THAN', value: { int64Value: '0' } } } } })
+        batch([
+          breakdown === 'landingPagePlusQueryString' ? null : [['landingPagePlusQueryString'], table],
+          [['deviceCategory'], ['sessions']],
+          // Filter suggestions come from unfiltered data so a filter never hides its own alternatives.
+          [['sessionSource', 'sessionMedium'], ['sessions'], { limit: 100, filtered: false }],
+          [['eventName'], ['keyEvents'], { limit: 50, filtered: false, plainKey: true, metricFilter: onlyKeyEvents }],
+          [['eventName'], ['keyEvents', 'eventValue'], { limit: 25, plainKey: true, metricFilter: onlyKeyEvents }]
+        ]),
+        batch([
+          compare ? [['eventName'], ['keyEvents'], { dates: previous, limit: 25, plainKey: true, metricFilter: onlyKeyEvents }] : null,
+          [['defaultChannelGroup', 'eventName'], ['keyEvents'], { limit: 250, plainKey: true, metricFilter: onlyKeyEvents }],
+          [['sourceMedium'], ['keyEvents', 'totalRevenue'], { limit: o.limit || 10 }],
+          [['campaignName'], ['keyEvents', 'totalRevenue'], { limit: o.limit || 10 }]
+        ]),
+        batch([
+          [['pagePath'], ['screenPageViews', 'activeUsers', 'keyEvents', 'averageSessionDuration'], { limit: o.limit || 10 }],
+          [['country'], ['sessions', 'activeUsers', 'keyEvents'], { limit: 10 }],
+          [['firstUserDefaultChannelGroup'], ['newUsers', 'activeUsers', 'keyEvents'], { limit: 12 }]
+        ])
       ]);
       const unique = (key) => [...new Set((traffic?.data?.rows || []).map(row => row[key]).filter(Boolean))].slice(0, 60);
       // The event list is always requested with plain keyEvents, so read it by its own header.
       const keyEvents = (events?.data?.rows || []).map(row => ({ name: row.eventName, count: row.keyEvents ?? 0 }));
       return { status: 'ready', account: params.propertyId, currency: t.data?.metadata?.currencyCode, timeZone: t.data?.metadata?.timeZone,
         options: { ...o, breakdown }, facets: { sources: unique('sessionSource'), mediums: unique('sessionMedium'), keyEvents },
-        totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, pages, devices };
+        totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, pages, devices,
+        keyEventsByName: keyByName, keyEventsByNamePrevious: keyByNamePrevious, attributedChannels, attributedSources, attributedCampaigns,
+        topPages, countries, acquisition };
     }));
 
     if (params.siteUrl) add('search_console', source(scopes.search_console, async token => {
@@ -308,17 +376,18 @@ export function registerDashboard(server, deps) {
       const searchType = o.searchType || 'web';
       const filters = gscFilters(o);
       const run = (dimensions, dates = current, rowLimit = 10) => report(() => querySearchConsole(token, {
-        siteUrl, ...dates, dimensions, rowLimit, dataState: 'final', type: searchType, aggregationType: 'auto',
+        siteUrl, ...dates, dimensions, rowLimit, dataState: 'all', type: searchType, aggregationType: 'auto',
         dimensionFilterGroups: filters.length ? [{ groupType: 'and', filters }] : undefined
       }), body => ({ rows: (body.rows || []).map(row => ({ [dimensions[0] === 'date' ? 'date' : 'label']: row.keys?.[0] || '', clicks: row.clicks, impressions: row.impressions, ctr: row.ctr, position: row.position })), limited: (body.rows || []).length === rowLimit }));
       const breakdown = o.breakdown || 'query';
       const secondary = breakdown === 'page' ? 'query' : 'page';
-      const [t, c, d, dp, rows, second, devices] = await Promise.all([
+      const [t, c, d, dp, rows, second, devices, countries, appearance] = await Promise.all([
         run([]), compare ? run([], previous) : null, run(['date'], current, 366), compare ? run(['date'], previous, 366) : null,
-        run([breakdown], current, o.limit || 10), breakdown === 'searchAppearance' ? null : run([secondary]), run(['device'], current, 5)
+        run([breakdown], current, o.limit || 10), breakdown === 'searchAppearance' ? null : run([secondary]), run(['device'], current, 5),
+        breakdown === 'country' ? null : run(['country'], current, 10), breakdown === 'searchAppearance' ? null : run(['searchAppearance'], current, 10)
       ]);
       return { status: 'ready', account: siteUrl, ...(siteUrl !== params.siteUrl ? { requestedAccount: params.siteUrl } : {}), timeZone: 'America/Los_Angeles', options: { ...o, breakdown, searchType },
-        totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, [secondary === 'page' ? 'pages' : 'queries']: second, devices };
+        totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, [secondary === 'page' ? 'pages' : 'queries']: second, devices, countries, appearance };
     }));
 
     if (params.customerId) add('google_ads', source(scopes.google_ads, async token => {
@@ -421,14 +490,19 @@ export function registerDashboard(server, deps) {
       const accountId = params.callrailAccountId;
       const fields = 'total_calls,answered_calls,missed_calls,first_time_callers,average_duration';
       const filters = Object.fromEntries([['direction', o.direction], ['device', o.device], ['lead_status', o.leadStatus]].filter(([, value]) => value));
-      const window = dates => ({ start_date: dates.startDate, end_date: dates.endDate, ...filters });
+      // A CallRail account holds several companies; a chosen company narrows every report to it.
+      const company = params.callrailCompanyId ? { company_id: params.callrailCompanyId } : {};
+      const window = dates => ({ start_date: dates.startDate, end_date: dates.endDate, ...company, ...filters });
       const summary = dates => report(() => getCallRailCallSummary(token, { accountId, query: { ...window(dates), fields } }), body => ({ rows: [callrailRow(body.total_results)], timeZone: body.time_zone }));
       const series = dates => report(() => getCallRailCallTimeseries(token, { accountId, query: { ...window(dates), fields: 'total_calls,answered_calls,missed_calls,first_time_callers', interval: 'day' } }), body => ({ rows: (body.data || []).map(row => ({ date: row.date || row.key, ...callrailRow(row) })) }));
       const grouped = (groupBy, rowLimit = 10) => report(() => getCallRailCallSummary(token, { accountId, query: { ...window(current), fields: 'total_calls,answered_calls,first_time_callers,average_duration', group_by: groupBy } }),
         body => { const rows = (body.grouped_results || []).map(row => ({ label: row.key || '(none)', ...callrailRow(row) })).sort((a, b) => b.calls - a.calls); return { rows: rows.slice(0, rowLimit), limited: rows.length > rowLimit }; });
       const [t, c, d, dp, rows, sources] = await Promise.all([summary(current), compare ? summary(previous) : null, series(current), compare ? series(previous) : null,
         grouped(breakdown, o.limit || 10), breakdown === 'source' ? null : grouped('source')]);
-      return { status: 'ready', account: accountId, timeZone: t.data?.timeZone, options: { ...o, breakdown }, totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, sources: sources || rows };
+      const extra = ['campaign', 'keywords', 'landing_page', 'referrer'].filter(group => group !== breakdown);
+      const groups = Object.fromEntries(await Promise.all(extra.map(async group => [group, await grouped(group, 10)])));
+      return { status: 'ready', account: accountId, timeZone: t.data?.timeZone, options: { ...o, breakdown }, totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, sources: sources || rows, ...(params.callrailCompanyId ? { company: params.callrailCompanyId } : {}),
+        byCampaign: groups.campaign || rows, byKeyword: groups.keywords || rows, byLandingPage: groups.landing_page || rows, byReferrer: groups.referrer || rows };
     }));
 
     await Promise.all(tasks);
@@ -437,7 +511,7 @@ export function registerDashboard(server, deps) {
         'GA4 key events, Google Ads conversions and Merchant Center conversions use different attribution. Never add them together.',
         'Breakdown tables are partial (top rows only), not totals. Search Console omits anonymised queries.', 'Filters apply to every figure of their source, including totals and trends.',
         'Business Profile keyword counts below 15 are shown as a threshold, not an exact number.',
-        'The default range ends three days ago to allow for reporting delay. Recent days may still be revised.'] });
+        'The default range is the last 28 days ending yesterday, as in GA4. The newest one to three days can still change, and Search Console includes its fresh (not yet final) data.'] });
   });
 }
 

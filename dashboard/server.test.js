@@ -29,7 +29,10 @@ test('GA4 uses period user totals, normalises dates and loads the previous daily
   const data = await load(h, { propertyId: '269500556' });
   const ga4 = data.sources.ga4;
   assert.deepEqual(h.calls.ga4[0].dimensions, []);
-  assert.equal(h.calls.ga4.length, 9);
+  // 5 single reports plus 3 batches (12 reports): 8 concurrent calls, under GA4's limit of 10.
+  assert.equal(h.calls.ga4.filter(call => !call.batched).length, 5);
+  assert.equal(h.calls.ga4Batches.length, 3);
+  assert.ok(h.calls.ga4Batches.every(b => b.requests.length <= 5));
   assert.equal(ga4.breakdown.data.rows[0].sessionDefaultChannelGroup, 'Organic Search');
   assert.deepEqual(ga4.facets.mediums.slice(0, 2), ['organic', '(none)']);
   assert.equal(ga4.facets.keyEvents[0].name, 'generate_lead');
@@ -38,11 +41,11 @@ test('GA4 uses period user totals, normalises dates and loads the previous daily
   assert.equal(ga4.dailyPrevious.data.rows[0].date, '2026-08-04');
   assert.equal(ga4.currency, 'USD');
 });
-test('Search Console totals are unsegmented and final', async () => {
+test('Search Console totals are unsegmented and include fresh data', async () => {
   const h = harness();
   const data = await load(h, { siteUrl: 'sc-domain:carportdirect.com' });
   assert.deepEqual(h.calls.gsc[0].dimensions, []);
-  assert.equal(h.calls.gsc[0].dataState, 'final');
+  assert.equal(h.calls.gsc[0].dataState, 'all', 'fresh data included, as in the Search Console interface');
   assert.equal(data.sources.search_console.daily.data.rows[0].date, '2026-09-01');
   assert.equal(data.sources.search_console.devices.data.rows.length, 3);
 });
@@ -167,7 +170,10 @@ test('account picker lists every source and keeps failures per source', async ()
   assert.equal(accounts.google_ads.status, 'error');
   assert.equal(accounts.merchant_center.data[0].name, 'Carport Direct');
   assert.equal(accounts.gbp.data[0].id, 'accounts/100440815877307284290/locations/3300504517304202205');
-  assert.equal(accounts.callrail.data[1].name, 'Boss Buildings');
+  assert.deepEqual(accounts.callrail.data.map(item => item.id), ['ACCd5d9a974d27b4400bb7b69240fdb7e11', 'ACCd5d9a974d27b4400bb7b69240fdb7e11:COMgetcarports', 'ACCd5d9a974d27b4400bb7b69240fdb7e11:COMc2c', 'ACCcd60e1949b284b5bbc9a1d7527d3691f']);
+  assert.equal(accounts.callrail.data[1].name, 'Get Carports');
+  assert.equal(accounts.callrail.data[1].account, 'Coast to Coast Carports');
+  assert.equal(accounts.callrail.data[3].name, 'Boss Buildings (all companies)');
 });
 test('scope denial does not discard other sources; no accounts means no upstream calls', async () => {
   const h = harness({ withVerifiedToolAuth: async (req, scopes, handler) => scopes[0] === 'gsc' ? { isError: true, structuredContent: { error_description: 'Missing scope' } } : handler({ googleCredentials: { accessToken: 'test-only' } }) });
@@ -187,7 +193,7 @@ test('merchant health ranks disapprovals before notices', () => {
 test('registered resource is self-contained, versioned and the opener declares both entrypoints', async () => {
   const h = harness();
   const resource = (await h.resources[DASHBOARD_URI]()).contents[0];
-  assert.equal(DASHBOARD_URI, 'ui://marketing/dashboard-v3.html');
+  assert.equal(DASHBOARD_URI, 'ui://marketing/dashboard-v4.html');
   assert.equal(resource.mimeType, 'text/html;profile=mcp-app');
   assert.match(resource.text, /Marketer Companion/);
   assert.ok(!resource.text.includes('/* APP_SCRIPT */'));
@@ -223,4 +229,50 @@ test('the opener passes a business name through for automatic matching', async (
   assert.equal(opened.business, 'getcarports.com');
   assert.deepEqual(opened.selection, {});
   assert.equal((await h.tools.open_marketing_dashboard.handler({})).structuredContent.business, undefined);
+});
+test('GA4 key events: per-event breakdown with comparison, and attributed channel, source/medium and campaign reports', async () => {
+  const h = harness();
+  const ga4 = (await load(h, { propertyId: '1' })).sources.ga4;
+  assert.deepEqual(ga4.keyEventsByName.data.rows.map(row => row.eventName), ['generate_lead', 'phone_call', 'form_submit']);
+  assert.ok(ga4.keyEventsByNamePrevious.data.rows.length);
+  assert.ok(ga4.attributedChannels.data.rows.every(row => row.defaultChannelGroup && row.eventName));
+  assert.equal(ga4.attributedSources.data.rows[0].sourceMedium, 'google / cpc');
+  assert.equal(ga4.attributedCampaigns.data.rows[0].campaignName, 'Search | Carports');
+  for (const key of ['topPages', 'countries', 'acquisition']) assert.equal(ga4[key].status, 'ready', key);
+  // Attributed reports use the event-scoped dimensions GA4's Advertising reports use.
+  const attributed = h.calls.ga4.find(call => call.dimensions[0]?.name === 'defaultChannelGroup');
+  assert.deepEqual(attributed.metricFilter.filter.fieldName, 'keyEvents');
+  const withoutCompare = harness();
+  assert.equal((await load(withoutCompare, { propertyId: '1', compare: false })).sources.ga4.keyEventsByNamePrevious, null);
+});
+test('a failed GA4 batch fails only its own panels', async () => {
+  const h = harness({ batchRunGa4Reports: async () => ({ ok: false, status: 429, body: { error: { message: 'Exhausted concurrent requests' } } }) });
+  const ga4 = (await load(h, { propertyId: '1' })).sources.ga4;
+  assert.equal(ga4.status, 'ready');
+  assert.equal(ga4.totals.status, 'ready');
+  assert.equal(ga4.attributedChannels.status, 'error');
+  assert.match(ga4.attributedChannels.message, /concurrent/);
+});
+test('Search Console adds countries and search appearance; CallRail filters by company and adds grouped reports', async () => {
+  const h = harness();
+  const data = await load(h, { siteUrl: 'sc-domain:carportdirect.com', callrailAccountId: 'ACCd5d9a974d27b4400bb7b69240fdb7e11', callrailCompanyId: 'COMgetcarports' });
+  assert.equal(data.sources.search_console.countries.data.rows[0].label, 'usa');
+  assert.equal(data.sources.search_console.appearance.status, 'ready');
+  assert.ok(h.calls.callrail.every(call => call.query.company_id === 'COMgetcarports'), 'every CallRail query is narrowed to the company');
+  assert.equal(data.sources.callrail.company, 'COMgetcarports');
+  for (const key of ['byCampaign', 'byKeyword', 'byLandingPage', 'byReferrer']) assert.ok(data.sources.callrail[key], key);
+});
+test('the opener carries the exact view, section and dates it was asked for', async () => {
+  const h = harness();
+  const opened = (await h.tools.open_marketing_dashboard.handler({ business: 'getcarports.com', view: 'ga4', section: 'key_events', startDate: '2026-09-01', endDate: '2026-09-28' })).structuredContent;
+  assert.equal(opened.view, 'ga4');
+  assert.equal(opened.section, 'key_events');
+  assert.deepEqual(opened.range, { startDate: '2026-09-01', endDate: '2026-09-28' });
+  assert.equal(opened.defaults.previousStartDate, '2026-08-04');
+  assert.throws(() => h.tools.open_marketing_dashboard.config.inputSchema.view.parse('analytics'));
+});
+test('the default range is the last 28 days ending yesterday, like GA4', () => {
+  assert.deepEqual(dashboardRange({}, new Date('2026-10-08T15:00:00Z')), {
+    startDate: '2026-09-10', endDate: '2026-10-07', previousStartDate: '2026-08-13', previousEndDate: '2026-09-09', days: 28
+  });
 });

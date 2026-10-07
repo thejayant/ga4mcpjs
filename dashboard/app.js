@@ -179,7 +179,9 @@ const state = {
   // Per-source breakdown, row limit and filters, sent to the server with every load.
   options: readStore(OPTIONS_KEY), tiles: readStore(TILES_KEY), customizing: false, loadingSource: null, filtersOpen: {},
   // The business the user asked about, used to pick matching accounts automatically.
-  hint: ''
+  hint: '',
+  // A section the opener asked to show; scrolled to once the view renders.
+  pendingSection: null
 };
 function readStore(key) { try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; } }
 function writeStore(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable in this host */ } }
@@ -360,7 +362,7 @@ function applySheet() {
 
 function range() {
   if (state.preset === 'custom') return { startDate: $('startDate').value, endDate: $('endDate').value };
-  const end = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  const end = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
   return { startDate: addDays(end, -(state.preset - 1)), endDate: end };
 }
 
@@ -375,7 +377,7 @@ async function loadSource(key) {
   const snap = state.snapshot;
   const config = SOURCES[key];
   if (!snap || !state.selection[config.select] || state.busy) return;
-  const args = { startDate: snap.range.startDate, endDate: snap.range.endDate, compare: snap.selection.compare !== false, [config.select]: state.selection[config.select] };
+  const args = { startDate: snap.range.startDate, endDate: snap.range.endDate, compare: snap.selection.compare !== false, ...selectionArgs({ [config.select]: state.selection[config.select] }) };
   if (key === 'google_ads' && state.selection.loginCustomerId) args.loginCustomerId = state.selection.loginCustomerId;
   const options = optionsArg([key]);
   if (options) args.options = options;
@@ -403,9 +405,19 @@ function setOptions(key, patch, { reload = true } = {}) {
   if (reload) loadSource(key);
 }
 
+// The CallRail choice is stored as ACC… or ACC…:COM… (account, optionally one company in it).
+function selectionArgs(selection) {
+  const args = {};
+  for (const [key, value] of Object.entries(selection)) if (value) args[key] = value;
+  if (args.callrailAccountId?.includes(':')) [args.callrailAccountId, args.callrailCompanyId] = args.callrailAccountId.split(':');
+  return args;
+}
+
+// Each load gets a number; a slower, older load never overwrites a newer one.
+let loadSeq = 0;
 async function load() {
-  const args = { ...range(), compare: state.compare };
-  for (const [key, value] of Object.entries(state.selection)) if (value) args[key] = value;
+  const seq = ++loadSeq;
+  const args = { ...range(), compare: state.compare, ...selectionArgs(state.selection) };
   const options = optionsArg(state.available.filter(key => args[SOURCES[key].select]));
   if (options) args.options = options;
   const picked = state.available.some(key => args[SOURCES[key].select]);
@@ -415,6 +427,7 @@ async function load() {
   status('');
   try {
     const result = await host.callServerTool('get_marketing_dashboard', args);
+    if (seq !== loadSeq) return;
     if (result.isError) throw new Error(result.structuredContent?.error || 'The dashboard could not be loaded.');
     accept(result.structuredContent);
   } catch (error) {
@@ -591,6 +604,7 @@ function render() {
   for (const node of view.querySelectorAll('.trend')) node.mount();
   for (const node of view.querySelectorAll('.spark')) node.drawIn?.();
   for (const node of view.querySelectorAll('.table-scroll, .share, .gauge')) node.animateIn?.();
+  scrollToPendingSection();
 }
 
 function renderWelcome() {
@@ -665,6 +679,14 @@ function renderOverview(view) {
     view.append(panel);
   }
 
+  // Outcomes and GA4 key events sit above the per-source cards: they answer "what did we get".
+  const blended = el('div', undefined, 'panels blended');
+  const outcomes = outcomesPanel(snap);
+  if (outcomes) blended.append(outcomes);
+  const ga4 = snap.sources.ga4;
+  if (ga4?.status === 'ready' && ga4.keyEventsByName) blended.append(keyEventsPanel(ga4), attributedChannelsPanel(ga4));
+  if (blended.children.length) view.append(blended);
+
   const grid = el('div', undefined, 'source-grid');
   for (const [key, source] of loaded) {
     const config = SOURCES[key];
@@ -696,8 +718,9 @@ function renderOverview(view) {
   view.append(grid);
 }
 
-function panel(title, content, { wide = false, note } = {}) {
+function panel(title, content, { wide = false, note, section } = {}) {
   const node = el('section', undefined, `panel reveal${wide ? ' wide' : ''}`);
+  if (section) node.dataset.section = section;
   node.append(el('h3', title));
   node.append(content);
   if (note) node.append(el('p', note, 'panel-note'));
@@ -724,7 +747,9 @@ function renderSource(view, key) {
     view.append(empty);
     return;
   }
-  const accountName = state.accounts?.[key]?.data?.find(item => item.id === source.account)?.name || source.account;
+  // A CallRail company is listed as ACC…:COM…, so look it up with both parts.
+  const accountId = source.company ? `${source.account}:${source.company}` : source.account;
+  const accountName = state.accounts?.[key]?.data?.find(item => item.id === accountId)?.name || source.account;
   const head = header(config.full, `${accountName}${source.timeZone ? ` · ${source.timeZone}` : ''}${currencyOf(source) ? ` · ${currencyOf(source)}` : ''}`);
   head.querySelector('.view-title').prepend(icon(key, 'logo title-logo'));
   const customize = el('button', state.customizing ? 'Done' : 'Customize', 'btn'); customize.type = 'button';
@@ -752,6 +777,7 @@ function renderSource(view, key) {
   // Trend with a metric switcher; the previous period is drawn as a muted dashed line.
   const trendKey = state.trendMetric[key] && config.trend.includes(state.trendMetric[key]) ? state.trendMetric[key] : config.trend[0];
   const trendPanel = el('section', undefined, 'panel wide reveal');
+  trendPanel.dataset.section = 'trend';
   const trendHead = el('div', undefined, 'panel-head');
   trendHead.append(el('h3', 'Trend'));
   const switcher = el('div', undefined, 'segmented');
@@ -781,15 +807,8 @@ function renderSource(view, key) {
   const money = moneyFormatter(currencyOf(source));
   grid.append(breakdownPanel(key, source));
   const gscColumns = label => [{ key: 'label', label, format: label === 'Page' ? shortUrl : undefined }, { key: 'clicks', label: 'Clicks', format: fmt.num, bar: true }, { key: 'impressions', label: 'Impr.', format: fmt.num }, { key: 'ctr', label: 'CTR', format: fmt.pct }, { key: 'position', label: 'Pos.', format: fmt.dec }];
-  if (key === 'ga4') {
-    grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: row.deviceCategory, value: row.sessions })), fmt.num) : failed(source.devices), { note: 'Share of sessions.' }));
-    if (source.pages) grid.append(panel('Top landing pages', tableFrom(source.pages, [{ key: 'landingPagePlusQueryString', label: 'Page', format: shortUrl }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Users', format: fmt.num }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num }, { key: 'engagementRate', label: 'Engaged', format: fmt.pct0 }])));
-  }
-  if (key === 'search_console') {
-    grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: row.label.charAt(0) + row.label.slice(1).toLowerCase(), value: row.clicks })), fmt.num) : failed(source.devices), { note: 'Share of clicks.' }));
-    if (source.pages) grid.append(panel('Top pages', tableFrom(source.pages, gscColumns('Page'))));
-    if (source.queries) grid.append(panel('Top queries', tableFrom(source.queries, gscColumns('Query'))));
-  }
+  if (key === 'ga4') ga4Panels(grid, source);
+  if (key === 'search_console') searchConsolePanels(grid, source, gscColumns);
   if (key === 'merchant_center') {
     const health = source.health;
     if (health?.status === 'ready') {
@@ -852,10 +871,122 @@ function renderSource(view, key) {
     caption.append(el('strong', fmt.pct0(rate)), el('span', `${fmt.num(now?.answered || 0)} answered · ${fmt.num(now?.missed || 0)} missed`));
     answered.append(g, caption);
     grid.append(panel('Answer rate', answered));
-    if (source.options?.breakdown !== 'source') grid.append(panel('Calls by source', rowsOf(source.sources) ? shareBar(rowsOf(source.sources).slice(0, 6).map((row, i) => ({ label: row.label, value: row.calls, slot: i })), fmt.num) : failed(source.sources), { note: 'Top sources by calls.' }));
+    if (source.options?.breakdown !== 'source') grid.append(panel('Calls by source', rowsOf(source.sources) ? shareBar(rowsOf(source.sources).slice(0, 6).map((row, i) => ({ label: row.label, value: row.calls, slot: i })), fmt.num) : failed(source.sources), { note: 'Top sources by calls.', section: 'calls' }));
+    callRailPanels(grid, source);
   }
   closeGaps(grid);
   view.append(grid);
+}
+
+/* ---------------- Report sections ---------------- */
+
+const ratioOf = (current, previous) => previous ? (current - previous) / Math.abs(previous) : null;
+const titleCase = value => String(value || '').toLowerCase().replaceAll('_', ' ').replace(/^\w/, c => c.toUpperCase());
+const changeText = (current, previous, better = 'up') => {
+  const c = change({ better }, current, previous);
+  return c ? c.text : '—';
+};
+
+// Key events by name, this period against the previous one. Counts every key event marked in
+// GA4 (a chosen key-event filter narrows the tiles, not this list).
+function keyEventsPanel(source) {
+  const now = rowsOf(source.keyEventsByName);
+  if (!now) return panel('Key events', failed(source.keyEventsByName), { wide: true, section: 'key_events' });
+  const before = new Map((rowsOf(source.keyEventsByNamePrevious) || []).map(row => [row.eventName, row.keyEvents]));
+  const hasPrevious = Boolean(rowsOf(source.keyEventsByNamePrevious));
+  const rows = now.map(row => ({ label: row.eventName, keyEvents: row.keyEvents, previous: hasPrevious ? before.get(row.eventName) ?? 0 : null, eventValue: row.eventValue }))
+    .map(row => ({ ...row, changeRatio: row.previous === null ? null : ratioOf(row.keyEvents, row.previous) }));
+  const money = moneyFormatter(currencyOf(source));
+  const columns = [{ key: 'label', label: 'Key event' }, { key: 'keyEvents', label: 'Key events', format: fmt.num, bar: true }];
+  if (hasPrevious) columns.push({ key: 'previous', label: 'Previous', format: fmt.num }, { key: 'changeRatio', label: 'Change', format: (v, row) => changeText(row.keyEvents, row.previous) });
+  if (rows.some(row => row.eventValue)) columns.push({ key: 'eventValue', label: 'Value', format: money });
+  return panel('Key events', rows.length ? rankedTable(rows, columns) : el('p', 'No key events in this period. Mark events as key events in GA4 to see them here.', 'empty-note'),
+    { wide: true, section: 'key_events', note: 'Every event marked as a key event in GA4, compared with the previous period.' });
+}
+
+// Advertising › Attribution: key events credited to each channel by the property's attribution
+// model, split by key event (the top four, then the total).
+function attributedChannelsPanel(source) {
+  const rows = rowsOf(source.attributedChannels);
+  if (!rows) return panel('Key events by channel (attributed)', failed(source.attributedChannels), { wide: true, section: 'attribution' });
+  const totals = new Map();
+  for (const row of rows) totals.set(row.eventName, (totals.get(row.eventName) || 0) + row.keyEvents);
+  const events = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([name]) => name);
+  const byChannel = new Map();
+  for (const row of rows) {
+    const entry = byChannel.get(row.defaultChannelGroup) || { label: row.defaultChannelGroup, total: 0 };
+    entry.total += row.keyEvents;
+    if (events.includes(row.eventName)) entry[`e:${row.eventName}`] = (entry[`e:${row.eventName}`] || 0) + row.keyEvents;
+    byChannel.set(row.defaultChannelGroup, entry);
+  }
+  const table = [...byChannel.values()].sort((a, b) => b.total - a.total);
+  const columns = [{ key: 'label', label: 'Channel' }, { key: 'total', label: 'All key events', format: fmt.num, bar: true },
+    ...events.map(name => ({ key: `e:${name}`, label: name, format: v => fmt.num(v || 0) }))];
+  return panel('Key events by channel (attributed)', table.length ? rankedTable(table, columns) : el('p', 'No key events in this period.', 'empty-note'),
+    { wide: true, section: 'attribution', note: 'Credited by your GA4 attribution model, as in Advertising › Attribution. Totals can differ from session-based channel reports.' });
+}
+
+function ga4Panels(grid, source) {
+  const money = moneyFormatter(currencyOf(source));
+  const attributedColumns = label => [{ key: 'label', label }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num, bar: true }, { key: 'totalRevenue', label: 'Revenue', format: money }];
+  grid.append(keyEventsPanel(source), attributedChannelsPanel(source));
+  const asLabel = (report, field) => rowsOf(report) ? { ...report, data: { ...report.data, rows: rowsOf(report).map(row => ({ ...row, label: row[field] })) } } : report;
+  grid.append(panel('Key events by source / medium', tableFrom(asLabel(source.attributedSources, 'sourceMedium'), attributedColumns('Source / medium')), { section: 'attribution', note: 'Attributed, as in Advertising.' }));
+  grid.append(panel('Key events by campaign', tableFrom(asLabel(source.attributedCampaigns, 'campaignName'), attributedColumns('Campaign')), { section: 'campaigns', note: 'Attributed, as in Advertising.' }));
+  grid.append(panel('User acquisition', tableFrom(asLabel(source.acquisition, 'firstUserDefaultChannelGroup'), [{ key: 'label', label: 'First user channel' }, { key: 'newUsers', label: 'New users', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Active users', format: fmt.num }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num }]), { section: 'acquisition' }));
+  grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: row.deviceCategory, value: row.sessions })), fmt.num) : failed(source.devices), { note: 'Share of sessions.' }));
+  if (source.pages) grid.append(panel('Top landing pages', tableFrom(source.pages, [{ key: 'landingPagePlusQueryString', label: 'Page', format: shortUrl }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Users', format: fmt.num }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num }, { key: 'engagementRate', label: 'Engaged', format: fmt.pct0 }]), { section: 'landing_pages' }));
+  grid.append(panel('Top pages', tableFrom(asLabel(source.topPages, 'pagePath'), [{ key: 'label', label: 'Page', format: shortUrl }, { key: 'screenPageViews', label: 'Views', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Users', format: fmt.num }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num }, { key: 'averageSessionDuration', label: 'Avg. time', format: fmt.seconds }]), { section: 'pages' }));
+  grid.append(panel('Countries', tableFrom(asLabel(source.countries, 'country'), [{ key: 'label', label: 'Country' }, { key: 'sessions', label: 'Sessions', format: fmt.num, bar: true }, { key: 'activeUsers', label: 'Users', format: fmt.num }, { key: 'keyEvents', label: keyLabel(source), format: fmt.num }]), { section: 'countries' }));
+}
+
+function searchConsolePanels(grid, source, gscColumns) {
+  grid.append(panel('Devices', rowsOf(source.devices) ? shareBar(rowsOf(source.devices).map(row => ({ label: titleCase(row.label), value: row.clicks })), fmt.num) : failed(source.devices), { note: 'Share of clicks.' }));
+  if (source.pages) grid.append(panel('Top pages', tableFrom(source.pages, gscColumns('Page')), { section: 'pages' }));
+  if (source.queries) grid.append(panel('Top queries', tableFrom(source.queries, gscColumns('Query')), { section: 'queries' }));
+  const relabel = (report, format) => rowsOf(report) ? { ...report, data: { ...report.data, rows: rowsOf(report).map(row => ({ ...row, label: format(row.label) })) } } : report;
+  if (source.countries) grid.append(panel('Countries', tableFrom(relabel(source.countries, value => String(value).toUpperCase()), gscColumns('Country')), { section: 'countries' }));
+  if (source.appearance) grid.append(panel('Search appearance', tableFrom(relabel(source.appearance, titleCase), gscColumns('Appearance')), { note: 'Rich results and other search features your pages appeared with.' }));
+}
+
+function callRailPanels(grid, source) {
+  const columns = label => [{ key: 'label', label }, { key: 'calls', label: 'Calls', format: fmt.num, bar: true }, { key: 'firstTime', label: 'First-time', format: fmt.num }, { key: 'answerRate', label: 'Answered', format: fmt.pct0 }, { key: 'averageDuration', label: 'Avg. duration', format: fmt.seconds }];
+  const breakdown = source.options?.breakdown;
+  const sections = [['campaign', 'byCampaign', 'Calls by campaign', 'Campaign', 'campaigns'], ['keywords', 'byKeyword', 'Calls by keyword', 'Keyword', 'calls'],
+    ['landing_page', 'byLandingPage', 'Calls by landing page', 'Landing page', 'landing_pages'], ['referrer', 'byReferrer', 'Calls by referrer', 'Referrer', 'calls']];
+  for (const [group, field, title, label, section] of sections) {
+    if (group === breakdown || !source[field]) continue;
+    grid.append(panel(title, tableFrom(source[field], columns(label)), { section }));
+  }
+}
+
+// Blended outcomes: what each channel produced, side by side with the previous period. Each
+// source counts in its own way, so the rows are never summed.
+function outcomesPanel(snap) {
+  const rows = [];
+  const add = (key, label, field, format = fmt.num) => {
+    const source = snap.sources[key];
+    const now = rowsOf(source?.totals)?.[0], before = rowsOf(source?.comparison)?.[0];
+    if (!now) return;
+    const f = format === 'money' ? moneyFormatter(currencyOf(source)) : format;
+    const current = now[field] ?? 0, previous = before ? before[field] ?? 0 : null;
+    rows.push({ label, detail: SOURCES[key].full, current, previous, changeRatio: previous === null ? null : ratioOf(current, previous), f });
+  };
+  add('ga4', 'Key events', 'keyEvents');
+  add('ga4', 'Revenue', 'totalRevenue', 'money');
+  add('google_ads', 'Ads conversions', 'conversions');
+  add('google_ads', 'Ads conversion value', 'conversionValue', 'money');
+  add('merchant_center', 'Product conversions', 'conversions');
+  add('callrail', 'Phone calls', 'calls');
+  add('callrail', 'First-time callers', 'firstTime');
+  add('gbp', 'Profile actions', 'actions');
+  add('gbp', 'Profile call clicks', 'calls');
+  add('search_console', 'Organic search clicks', 'clicks');
+  const useful = rows.filter(row => row.current || row.previous);
+  if (!useful.length) return null;
+  const columns = [{ key: 'label', label: 'Outcome' }, { key: 'current', label: 'This period', format: (v, row) => row.f(v) }];
+  if (useful.some(row => row.previous !== null)) columns.push({ key: 'previous', label: 'Previous', format: (v, row) => v === null ? '—' : row.f(v) }, { key: 'changeRatio', label: 'Change', format: (v, row) => row.previous === null ? '—' : changeText(row.current, row.previous) });
+  return panel('Outcomes', rankedTable(useful, columns, { bars: false }), { wide: true, section: 'key_events', note: 'Each source counts conversions its own way (attribution, time zone); compare rows, never add them together.' });
 }
 
 /* ---------------- Filters, breakdowns and customisation ---------------- */
@@ -1010,6 +1141,7 @@ function breakdownPanel(key, source) {
   const config = SOURCES[key];
   if (!config.breakdowns || !source.breakdown) return el('div', undefined, 'hidden-slot');
   const node = el('section', undefined, 'panel wide reveal');
+  node.dataset.section = 'breakdown';
   const head = el('div', undefined, 'panel-head');
   const title = el('div', undefined, 'panel-title');
   title.append(el('h3', 'Breakdown'));
@@ -1146,7 +1278,43 @@ function setPreset(value) {
   if (value !== 'custom' && state.snapshot) load();
 }
 
+// Scrolls to the section the opener asked for. Charts and tiles finish laying out after a
+// render and a render can be replaced by the next one, so the section is looked up again when
+// scrolling, every render restarts the timers, and the request is cleared only once reached.
+let sectionTimers = [];
+function scrollToPendingSection() {
+  for (const timer of sectionTimers) clearTimeout(timer);
+  if (!state.pendingSection) return;
+  const find = () => $('view').querySelector(`[data-section="${state.pendingSection}"]`);
+  sectionTimers = [
+    setTimeout(() => find()?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300),
+    setTimeout(() => {
+      const target = find();
+      if (!target) return;
+      if (Math.abs(target.getBoundingClientRect().top) > 120) target.scrollIntoView({ block: 'start' });
+      state.pendingSection = null;
+    }, 1400)
+  ];
+}
+
 function applyTheme(theme) { if (theme) document.documentElement.dataset.theme = theme; }
+
+// Keeps content clear of what the host draws over the app: on phones ChatGPT puts a close
+// button over the top and its message box over the bottom. Uses the host's safe-area insets
+// (MCP Apps hostContext, or window.openai in ChatGPT); on a touch phone in fullscreen that
+// reports none, reserves room for both.
+function applyInsets(context = host.hostContext || {}) {
+  const reported = context.safeAreaInsets || window.openai?.safeArea?.insets || {};
+  const phone = context.platform === 'mobile' || window.openai?.userAgent?.device?.type === 'mobile'
+    || ((context.deviceCapabilities?.touch || window.matchMedia('(pointer: coarse)').matches) && window.innerWidth < 760);
+  const fullscreen = (context.displayMode || window.openai?.displayMode) === 'fullscreen';
+  const pick = (value, fallback) => Number(value) > 0 ? Number(value) : phone && fullscreen ? fallback : 0;
+  const root = document.documentElement.style;
+  root.setProperty('--safe-top', `${pick(reported.top, 64)}px`);
+  root.setProperty('--safe-bottom', `${pick(reported.bottom, 96)}px`);
+  root.setProperty('--safe-left', `${Number(reported.left) || 0}px`);
+  root.setProperty('--safe-right', `${Number(reported.right) || 0}px`);
+}
 
 function wire() {
   window.addEventListener('resize', fitHeader);
@@ -1167,7 +1335,7 @@ function wire() {
   $('sheet-apply').onclick = applySheet;
   $('scrim').onclick = closeSheet;
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('sheet').hidden) closeSheet(); });
-  const end = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  const end = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
   $('endDate').value = end; $('startDate').value = addDays(end, -27);
   $('endDate').max = end; $('startDate').max = end;
 }
@@ -1176,9 +1344,11 @@ function wire() {
 // (from the user's request) every matching account is used; without one, sources that have a
 // single account are. Only when nothing can be chosen does the picker open.
 let autoStarted = false;
+let autoStartedFor = null;
 async function autoStart() {
   if (autoStarted) return;
   autoStarted = true;
+  autoStartedFor = state.hint;
   // Tells start-up the first load is handled, so it doesn't load a second time.
   opened = true;
   status('Finding your accounts…', 'info');
@@ -1200,6 +1370,20 @@ async function autoStart() {
   }
 }
 
+// What the opener asked for: the view, the section to scroll to, and the dates.
+function applyRequest(data) {
+  if (data.view && (data.view === 'overview' || state.available.includes(data.view))) state.view = data.view;
+  if (data.section) state.pendingSection = data.section;
+  if (data.range?.startDate && data.range?.endDate) {
+    state.preset = 'custom';
+    $('startDate').value = data.range.startDate;
+    $('endDate').value = data.range.endDate;
+    $('custom-range').hidden = false;
+    for (const button of document.querySelectorAll('[data-preset]')) button.setAttribute('aria-checked', String(button.dataset.preset === 'custom'));
+  }
+  if (data.defaults && data.defaults.compare === false) { state.compare = false; $('compare').checked = false; }
+}
+
 let opened = false;
 host.ontoolresult = result => {
   const data = result.structuredContent;
@@ -1209,20 +1393,23 @@ host.ontoolresult = result => {
   // model preselected, and the business the user asked about.
   state.available = data.sources.filter(key => SOURCES[key]);
   if (data.business) state.hint = String(data.business);
+  applyRequest(data);
   renderNav();
   const preset = Object.fromEntries(Object.entries(data.selection || {}).filter(([, value]) => value));
+  if (preset.callrailCompanyId && preset.callrailAccountId) { preset.callrailAccountId = `${preset.callrailAccountId}:${preset.callrailCompanyId}`; delete preset.callrailCompanyId; }
   if (Object.keys(preset).length) {
     state.selection = preset;
     saveSelection();
-    if (state.connected && !opened) { opened = true; closeSheet(); load(); }
-  } else if (data.business && state.connected && !state.snapshot) {
-    // The business name can arrive after start-up already opened the picker.
+    if (state.connected) { opened = true; closeSheet(); load(); }
+  } else if (data.business && state.connected && !(autoStarted && autoStartedFor === state.hint)) {
+    // A named business always wins over accounts remembered from an earlier chat, even if
+    // those already loaded: "open XYZ" must show XYZ. Not restarted for the same name.
     autoStarted = false;
     closeSheet();
     autoStart();
   }
 };
-host.onhostcontextchanged = context => applyTheme(context.theme);
+host.onhostcontextchanged = context => { applyTheme(context.theme); applyInsets({ ...host.hostContext, ...context }); };
 
 async function start() {
   wire();
@@ -1235,6 +1422,8 @@ async function start() {
     $('ask').textContent = `Ask ${assistantName()} ↗`;
     $('refresh').disabled = false;
     applyTheme(host.hostContext.theme);
+    applyInsets();
+    window.addEventListener('resize', () => applyInsets());
     const context = host.hostContext;
     if (context.displayMode !== 'fullscreen' && context.availableDisplayModes?.includes('fullscreen')) host.requestDisplayMode('fullscreen').catch(() => {});
     // The opener's tool result can arrive just after connecting; give it a moment before asking the user.
