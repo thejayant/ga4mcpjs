@@ -6,9 +6,9 @@ import { buildPluginZip } from "../plugin/zip.js";
 
 const OWNER = "Jayant Solanki";
 const OWNER_SITE = "https://thejayant.in";
-const UPDATED = "1 October 2026";
+const UPDATED = "30 October 2026";
 
-const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+export const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 function contact() {
   const email = process.env.SUPPORT_EMAIL;
@@ -17,7 +17,7 @@ function contact() {
     : `the contact details on <a href="${OWNER_SITE}">thejayant.in</a>`;
 }
 
-function layout(title, body) {
+export function layout(title, body) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)} · Marketer Companion</title>
 <style>
@@ -227,14 +227,17 @@ function privacyPage() {
 <p>Only what you authorise when you connect:</p>
 <ul><li><strong>Google</strong> (through Google sign-in): Google Analytics, Search Console, Google Ads, Merchant Center and Business Profile data for the accounts your Google user can access, and Tag Manager or BigQuery data where those features are enabled. Google shows the exact list before you approve.</li>
 <li><strong>Meta</strong> (optional): ad account and page data, if you connect Meta.</li>
-<li><strong>CallRail</strong> (optional): call data through an API key you enter.</li></ul>
+<li><strong>CallRail</strong> (optional): call data through an API key you enter.</li>
+<li><strong>Other platforms you connect on the Connections page</strong> (optional), such as Bing Webmaster Tools and Microsoft Clarity: the data those platforms' keys or sign-ins allow.</li>
+<li><strong>An anonymous account ID</strong>: Google's sign-in tells the service a fixed ID for your Google account (not your email or profile), which the service scrambles with a secret key so it can keep your connections separate from other users'.</li></ul>
 
 <h2>How it is used</h2>
 <p>Data is fetched only when you, or ChatGPT on your behalf, run a report or open the dashboard, and is used only to answer that request. The dashboard and reports are read-only. The service changes something only when you explicitly ask ChatGPT to: Google Business Profile actions such as replying to a review or publishing a post, creating a GA4 audience export, or registering the service with your Merchant Center account. ChatGPT asks you to confirm these actions.</p>
 <p>Report results are returned to ChatGPT so it can show and discuss them with you. OpenAI's handling of conversation content is covered by OpenAI's own terms and privacy policy.</p>
 
 <h2>What is stored</h2>
-<ul><li>The service has no database. Report data is not stored after a request completes.</li>
+<ul><li>Report data is not stored after a request completes, except that Microsoft Clarity answers are kept for up to one hour (encrypted) because Clarity allows only 10 requests a day.</li>
+<li>Keys and sign-ins for platforms you add on the Connections page are stored in a database (Upstash Redis), encrypted with AES-256-GCM, under your anonymous account ID. They are deleted when you disconnect the platform on that page.</li>
 <li>Your Google, Meta and CallRail credentials are encrypted (AES-256-GCM) inside the access and refresh tokens that ChatGPT keeps for your connection. Access tokens expire after 30 days and refresh tokens after 90 days.</li>
 <li>A short-lived session cache may be held in server memory and is discarded when the server instance stops.</li>
 <li>The hosting provider (Vercel) keeps standard request logs, such as time, path and status code, for operating and securing the service.</li></ul>
@@ -246,9 +249,9 @@ function privacyPage() {
 <p>The service's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Google user data is not used to develop, improve or train generalised AI or machine-learning models, and humans do not read it except with your consent, for security, or where the law requires.</p>
 
 <h2>Your choices</h2>
-<ul><li>Disconnect the plugin in ChatGPT to stop all access.</li>
+<ul><li>Disconnect the app in ChatGPT or Claude to stop all access through it.</li>
 <li>Revoke Google access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, Meta access in your Facebook Business settings, and rotate your CallRail API key in CallRail.</li>
-<li>Because nothing is stored in a database, disconnecting removes the service's ability to access your data.</li></ul>
+<li>Disconnecting a platform on the Connections page deletes its stored key or sign-in immediately. To have everything stored under your account ID deleted, contact us below.</li></ul>
 
 <h2>Contact</h2>
 <p>Questions about this policy: ${contact()}.</p>`);

@@ -132,6 +132,28 @@ connector* form with the name and address already filled in, so Claude users cli
 Workspace admins can download the ChatGPT plugin package at
 `https://ga4mcpjs.vercel.app/download/plugin.zip`; it is built from the deployed files.
 
+## 6. Connections: more platforms without reconnecting
+
+Platforms beyond Google, Meta and CallRail (so far Bing Webmaster Tools and Microsoft Clarity)
+are connected on a Connections page, not in the app's sign-in. Users ask their assistant to
+*"manage my connections"*; the `manage_connections` tool returns a private 30-minute link.
+
+Set up once:
+
+1. Vercel → your project → **Storage** → **Create** → **Upstash for Redis** (free tier) → connect
+   it to the project. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`; redeploy.
+   (A database made directly at upstash.com works too, with `UPSTASH_REDIS_REST_URL` and
+   `UPSTASH_REDIS_REST_TOKEN`.) Without these, connection tools say the feature isn't set up
+   and everything else keeps working.
+2. Keep `APP_ENCRYPTION_KEY` unchanged: stored keys are encrypted with it, and changing it makes
+   them unreadable (users would connect again).
+3. Google sign-in now also asks for `openid`, which only identifies the account. It is a
+   non-sensitive scope, so it does not affect Google verification; add it under **Data access**
+   in the Google Auth Platform if Google lists scopes there.
+
+Existing connections keep every current tool. They get a "reconnect once" message only when
+they use a connected platform, because the anonymous account ID comes from the new sign-in.
+
 ## Updating
 
 - **Server or dashboard changes**: deploy as usual. Users get them without reinstalling.

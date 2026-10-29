@@ -8,6 +8,9 @@ import { GBP_SCOPE } from "../MCP GBP/client.js";
 import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
 import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
 import { registerPublicPages } from "./pages.js";
+import { createConnectionStore } from "./connections/store.js";
+import { registerConnectionRoutes } from "./connections/routes.js";
+import { CONNECTION_TOOL_NAMES, registerConnectionTools } from "./connections/tools.js";
 
 // Every outbound call gets a deadline, so one hung upstream request fails clearly instead of
 // holding the function until the platform kills it. 50s leaves room for BigQuery's 45s wait.
@@ -1455,6 +1458,19 @@ function createOauthClient(req) {
   );
 }
 
+// Anonymous user ID: an HMAC of Google's account ID ("sub") with the server key. Stable across
+// reconnects and apps, reveals nothing about the account, and is null if Google sent no ID token.
+async function googleUserId(oauthClient, idToken) {
+  if (!idToken) return null;
+  try {
+    const ticket = await oauthClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
+    const sub = ticket.getPayload()?.sub;
+    return sub ? crypto.createHmac("sha256", getEncryptionKey()).update(`google:${sub}`).digest("hex").slice(0, 32) : null;
+  } catch {
+    return null;
+  }
+}
+
 function logAuthRouteDebug(payload) {
   console.log(JSON.stringify({ type: "auth_route_debug", ...payload }));
 }
@@ -1732,6 +1748,7 @@ function sealGoogleSection(google) {
   if (!google?.refreshToken) return undefined;
   return {
     refreshToken: google.refreshToken,
+    userId: google.userId || undefined,
     scope: google.scope,
     tokenType: google.tokenType || "Bearer"
   };
@@ -1904,6 +1921,7 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
       ...(session || {}),
       sessionId,
       refreshToken: session?.refreshToken || payload.google?.refreshToken || null,
+      userId: session?.userId || payload.google?.userId || null,
       accessToken: session?.refreshToken ? session.accessToken : null,
       expiryDate: session?.refreshToken ? session.expiryDate : 0,
       scope: session?.scope || buildSessionScope({
@@ -1973,6 +1991,8 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
     googleCredentials,
     metaCredentials,
     callrailToken: payload.callrail?.apiToken || null,
+    // Anonymous, stable per Google account; null for connections made before it existed.
+    userId: session.userId || payload.google?.userId || null,
     internalAccessKeyId: payload.internalAccessKeyId || null,
     sessionId,
     verifiedScopesKey: requiredScopes.join(" ")
@@ -5459,6 +5479,7 @@ function createServer(req) {
     listCallRailAccounts, listCallRailCompanies, getCallRailCallSummary, getCallRailCallTimeseries
   });
   if (GBP_ENABLED) registerGbpTools(server, { req, withVerifiedToolAuth, buildToolResult });
+  registerConnectionTools(server, { req, store: connectionStore, seal: encryptJson, withAuth: withVerifiedToolAuth, result: buildToolResult, baseUrl: getBaseUrl });
   server.registerTool("list_marketing_presets", {
     title: "List Marketing Presets",
     description: "List expert Google Ads, GA4, and Search Console presets with their intended analyst use cases.",
@@ -8168,6 +8189,9 @@ app.set("trust proxy", true);
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 registerPublicPages(app, { getBaseUrl });
+// Extra platforms connected on the Connections page, stored encrypted per user (null when no store is configured).
+const connectionStore = createConnectionStore({ seal: encryptJson, open: decryptJson });
+registerConnectionRoutes(app, { store: connectionStore, seal: encryptJson, open: decryptJson });
 
 app.get("/", (req, res) => {
   const baseUrl = getBaseUrl(req);
@@ -8189,7 +8213,7 @@ app.get("/", (req, res) => {
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
     scopes: GOOGLE_SCOPES,
-    tools: [...Object.keys(TOOL_SCOPE_MAP), ...EXPERT_TOOL_NAMES, ...(isFeatureEnabled("ENABLE_MARKETING_DASHBOARD") ? DASHBOARD_TOOLS : []), ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])],
+    tools: [...Object.keys(TOOL_SCOPE_MAP), ...EXPERT_TOOL_NAMES, ...CONNECTION_TOOL_NAMES, ...(isFeatureEnabled("ENABLE_MARKETING_DASHBOARD") ? DASHBOARD_TOOLS : []), ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])],
     optionalCallRailTools: CALLRAIL_TOOL_NAMES,
     presets: buildMarketingPresetCatalog()
   });
@@ -8353,7 +8377,9 @@ app.get("/auth/google/start", (req, res) => {
     });
 
     const oauthClient = createOauthClient(req);
-    const requestedScopes = normalizeGoogleAuthScopes(req.query.scope);
+    // openid only identifies the Google account (no email or profile); it gives each user a
+    // stable anonymous ID for the Connections store.
+    const requestedScopes = [...normalizeGoogleAuthScopes(req.query.scope), "openid"];
     const resource = getRequestedResource(req, getResourceUrl(req));
     const clientRedirectUri = resolveClientRedirectUri(req);
     const appState = {
@@ -8420,6 +8446,7 @@ app.get("/auth/google/callback", async (req, res) => {
     }
 
     const grantedScopes = normalizeGoogleAuthScopes(tokens.scope || appState.scope);
+    const userId = await googleUserId(oauthClient, tokens.id_token);
     const sessionId = crypto.randomUUID();
     saveSession(sessionId, {
       sessionId,
@@ -8428,6 +8455,7 @@ app.get("/auth/google/callback", async (req, res) => {
       expiryDate: tokens.expiry_date,
       scope: tokens.scope || grantedScopes.join(" "),
       tokenType: tokens.token_type || "Bearer",
+      userId,
       sessionExpiresAt: Date.now() + SESSION_TTL_MS
     });
 
@@ -8446,7 +8474,8 @@ app.get("/auth/google/callback", async (req, res) => {
         refreshToken: tokens.refresh_token,
         expiryDate: tokens.expiry_date,
         scope: tokens.scope || grantedScopes.join(" "),
-        tokenType: tokens.token_type || "Bearer"
+        tokenType: tokens.token_type || "Bearer",
+        userId
       }
     });
 
@@ -8463,7 +8492,8 @@ app.get("/auth/google/callback", async (req, res) => {
           accessToken: tokens.access_token,
           expiryDate: tokens.expiry_date,
           scope: tokens.scope || grantedScopes.join(" "),
-          tokenType: tokens.token_type || "Bearer"
+          tokenType: tokens.token_type || "Bearer",
+          userId
         },
         googleScope: grantedScopes.join(" "),
         clientRedirectUri: appState.clientRedirectUri || null,
@@ -8947,6 +8977,7 @@ app.post("/oauth/token", async (req, res) => {
       const session = saveSession(sessionId, {
         sessionId,
         refreshToken: payload.google?.refreshToken || null,
+        userId: payload.google?.userId || null,
         accessToken: payload.google?.accessToken || null,
         expiryDate: payload.google?.expiryDate || 0,
         scope: buildSessionScope({
@@ -9033,6 +9064,7 @@ app.post("/oauth/token", async (req, res) => {
       const session = existingSession || saveSession(sessionId, {
         sessionId,
         refreshToken: payload.google?.refreshToken || null,
+        userId: payload.google?.userId || null,
         accessToken: null,
         expiryDate: 0,
         scope: buildSessionScope({
