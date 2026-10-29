@@ -276,3 +276,27 @@ test('the default range is the last 28 days ending yesterday, like GA4', () => {
     startDate: '2026-09-10', endDate: '2026-10-07', previousStartDate: '2026-08-13', previousEndDate: '2026-09-09', days: 28
   });
 });
+
+test('with several logins the account list merges every login, tags each entry, and routes each source', async () => {
+  const routes = [];
+  const h = harness({
+    accountsFor: async family => family === 'google' ? [{ key: 'main', label: 'Main Google sign-in' }, { key: 'google_account:x', label: 'agency@example.com' }] : [],
+    withVerifiedToolAuth: async (req, scopes, handler, route) => {
+      routes.push(route);
+      // Both logins see the same GA4 property list here; only the extra one has Search Console.
+      if (scopes[0] === 'gsc' && route?.account === 'main') return { isError: true, structuredContent: { error_description: 'Missing scope' } };
+      return handler({ googleCredentials: { accessToken: 'test-only' } });
+    }
+  });
+  const accounts = (await h.tools.list_dashboard_accounts.handler()).structuredContent;
+  assert.ok(routes.some(r => r?.account === 'main') && routes.some(r => r?.account === 'google_account:x'));
+  const ids = accounts.ga4.data.map(p => p.id);
+  assert.equal(new Set(ids).size, ids.length, 'a property both logins see is listed once');
+  assert.equal(accounts.ga4.data[0].login, 'Main Google sign-in');
+  assert.equal(accounts.search_console.status, 'ready', 'a source one login lacks still lists the other login\'s accounts');
+  assert.ok(accounts.search_console.data.every(s => s.login === 'agency@example.com'));
+
+  routes.length = 0;
+  await load(h, { propertyId: '269500556' });
+  assert.ok(routes.every(r => r?.args?.propertyId === '269500556'), 'GA4 reads are routed by the property');
+});

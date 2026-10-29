@@ -11,6 +11,10 @@ import { registerPublicPages } from "./pages.js";
 import { createConnectionStore } from "./connections/store.js";
 import { registerConnectionRoutes } from "./connections/routes.js";
 import { CONNECTION_TOOL_NAMES, registerConnectionTools } from "./connections/tools.js";
+import { PROVIDERS, configureAccountProviders } from "./connections/providers.js";
+import { freshAccessToken } from "./connections/oauth.js";
+import { createAccountRouter, siteKey } from "./connections/routing.js";
+import { gbpRequest } from "../MCP GBP/client.js";
 
 // Every outbound call gets a deadline, so one hung upstream request fails clearly instead of
 // holding the function until the platform kills it. 50s leaves room for BigQuery's 45s wait.
@@ -1141,6 +1145,8 @@ function renderAuthStatusPage(options = {}) {
     !callrailChain && !internalChain && safeRedirect ? '<a class="cta" href="' + safeRedirect + '">' + escapeHtml(continueLabel) + "</a>" : "",
     safeSecondary ? '<a class="cta cta--ghost" href="' + safeSecondary + '">' + escapeHtml(secondaryLabel) + "</a>" : "",
     footnote ? '<p class="note">' + escapeHtml(footnote) + "</p>" : "",
+    // New platforms are added after sign-in on the Connections page, so say where to find them.
+    google === "connected" ? '<p class="note">More platforms (Bing Webmaster Tools, Microsoft Clarity, YouTube) can be added after setup: ask your assistant to <strong>manage my connections</strong>.</p>' : "",
     advances ? '<p class="note">Taking you there automatically. Use the button if nothing happens.</p>' : "",
     "</main>",
     // A click must win the race against any pending auto-redirect, otherwise choosing
@@ -2092,9 +2098,45 @@ function shouldEmitAuthChallenge(error) {
   return ["missing_authorization_header", "bad_authorization_scheme", "no_valid_session", "google_refresh_failed", "missing_scopes"].includes(error?.details?.debug);
 }
 
-async function withVerifiedToolAuth(req, requiredScopes, handler) {
+// Errors from the main sign-in's Meta connection that an extra Meta login can stand in for.
+const META_STAND_IN_ERRORS = ["no_meta_credentials", "meta_token_expired", "missing_scopes"];
+
+// The main sign-in's credentials, or an extra account's (added on the Connections page) when the
+// request names a property, site, ad account or page that only that account can see.
+// `route` is { args, account } and defaults to the current tool call's.
+async function authForTool(req, requiredScopes, route = req.toolCall) {
+  const needsGoogle = scopesInclude(requiredScopes, GOOGLE_SCOPES);
+  const needsMeta = scopesInclude(requiredScopes, META_SCOPES);
+  let auth, metaError;
   try {
-    const auth = await verifyMcpAccessToken(req, requiredScopes);
+    auth = await verifyMcpAccessToken(req, requiredScopes);
+  } catch (error) {
+    if (!needsMeta || !META_STAND_IN_ERRORS.includes(error?.details?.debug)) throw error;
+    metaError = error;
+    auth = { ...(await verifyMcpAccessToken(req, requiredScopes.filter(scope => !META_SCOPES.includes(scope)))), metaCredentials: null };
+  }
+  if (!connectionStore || !auth.userId || (!needsGoogle && !needsMeta)) {
+    if (metaError) throw metaError;
+    return auth;
+  }
+  const routed = { ...auth };
+  const pick = (family, primary) => accountRouter.choose({ userId: auth.userId, family, args: route?.args,
+    account: !route?.family || route.family === family ? route?.account : undefined, primary });
+  if (needsGoogle) {
+    const chosen = await pick("google", auth.googleCredentials);
+    if (chosen) Object.assign(routed, { googleCredentials: chosen.credentials, account: chosen.label });
+  }
+  if (needsMeta) {
+    const chosen = await pick("meta", auth.metaCredentials?.accessToken ? auth.metaCredentials : null);
+    if (chosen) Object.assign(routed, { metaCredentials: chosen.credentials, account: chosen.label });
+    if (!routed.metaCredentials) throw metaError;
+  }
+  return routed;
+}
+
+async function withVerifiedToolAuth(req, requiredScopes, handler, route) {
+  try {
+    const auth = await authForTool(req, requiredScopes, route);
     return await handler(auth);
   } catch (error) {
     return buildToolResult(
@@ -2105,10 +2147,14 @@ async function withVerifiedToolAuth(req, requiredScopes, handler) {
   }
 }
 
-async function withCallRailTool(req, handler) {
+async function withCallRailTool(req, handler, route = req.toolCall) {
   try {
     const auth = await verifyMcpAccessToken(req, []);
-    const apiToken = req.cbxInternal ? process.env.CALLRAIL_API_TOKEN : auth.callrailToken;
+    let apiToken = req.cbxInternal ? process.env.CALLRAIL_API_TOKEN : auth.callrailToken;
+    if (!req.cbxInternal && connectionStore && auth.userId) {
+      const chosen = await accountRouter.choose({ userId: auth.userId, family: "callrail", args: route?.args, account: route?.account, primary: apiToken || null });
+      if (chosen) apiToken = chosen.credentials;
+    }
     if (!apiToken) return buildToolResult({
       error: "callrail_not_connected",
       error_description: req.cbxInternal
@@ -5466,8 +5512,50 @@ function isToolCall(body) {
   return body?.method === "tools/call" && typeof body?.params?.name === "string";
 }
 
+const ACCOUNT_INPUT = z.string().trim().min(1).max(200).optional()
+  .describe("Only when several accounts are connected for this platform: which one to use (its label or id from manage_connections). Usually omit it: the account that can see the requested property is used automatically.");
+
+function toolFamily(name) {
+  if (CALLRAIL_TOOL_NAMES.includes(name)) return "callrail";
+  if (/meta/.test(name)) return "meta";
+  if (/ga4|search_console|google_ads|merchant|^gbp_|tag_manager|gtm|bigquery/.test(name)) return "google";
+  return null;
+}
+
+// Records each tool call's platform and arguments on the request so tool auth can pick the account,
+// and gives every Google, Meta and CallRail tool an optional `account` input.
+function routeToolsByAccount(server, req) {
+  const register = server.registerTool.bind(server);
+  server.registerTool = (name, config, handler) => {
+    const family = toolFamily(name);
+    const shape = config?.inputSchema;
+    if (!family || typeof handler !== "function") return register(name, config, handler);
+    if (!shape || typeof shape !== "object" || shape instanceof z.ZodType || shape.account) {
+      return register(name, config, (...args) => {
+        req.toolCall = { name, family, args: shape ? args[0] || {} : {} };
+        return handler(...args);
+      });
+    }
+    return register(name, { ...config, inputSchema: { ...shape, account: ACCOUNT_INPUT } }, (args = {}, extra) => {
+      const { account, ...rest } = args;
+      req.toolCall = { name, family, args: rest, account };
+      return handler(rest, extra);
+    });
+  };
+}
+
+// The user's logins for a platform (main sign-in plus extras), for the dashboard's account list.
+async function toolAccounts(req, family) {
+  if (!connectionStore) return [];
+  const auth = await verifyMcpAccessToken(req, []).catch(() => null);
+  if (!auth?.userId) return [];
+  const primary = { google: auth.googleCredentials, meta: auth.metaCredentials?.accessToken ? auth.metaCredentials : null, callrail: auth.callrailToken }[family] || null;
+  return (await accountRouter.accounts(auth.userId, family, primary)).map(({ key, label }) => ({ key, label }));
+}
+
 function createServer(req) {
   const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" });
+  routeToolsByAccount(server, req);
   if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
     req, withVerifiedToolAuth, buildToolResult,
     scopes: { ga4: GA4_SCOPE, search_console: SEARCH_CONSOLE_SCOPE, google_ads: GOOGLE_ADS_SCOPE, merchant_center: MERCHANT_CENTER_SCOPE, gbp: GBP_SCOPE },
@@ -5475,7 +5563,8 @@ function createServer(req) {
     runGa4Report, batchRunGa4Reports, querySearchConsole, queryGoogleAds,
     listMerchantAccounts, searchMerchantReports, getMerchantProductStatusSummary,
     gbpEnabled: GBP_ENABLED,
-    withCallRail: (handler) => withCallRailTool(req, handler),
+    withCallRail: (handler, route) => withCallRailTool(req, handler, route),
+    accountsFor: family => toolAccounts(req, family),
     listCallRailAccounts, listCallRailCompanies, getCallRailCallSummary, getCallRailCallTimeseries
   });
   if (GBP_ENABLED) registerGbpTools(server, { req, withVerifiedToolAuth, buildToolResult });
@@ -7641,7 +7730,7 @@ function createServer(req) {
     }));
   }
 
-  if (req.cbxInternal || req.mcpAuth?.callrailToken) {
+  if (req.cbxInternal || req.mcpAuth?.callrailToken || req.extraCallRail) {
   server.registerTool("list_callrail_accounts", {
     title: "List CallRail Accounts",
     description: "List CallRail accounts visible to the configured CallRail API token.",
@@ -8060,7 +8149,7 @@ function createServer(req) {
       }, !response.ok);
     });
   });
-  if (req.cbxInternal || req.mcpAuth?.callrailToken) {
+  if (req.cbxInternal || req.mcpAuth?.callrailToken || req.extraCallRail) {
   server.registerTool("run_callrail_preset", {
     title: "Run CallRail Preset",
     description: "Run expert CallRail reports. CallRail returns raw call records rather than aggregated reports, so this tool fetches one page of calls and aggregates them into call, answered, missed, qualified, first-time, duration, and lead-value totals grouped by source, medium, campaign, keyword, landing page, referrer, tracking number, company, device, city, lead status, tag, answered state, first-time state, duration bucket, or day. Results are normalized into the cross-platform schema so calls can be joined to Google Ads, GA4, and Search Console rows.",
@@ -8191,7 +8280,52 @@ app.use(express.urlencoded({ extended: false }));
 registerPublicPages(app, { getBaseUrl });
 // Extra platforms connected on the Connections page, stored encrypted per user (null when no store is configured).
 const connectionStore = createConnectionStore({ seal: encryptJson, open: decryptJson });
-registerConnectionRoutes(app, { store: connectionStore, seal: encryptJson, open: decryptJson });
+// Extra Google accounts and Meta logins ask for the same permissions as the main sign-in.
+configureAccountProviders({ googleScopes: GOOGLE_SCOPES, metaScopes: META_SCOPES, metaVersion: getMetaGraphApiVersion(), metaConfigId: getMetaLoginConfigId(), callrailBase: getCallRailBaseUrl() });
+// Which resources each extra account reaches, listed at most once an hour per account (see routing.js).
+const accountRouter = createAccountRouter({
+  store: connectionStore,
+  labels: { main: family => ({ google: "Main Google sign-in", meta: "Main Meta login", callrail: "Main CallRail key" })[family] },
+  listers: {
+    async google({ accessToken }) {
+      const [ga4, gsc, ads, merchant, gbp] = await Promise.all([
+        listGa4Properties(accessToken), listSearchConsoleSites(accessToken), listGoogleAdsAccessibleCustomers(accessToken),
+        listMerchantAccounts(accessToken, { pageSize: 500 }), GBP_ENABLED ? gbpRequest(accessToken, "accounts", "/accounts", { query: { pageSize: 20 } }) : null
+      ].map(call => Promise.resolve(call).catch(() => null)));
+      if (![ga4, gsc, ads, merchant, gbp].some(response => response?.ok)) throw new Error("Google account unavailable");
+      const digits = value => String(value).replace(/\D/g, "");
+      return [
+        ...(ga4?.body?.accountSummaries || []).flatMap(summary => (summary.propertySummaries || []).map(property => `ga4:${digits(property.property)}`)),
+        ...(gsc?.body?.siteEntry || []).map(site => `gsc:${siteKey(site.siteUrl)}`),
+        ...(ads?.body?.resourceNames || []).map(name => `ads:${digits(name)}`),
+        ...(merchant?.body?.accounts || []).map(account => `merchant:${account.accountId}`),
+        ...(gbp?.body?.accounts || []).map(account => `gbp:${digits(account.name)}`)
+      ];
+    },
+    async meta({ accessToken }) {
+      const [ads, pages] = await Promise.all([
+        callMetaGraphApi("/me/adaccounts", accessToken, { fields: "account_id", limit: 500 }),
+        callMetaGraphApi("/me/accounts", accessToken, { fields: "id", limit: 500 })
+      ]);
+      if (!ads.ok && !pages.ok) throw new Error("Meta login unavailable");
+      return [...(ads.body?.data || []).map(account => `ad:${account.account_id}`), ...(pages.body?.data || []).map(page => `page:${page.id}`)];
+    },
+    async callrail(apiToken) {
+      const accounts = await listCallRailAccounts(apiToken, { query: { per_page: 250 } });
+      if (!accounts.ok) throw new Error("CallRail key unavailable");
+      return (accounts.body?.accounts || []).map(account => `cr:${account.id}`);
+    }
+  },
+  async credentialsFor(family, record, id, userId) {
+    if (family === "callrail") return record.credentials.apiToken;
+    if (family === "meta") {
+      if (record.oauth.expiresAt && record.oauth.expiresAt <= Date.now()) throw new Error(`The Meta login "${record.label}" has expired. Ask to manage connections and add it again.`);
+      return { accessToken: record.oauth.accessToken, expiresAt: record.oauth.expiresAt, scope: record.oauth.scope };
+    }
+    return { accessToken: await freshAccessToken({ store: connectionStore, userId, providerId: id, provider: PROVIDERS.google_account, record }) };
+  }
+});
+registerConnectionRoutes(app, { store: connectionStore, seal: encryptJson, open: decryptJson, baseUrl: getBaseUrl });
 
 app.get("/", (req, res) => {
   const baseUrl = getBaseUrl(req);
@@ -9309,6 +9443,9 @@ app.all(["/mcp", "/cbx"], async (req, res) => {
         throw buildAuthError({ httpStatus: 401, error: "invalid_token", errorDescription: "Internal CBX approval is required. Reconnect to /cbx.", details: { debug: "internal_access_required" } });
       }
       req.cbxInternal = true;
+    } else if (!auth.callrailToken && auth.userId && connectionStore) {
+      // CallRail tools also appear for a user whose CallRail keys were all added on the Connections page.
+      req.extraCallRail = (await connectionStore.list(auth.userId).catch(() => [])).some(id => id.startsWith("callrail_key:"));
     }
   } catch (error) {
     // Every repeated sign-in prompt a user sees starts with one of these, so record

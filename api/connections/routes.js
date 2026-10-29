@@ -3,7 +3,8 @@
 // (an encrypted, 30-minute token naming the user), so there is no separate login and nothing
 // is added to the app's own sign-in flow. Secrets are never shown back.
 import { layout, escapeHtml } from "../pages.js";
-import { PROVIDERS, publicConnection } from "./providers.js";
+import { PROVIDERS, publicConnection, baseProvider } from "./providers.js";
+import { oauthReady, authorizeUrl, exchangeCode, STATE_TTL_MS, CALLBACK_PATH } from "./oauth.js";
 
 export const LINK_TTL_MS = 30 * 60 * 1000;
 
@@ -22,23 +23,34 @@ function readLink(open, token) {
 }
 
 function page(t, connections, { notice, error } = {}) {
+  const q = `?t=${encodeURIComponent(t)}`;
+  const entry = connected => `<div class="entry"><p class="status ${connected.expired ? "expired" : "ok"}">${connected.expired ? "Expired, connect again" : "Connected"}${connected.label ? ` · ${escapeHtml(connected.label)}` : ""}${connected.summary ? ` · ${escapeHtml(connected.summary)}` : ""}</p>
+         <form method="post" action="/connections/${encodeURIComponent(connected.id)}/disconnect${q}"><button type="submit" class="secondary-btn">Disconnect</button></form></div>`;
   const cards = Object.entries(PROVIDERS).map(([id, provider]) => {
-    const connected = connections[id];
-    const action = `/connections/${id}?t=${encodeURIComponent(t)}`;
+    // Providers with several accounts list each one, then always offer to add another.
+    const mine = provider.multi ? Object.values(connections).filter(c => c.provider === id) : [];
+    const connected = provider.multi ? null : connections[id];
+    const action = `/connections/${id}${q}`;
     const body = connected
-      ? `<p class="status ok">Connected${connected.label ? ` · ${escapeHtml(connected.label)}` : ""}${connected.summary ? ` · ${escapeHtml(connected.summary)}` : ""}</p>
-         <form method="post" action="${action}/disconnect"><button type="submit" class="secondary-btn">Disconnect</button></form>`
+      ? entry(connected)
+      : mine.map(entry).join("") + (provider.oauth
+        ? oauthReady(provider)
+          ? `<p>${escapeHtml(provider.help)}</p><a class="cta" href="/connections/${id}/start?t=${encodeURIComponent(t)}">${escapeHtml(provider.oauth.buttonLabel || `Connect ${provider.name}`)}</a>`
+          : `<p>${escapeHtml(provider.name)} isn’t set up on this server yet.</p>`
       : `<p>${escapeHtml(provider.help)} <a href="${escapeHtml(provider.helpUrl)}" target="_blank" rel="noopener">Open ${escapeHtml(provider.name)} ↗</a></p>
          <form method="post" action="${action}" class="connect-form">
            ${provider.fields.map(field => `<label>${escapeHtml(field.label)}${field.optional ? " <span>(optional)</span>" : ""}
              <input name="${field.key}" type="${field.secret ? "password" : "text"}" autocomplete="off" placeholder="${escapeHtml(field.placeholder || "")}" ${field.optional ? "" : "required"} maxlength="4000"></label>`).join("")}
-           <button type="submit" class="cta">Connect ${escapeHtml(provider.name)}</button>
-         </form>`;
+           <button type="submit" class="cta">${provider.multi ? "Add" : "Connect"} ${escapeHtml(provider.name)}</button>
+         </form>`);
     return `<div class="card"><span class="tag">${escapeHtml(provider.category)}</span><h3>${escapeHtml(provider.name)}</h3>${body}</div>`;
   }).join("\n");
   return layout("Connections", `
 <style>
 .status.ok{color:var(--accent);font-weight:600}
+.status.expired{color:#d03b3b;font-weight:600}
+.entry{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+.entry p{margin:0}
 .connect-form{display:grid;gap:10px;margin-top:8px}
 .connect-form label{display:grid;gap:4px;font-size:13.5px;font-weight:600;color:var(--ink)}
 .connect-form label span{font-weight:400;color:var(--muted)}
@@ -52,10 +64,10 @@ function page(t, connections, { notice, error } = {}) {
 <p class="lead">Connect more platforms to Marketer Companion. Keys are encrypted and only used to answer your requests. This private page link expires 30 minutes after it was created; ask your assistant for a new one any time.</p>
 ${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${error ? `<p class="notice error">${escapeHtml(error)}</p>` : ""}
 ${cards}
-<p>After connecting, go back to your chat and ask, for example, <em>“Show my Bing search queries”</em> or <em>“What do Clarity rage clicks say about my site?”</em></p>`);
+<p>After connecting, go back to your chat and ask, for example, <em>“Show my Bing search queries”</em> or <em>“What do Clarity rage clicks say about my site?”</em> With extra Google, Meta or CallRail accounts, just name the property, site, ad account or company: your assistant uses whichever account can see it.</p>`);
 }
 
-export function registerConnectionRoutes(app, { store, seal, open }) {
+export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
   const send = (res, status, html) => res.status(status).set("Cache-Control", "no-store").set("Referrer-Policy", "no-referrer").type("html").send(html);
   const expired = res => send(res, 401, layout("Link expired", `<h1>This link has expired</h1><p class="lead">Ask your assistant to “manage my connections” for a new private link.</p>`));
   const unavailable = res => send(res, 503, layout("Connections", `<h1>Connections aren’t set up yet</h1><p class="lead">This server has no connection store configured. Contact the server owner.</p>`));
@@ -70,8 +82,8 @@ export function registerConnectionRoutes(app, { store, seal, open }) {
     if (!store) return unavailable(res);
     const link = readLink(open, req.query.t);
     if (!link) return expired(res);
-    const done = PROVIDERS[req.query.connected]?.name;
-    const removed = PROVIDERS[req.query.disconnected]?.name;
+    const done = PROVIDERS[baseProvider(req.query.connected)]?.name;
+    const removed = PROVIDERS[baseProvider(req.query.disconnected)]?.name;
     send(res, 200, page(req.query.t, await current(link.userId), {
       notice: done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.` : undefined,
       error: req.query.error ? String(req.query.error).slice(0, 200) : undefined
@@ -91,16 +103,53 @@ export function registerConnectionRoutes(app, { store, seal, open }) {
     let check;
     try { check = await provider.verify(credentials); } catch { check = { ok: false, message: `${provider.name} could not be reached. Try again.` }; }
     if (!check.ok) return back({ error: check.message });
-    await store.save(link.userId, req.params.provider, { credentials, summary: check.summary, meta: check.meta, connectedAt: Date.now() });
+    const id = provider.multi ? `${req.params.provider}:${provider.instance(credentials)}` : req.params.provider;
+    await store.save(link.userId, id, { credentials, label: check.label, summary: check.summary, meta: check.meta, connectedAt: Date.now() });
     back({ connected: req.params.provider });
+  });
+
+  // Sign-in platforms: send the user to the platform's consent screen. The state carries the
+  // private link, so the return lands back on this user's Connections page.
+  app.get("/connections/:provider/start", (req, res) => {
+    if (!store) return unavailable(res);
+    const link = readLink(open, req.query.t);
+    if (!link) return expired(res);
+    const provider = PROVIDERS[req.params.provider];
+    if (!provider?.oauth || !oauthReady(provider)) return res.status(404).send("This platform can’t be connected by sign-in here.");
+    const state = seal({ typ: "connections_oauth", provider: req.params.provider, t: String(req.query.t), exp: Date.now() + STATE_TTL_MS });
+    res.set("Cache-Control", "no-store").redirect(302, authorizeUrl(provider, { redirectUri: `${baseUrl(req)}${CALLBACK_PATH}`, state }));
+  });
+
+  app.get(CALLBACK_PATH, async (req, res) => {
+    if (!store) return unavailable(res);
+    let state;
+    try { state = open(String(req.query.state || "")); } catch { state = null; }
+    if (state?.typ !== "connections_oauth" || !(state.exp > Date.now())) return expired(res);
+    const link = readLink(open, state.t);
+    if (!link) return expired(res);
+    const providerId = state.provider, provider = PROVIDERS[providerId];
+    const back = params => res.redirect(303, `/connections?t=${encodeURIComponent(state.t)}&${new URLSearchParams(params)}`);
+    if (!provider?.oauth) return back({ error: "Unknown platform." });
+    if (req.query.error) return back({ error: req.query.error === "access_denied" ? `${provider.name} wasn’t connected: access was not granted.` : `${provider.name} sign-in failed (${String(req.query.error).slice(0, 80)}).` });
+    try {
+      const oauth = await exchangeCode(provider, String(req.query.code || ""), `${baseUrl(req)}${CALLBACK_PATH}`);
+      const described = provider.describe ? await provider.describe(oauth.accessToken) : { ok: true };
+      if (!described.ok) return back({ error: described.message });
+      const id = provider.multi ? `${providerId}:${described.instance}` : providerId;
+      await store.save(link.userId, id, { oauth, label: described.label, summary: described.summary, meta: described.meta, connectedAt: Date.now() });
+      back({ connected: providerId });
+    } catch (error) {
+      back({ error: `${provider.name} couldn’t be connected: ${String(error.message).slice(0, 160)}` });
+    }
   });
 
   app.post("/connections/:provider/disconnect", async (req, res) => {
     if (!store) return unavailable(res);
     const link = readLink(open, req.query.t);
     if (!link) return expired(res);
-    if (!PROVIDERS[req.params.provider]) return res.status(404).send("Unknown platform");
-    await store.remove(link.userId, req.params.provider);
-    res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}&disconnected=${req.params.provider}`);
+    const id = String(req.params.provider);
+    if (!PROVIDERS[baseProvider(id)]) return res.status(404).send("Unknown platform");
+    await store.remove(link.userId, id);
+    res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}&disconnected=${encodeURIComponent(baseProvider(id))}`);
   });
 }

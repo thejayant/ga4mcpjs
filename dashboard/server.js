@@ -182,6 +182,8 @@ export function registerDashboard(server, deps) {
     listSearchConsoleSites, listGoogleAdsAccessibleCustomers, runGa4Report, batchRunGa4Reports, querySearchConsole, queryGoogleAds,
     listMerchantAccounts, searchMerchantReports, getMerchantProductStatusSummary,
     withCallRail, listCallRailAccounts, listCallRailCompanies, getCallRailCallSummary, getCallRailCallTimeseries, gbpEnabled } = deps;
+  // The user's logins per platform when they added extra accounts (none otherwise).
+  const accountsFor = deps.accountsFor || (async () => []);
   const gbpRequest = deps.gbpRequest || gbpFetch;
   const html = () => readFileSync(new URL('./dist/dashboard.html', import.meta.url), 'utf8');
   server.registerResource('marketing-dashboard', DASHBOARD_URI, { mimeType: 'text/html;profile=mcp-app' }, async () => ({
@@ -212,12 +214,13 @@ export function registerDashboard(server, deps) {
   function availableSources() {
     return ['ga4', 'search_console', 'google_ads', 'merchant_center', ...(gbpEnabled ? ['gbp'] : []), ...(withCallRail ? ['callrail'] : [])];
   }
-  const source = async (scope, fetcher) => {
-    const envelope = await auth(req, [scope], async ({ googleCredentials }) => result(await fetcher(googleCredentials.accessToken)));
+  // `route` names the IDs a source reads (or an explicit login), so each source uses the account that can see them.
+  const source = async (scope, route, fetcher) => {
+    const envelope = await auth(req, [scope], async ({ googleCredentials }) => result(await fetcher(googleCredentials.accessToken)), { args: route, account: route?.account });
     return envelope.isError ? { status: 'error', message: envelope.structuredContent?.error_description || 'Reconnect this source to grant access.' } : envelope.structuredContent;
   };
-  const callrail = async (fetcher) => {
-    const envelope = await withCallRail(async token => result(await fetcher(token)));
+  const callrail = async (route, fetcher) => {
+    const envelope = await withCallRail(async token => result(await fetcher(token)), { args: route, account: route?.account });
     return envelope.isError ? { status: 'error', message: envelope.structuredContent?.error_description || 'Connect CallRail to see call data.' } : envelope.structuredContent;
   };
 
@@ -225,21 +228,46 @@ export function registerDashboard(server, deps) {
     title: 'List Dashboard Accounts', description: 'List the accounts the dashboard can show: GA4 properties, Search Console sites, Google Ads customers, Merchant Center accounts, Business Profile locations and CallRail accounts. Each source reports access errors independently.',
     inputSchema: {}, annotations: { readOnlyHint: true }
   }, async () => {
-    const tasks = {
-      ga4: source(scopes.ga4, token => report(() => listGa4Properties(token), body => (body.accountSummaries || []).flatMap(a => (a.propertySummaries || []).map(p => ({ id: p.property, name: p.displayName, account: a.displayName }))))),
+    // With several logins every source is listed once per login and merged.
+    const [googleLogins, callrailLogins] = await Promise.all([accountsFor('google'), accountsFor('callrail')]);
+    const googleRuns = googleLogins.length > 1 ? googleLogins : [null];
+    const callrailRuns = callrailLogins.length > 1 ? callrailLogins : [null];
+    const runs = googleRuns.map(login => {
+      const route = login ? { account: login.key } : undefined;
+      const tasks = {
+      ga4: source(scopes.ga4, route, token => report(() => listGa4Properties(token), body => (body.accountSummaries || []).flatMap(a => (a.propertySummaries || []).map(p => ({ id: p.property, name: p.displayName, account: a.displayName }))))),
       // Unverified entries are listed by Google but always refuse queries, so they are not offered.
       // The full URL is the name because http/https/www variants are separate properties.
-      search_console: source(scopes.search_console, token => report(() => listSearchConsoleSites(token), body => (body.siteEntry || []).filter(s => s.permissionLevel !== 'siteUnverifiedUser')
+      search_console: source(scopes.search_console, route, token => report(() => listSearchConsoleSites(token), body => (body.siteEntry || []).filter(s => s.permissionLevel !== 'siteUnverifiedUser')
         .map(s => ({ id: s.siteUrl, name: s.siteUrl.startsWith('sc-domain:') ? s.siteUrl.slice(10) : s.siteUrl, account: s.siteUrl.startsWith('sc-domain:') ? 'Domain property' : 'URL prefix' }))
         .sort((a, b) => a.name.localeCompare(b.name)))),
-      google_ads: source(scopes.google_ads, token => report(() => listGoogleAdsAccessibleCustomers(token), body => (body.resourceNames || []).map(id => ({ id: id.replace('customers/', ''), name: id.replace('customers/', '').replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3') })))),
-      merchant_center: source(scopes.merchant_center, token => report(() => listMerchantAccounts(token, { pageSize: 500 }), body => (body.accounts || []).map(a => ({ id: a.accountId, name: a.accountName || a.accountId, account: a.homePageUri?.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '') }))))
-    };
-    if (gbpEnabled) tasks.gbp = source(scopes.gbp, token => gbpLocations(token));
-    if (withCallRail) tasks.callrail = callrail(token => callRailCompanies(token));
-    const entries = await Promise.all(Object.entries(tasks).map(async ([key, task]) => [key, await task]));
-    return result(Object.fromEntries(entries));
+      google_ads: source(scopes.google_ads, route, token => report(() => listGoogleAdsAccessibleCustomers(token), body => (body.resourceNames || []).map(id => ({ id: id.replace('customers/', ''), name: id.replace('customers/', '').replace(/(\d{3})(\d{3})(\d{4})/, '$1-$2-$3') })))),
+      merchant_center: source(scopes.merchant_center, route, token => report(() => listMerchantAccounts(token, { pageSize: 500 }), body => (body.accounts || []).map(a => ({ id: a.accountId, name: a.accountName || a.accountId, account: a.homePageUri?.replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, '') }))))
+      };
+      if (gbpEnabled) tasks.gbp = source(scopes.gbp, route, token => gbpLocations(token));
+      return { login, tasks };
+    });
+    if (withCallRail) for (const login of callrailRuns) runs.push({ login, tasks: { callrail: callrail(login ? { account: login.key } : undefined, token => callRailCompanies(token)) } });
+    const settled = await Promise.all(runs.map(async ({ login, tasks }) => ({ login, results: Object.fromEntries(await Promise.all(Object.entries(tasks).map(async ([key, task]) => [key, await task]))) })));
+    return result(mergeLogins(settled));
   });
+
+  // One entry per source: the accounts every login can see (deduplicated, each tagged with its
+  // login when there are several), or the first error when no login could list that source.
+  function mergeLogins(settled) {
+    const merged = {};
+    for (const { login, results } of settled) {
+      for (const [key, value] of Object.entries(results)) {
+        const current = merged[key];
+        if (value?.status !== 'ready') { if (!current) merged[key] = value; continue; }
+        const data = (value.data || []).map(item => login ? { ...item, login: login.label } : item);
+        if (current?.status !== 'ready') { merged[key] = { ...value, data }; continue; }
+        const seen = new Set(current.data.map(item => item.id));
+        current.data.push(...data.filter(item => !seen.has(item.id)));
+      }
+    }
+    return merged;
+  }
 
   // CallRail accounts hold companies (one per business). Each account is offered as a whole and
   // per company, with the company ID after a colon (ACC…:COM…). Capped like GBP locations.
@@ -288,7 +316,7 @@ export function registerDashboard(server, deps) {
 
     const options = params.options || {};
 
-    if (params.propertyId) add('ga4', source(scopes.ga4, async token => {
+    if (params.propertyId) add('ga4', source(scopes.ga4, { propertyId: params.propertyId }, async token => {
       const o = options.ga4 || {};
       const keyMetric = o.keyEvent ? `keyEvents:${o.keyEvent}` : 'keyEvents';
       const filter = ga4Filter(o);
@@ -365,7 +393,7 @@ export function registerDashboard(server, deps) {
         topPages, countries, acquisition };
     }));
 
-    if (params.siteUrl) add('search_console', source(scopes.search_console, async token => {
+    if (params.siteUrl) add('search_console', source(scopes.search_console, { siteUrl: params.siteUrl }, async token => {
       // The site may come from ChatGPT's guess ("getcarports.com") rather than the picker, and
       // Search Console treats every protocol/www/domain variant as a separate property. Resolve
       // it to a property this user can actually read before querying.
@@ -390,7 +418,7 @@ export function registerDashboard(server, deps) {
         totals: t, comparison: c, daily: d, dailyPrevious: dp, breakdown: rows, [secondary === 'page' ? 'pages' : 'queries']: second, devices, countries, appearance };
     }));
 
-    if (params.customerId) add('google_ads', source(scopes.google_ads, async token => {
+    if (params.customerId) add('google_ads', source(scopes.google_ads, { customerId: params.customerId, loginCustomerId: params.loginCustomerId }, async token => {
       // Basic Access quota: totals are summed from the daily rows instead of a separate query.
       const o = options.google_ads || {};
       const breakdown = o.breakdown || 'campaign';
@@ -438,7 +466,7 @@ export function registerDashboard(server, deps) {
         totals: totalsOf(d), comparison: compare ? totalsOf(dp) : null, daily: d, dailyPrevious: dp, breakdown: rows };
     }));
 
-    if (params.merchantAccountId) add('merchant_center', source(scopes.merchant_center, async token => {
+    if (params.merchantAccountId) add('merchant_center', source(scopes.merchant_center, { merchantAccountId: params.merchantAccountId }, async token => {
       const o = options.merchant_center || {};
       const breakdown = o.breakdown || 'product';
       const accountId = params.merchantAccountId.replace(/^accounts\//, '');
@@ -459,7 +487,7 @@ export function registerDashboard(server, deps) {
       return { status: 'ready', account: accountId, options: { ...o, breakdown }, totals: totalsOf(d), comparison: compare ? totalsOf(dp) : null, daily: d, dailyPrevious: dp, breakdown: rows, methods, health };
     }));
 
-    if (params.gbpLocation && gbpEnabled) add('gbp', source(scopes.gbp, async token => {
+    if (params.gbpLocation && gbpEnabled) add('gbp', source(scopes.gbp, { gbpLocation: params.gbpLocation }, async token => {
       const [, accountId, , locationId] = params.gbpLocation.split('/');
       const performance = dates => report(() => gbpRequest(token, 'performance', `/locations/${gbpId(locationId)}:fetchMultiDailyMetricsTimeSeries`, { query: {
         dailyMetrics: GBP_DAILY_METRICS, ...gbpDate(dates.startDate, 'dailyRange.startDate'), ...gbpDate(dates.endDate, 'dailyRange.endDate')
@@ -484,7 +512,7 @@ export function registerDashboard(server, deps) {
       return { status: 'ready', account: params.gbpLocation, totals: totalsOf(d), comparison: compare ? totalsOf(dp) : null, daily: d, dailyPrevious: dp, reviews, keywords };
     }));
 
-    if (params.callrailAccountId && withCallRail) add('callrail', callrail(async token => {
+    if (params.callrailAccountId && withCallRail) add('callrail', callrail({ callrailAccountId: params.callrailAccountId }, async token => {
       const o = options.callrail || {};
       const breakdown = o.breakdown || 'source';
       const accountId = params.callrailAccountId;

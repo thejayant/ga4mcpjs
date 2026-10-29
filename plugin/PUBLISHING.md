@@ -151,6 +151,40 @@ Set up once:
    non-sensitive scope, so it does not affect Google verification; add it under **Data access**
    in the Google Auth Platform if Google lists scopes there.
 
+### YouTube (sign-in on the Connections page)
+
+YouTube uses the same Google OAuth client as the app's sign-in, with its own consent:
+
+1. Google Cloud Console → **APIs & Services → Library**: enable **YouTube Data API v3** and
+   **YouTube Analytics API**.
+2. **Google Auth Platform → Clients** → your web client → **Authorized redirect URIs**: add
+   `https://ga4mcpjs.vercel.app/connections/oauth/callback`. Microsoft Advertising, LinkedIn,
+   TikTok and HubSpot will use this same return address in their own developer apps.
+3. **Data access**: add `youtube.readonly` and `yt-analytics.readonly`. Both are *sensitive*
+   scopes, so include them in the Google verification video (connect YouTube, run a report).
+   Until verified, only the app's test users can connect YouTube.
+
+### Extra Google accounts, Meta logins and CallRail keys
+
+Users who manage clients across several logins add them on the Connections page ("Add a Google
+account", "Add a Meta account", "Add CallRail key"); there is no limit. Each tool call then goes
+to whichever login can see the GA4 property, Search Console site, Ads customer, Merchant
+account, Business Profile account, Meta ad account or page, or CallRail account it names. Each
+login's reachable IDs are listed at most once an hour (cached encrypted), so Google Ads Basic
+Access sees one extra `listAccessibleCustomers` call per extra account per hour. Every Google,
+Meta and CallRail tool also takes an optional `account` (label or id) to force a login. The
+dashboard's account picker merges every login's accounts.
+
+- **Google**: nothing to set up; it uses the redirect URI above and the app's own scopes.
+- **Meta**: in the Meta app, **Facebook Login for Business → Settings → Valid OAuth Redirect
+  URIs**, add `https://ga4mcpjs.vercel.app/connections/oauth/callback`. It uses
+  `META_LOGIN_CONFIG_ID` when set. Meta logins last about 60 days (no refresh), after which the
+  page shows them as expired and the user adds them again.
+- **CallRail**: nothing to set up; the key is checked against CallRail before it is saved.
+
+Child accounts under a Google Ads manager are matched only through the manager ID
+(`loginCustomerId`); otherwise the main sign-in answers unless `account` is given.
+
 Existing connections keep every current tool. They get a "reconnect once" message only when
 they use a connected platform, because the anonymous account ID comes from the new sign-in.
 

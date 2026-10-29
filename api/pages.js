@@ -228,7 +228,8 @@ function privacyPage() {
 <ul><li><strong>Google</strong> (through Google sign-in): Google Analytics, Search Console, Google Ads, Merchant Center and Business Profile data for the accounts your Google user can access, and Tag Manager or BigQuery data where those features are enabled. Google shows the exact list before you approve.</li>
 <li><strong>Meta</strong> (optional): ad account and page data, if you connect Meta.</li>
 <li><strong>CallRail</strong> (optional): call data through an API key you enter.</li>
-<li><strong>Other platforms you connect on the Connections page</strong> (optional), such as Bing Webmaster Tools and Microsoft Clarity: the data those platforms' keys or sign-ins allow.</li>
+<li><strong>Other platforms you connect on the Connections page</strong> (optional), such as YouTube, Bing Webmaster Tools and Microsoft Clarity: the data those platforms' keys or sign-ins allow (for YouTube, read-only channel details and YouTube Analytics reports).</li>
+<li><strong>Extra Google accounts, Meta logins and CallRail keys</strong> (optional), added on the Connections page: the same data as the main connection for that platform, for the accounts each login can access. For each extra Google account or Meta login the service keeps its email address or name so you can tell them apart.</li>
 <li><strong>An anonymous account ID</strong>: Google's sign-in tells the service a fixed ID for your Google account (not your email or profile), which the service scrambles with a secret key so it can keep your connections separate from other users'.</li></ul>
 
 <h2>How it is used</h2>
@@ -236,7 +237,7 @@ function privacyPage() {
 <p>Report results are returned to ChatGPT so it can show and discuss them with you. OpenAI's handling of conversation content is covered by OpenAI's own terms and privacy policy.</p>
 
 <h2>What is stored</h2>
-<ul><li>Report data is not stored after a request completes, except that Microsoft Clarity answers are kept for up to one hour (encrypted) because Clarity allows only 10 requests a day.</li>
+<ul><li>Report data is not stored after a request completes, except that Microsoft Clarity answers are kept for up to one hour (encrypted) because Clarity allows only 10 requests a day. With extra accounts connected, the list of property, site and ad account IDs each one can reach is also kept for up to one hour (encrypted), so each request goes to the right account.</li>
 <li>Keys and sign-ins for platforms you add on the Connections page are stored in a database (Upstash Redis), encrypted with AES-256-GCM, under your anonymous account ID. They are deleted when you disconnect the platform on that page.</li>
 <li>Your Google, Meta and CallRail credentials are encrypted (AES-256-GCM) inside the access and refresh tokens that ChatGPT keeps for your connection. Access tokens expire after 30 days and refresh tokens after 90 days.</li>
 <li>A short-lived session cache may be held in server memory and is discarded when the server instance stops.</li>
