@@ -5,6 +5,7 @@
 import { layout, escapeHtml } from "../pages.js";
 import { PROVIDERS, publicConnection, baseProvider } from "./providers.js";
 import { oauthReady, authorizeUrl, exchangeCode, STATE_TTL_MS, CALLBACK_PATH } from "./oauth.js";
+import { PROFILE_FAMILIES, PROFILE_PLATFORMS, PROFILE_DEFAULTS, MAX_PROFILES, SLUG_PATTERN, buildProfile, profileUrl } from "./profiles.js";
 
 export const LINK_TTL_MS = 30 * 60 * 1000;
 
@@ -22,7 +23,59 @@ function readLink(open, token) {
   }
 }
 
-function page(t, connections, { notice, error } = {}) {
+// The accounts a profile can use per platform: the main sign-in's, or one added on this page.
+const MULTI_FAMILY = { google_account: "google", meta_account: "meta", callrail_key: "callrail" };
+const MAIN_LABELS = { google: "Main sign-in (the Google account you sign in with)", meta: "Main sign-in's Meta login", callrail: "Main sign-in's CallRail key" };
+function accountChoices(connections) {
+  const choices = Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, [["main", MAIN_LABELS[family]]]]));
+  for (const connection of Object.values(connections)) {
+    const family = MULTI_FAMILY[connection.provider];
+    if (family) choices[family].push([connection.id, connection.label || connection.summary || connection.id]);
+  }
+  return choices;
+}
+const platformChoices = connections => Object.keys(PROFILE_PLATFORMS).filter(id => connections[id]).map(id => [id, PROVIDERS[id].name]);
+
+function profileForm(q, choices, platforms, profile) {
+  const select = family => `<label>${PROFILE_FAMILIES[family]} account
+      <select name="account_${family}"><option value="">None</option>${choices[family].map(([value, label]) =>
+        `<option value="${escapeHtml(value)}"${profile?.accounts?.[family] === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>`;
+  const defaults = Object.entries(PROFILE_DEFAULTS).flatMap(([family, fields]) => Object.entries(fields).map(([arg, field]) =>
+    `<label>${escapeHtml(field.label)} <span>(optional)</span><input name="default_${family}_${arg}" value="${escapeHtml(profile?.defaults?.[family]?.[arg] || "")}" placeholder="${escapeHtml(field.placeholder)}" maxlength="300" autocomplete="off"></label>`)).join("");
+  return `<form method="post" action="/connections/profiles/save${q}" class="connect-form">
+      ${profile ? `<input type="hidden" name="slug" value="${escapeHtml(profile.slug)}">` : ""}
+      <label>Name<input name="name" required maxlength="60" value="${escapeHtml(profile?.name || "")}" placeholder="Client A" autocomplete="off"></label>
+      ${Object.keys(PROFILE_FAMILIES).map(select).join("")}
+      ${platforms.length ? `<fieldset><legend>Also include</legend>${platforms.map(([id, name]) => `<label class="check"><input type="checkbox" name="platform" value="${id}"${profile?.platforms?.includes(id) ? " checked" : ""}> ${escapeHtml(name)}</label>`).join("")}</fieldset>` : ""}
+      <details><summary>Default IDs, used when a request leaves them out</summary><div class="connect-form">${defaults}</div></details>
+      <button type="submit" class="cta">${profile ? "Save changes" : "Create profile"}</button>
+    </form>`;
+}
+
+function profilesSection(q, base, profiles, connections) {
+  const choices = accountChoices(connections), platforms = platformChoices(connections);
+  const known = new Set(Object.values(choices).flat().map(([value]) => value));
+  const cards = profiles.map(profile => {
+    const accounts = Object.entries(PROFILE_FAMILIES).filter(([family]) => profile.accounts?.[family]).map(([family, title]) => {
+      const key = profile.accounts[family];
+      const missing = !known.has(key);
+      return `<li>${title}: ${escapeHtml(profile.accountLabels?.[family] || key)}${missing ? ` <strong class="warn">(disconnected: pick another account)</strong>` : ""}</li>`;
+    });
+    const extras = (profile.platforms || []).map(id => `<li>${escapeHtml(PROVIDERS[id]?.name || id)}</li>`);
+    return `<div class="card"><span class="tag">Profile</span><h3>${escapeHtml(profile.name)}</h3>
+      <ul class="plain">${accounts.concat(extras).join("")}</ul>
+      <label class="url">Connector URL<input readonly value="${escapeHtml(profileUrl(base, profile.slug))}" onclick="this.select()"></label>
+      <details><summary>Edit</summary>${profileForm(q, choices, platforms, profile)}</details>
+      <form method="post" action="/connections/profiles/${encodeURIComponent(profile.slug)}/delete${q}"><button type="submit" class="secondary-btn">Delete profile</button></form>
+    </div>`;
+  });
+  return `<h2>Profiles</h2>
+<p class="lead">A profile is one client: which Google, Meta and CallRail account to use, plus default IDs. Each profile has its own connector URL. In Claude, open Settings → Connectors → Add custom connector, paste the URL, name it after the client and sign in; then turn on that client's connector in a chat. Any other assistant that takes a remote MCP server URL works the same way. On your main connector, ask for a client by profile name, or compare clients side by side.</p>
+${cards.join("\n")}
+${profiles.length < MAX_PROFILES ? `<div class="card"><span class="tag">New</span><h3>New profile</h3>${profileForm(q, choices, platforms)}</div>` : ""}`;
+}
+
+function page(t, connections, { notice, error, profiles = [], base = "" } = {}) {
   const q = `?t=${encodeURIComponent(t)}`;
   const entry = connected => `<div class="entry"><p class="status ${connected.expired ? "expired" : "ok"}">${connected.expired ? "Expired, connect again" : "Connected"}${connected.label ? ` · ${escapeHtml(connected.label)}` : ""}${connected.summary ? ` · ${escapeHtml(connected.summary)}` : ""}</p>
          <form method="post" action="/connections/${encodeURIComponent(connected.id)}/disconnect${q}"><button type="submit" class="secondary-btn">Disconnect</button></form></div>`;
@@ -59,11 +112,20 @@ function page(t, connections, { notice, error } = {}) {
 .secondary-btn{font:inherit;font-weight:600;padding:8px 14px;border-radius:10px;border:1px solid var(--border);background:transparent;color:var(--ink);cursor:pointer}
 .notice{padding:12px 14px;border-radius:12px;margin:14px 0;background:var(--surface);border:1px solid var(--border)}
 .notice.error{border-color:#d03b3b;color:var(--ink)}
+.connect-form select{font:inherit;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--page);color:var(--ink)}
+.connect-form fieldset{border:1px solid var(--border);border-radius:10px;padding:8px 12px;display:grid;gap:6px}
+.connect-form label.check{display:flex;gap:8px;align-items:center;font-weight:400}
+.card details summary{cursor:pointer;font-weight:600;margin:6px 0}
+.url{display:grid;gap:4px;font-size:13.5px;font-weight:600;margin:8px 0}
+.url input{font:13px/1.4 ui-monospace,monospace;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--page);color:var(--ink);width:100%}
+.plain{margin:6px 0;padding-left:18px}
+.warn{color:#d03b3b}
 </style>
 <h1>Your connections</h1>
 <p class="lead">Connect more platforms to Marketer Companion. Keys are encrypted and only used to answer your requests. This private page link expires 30 minutes after it was created; ask your assistant for a new one any time.</p>
 ${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${error ? `<p class="notice error">${escapeHtml(error)}</p>` : ""}
 ${cards}
+${profilesSection(q, base, profiles, connections)}
 <p>After connecting, go back to your chat and ask, for example, <em>“Show my Bing search queries”</em> or <em>“What do Clarity rage clicks say about my site?”</em> With extra Google, Meta or CallRail accounts, just name the property, site, ad account or company: your assistant uses whichever account can see it.</p>`);
 }
 
@@ -84,10 +146,54 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     if (!link) return expired(res);
     const done = PROVIDERS[baseProvider(req.query.connected)]?.name;
     const removed = PROVIDERS[baseProvider(req.query.disconnected)]?.name;
+    const saved = req.query.profile_saved ? String(req.query.profile_saved).slice(0, 60) : null;
+    const deleted = req.query.profile_deleted ? String(req.query.profile_deleted).slice(0, 60) : null;
     send(res, 200, page(req.query.t, await current(link.userId), {
-      notice: done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.` : undefined,
+      profiles: await store.listProfiles(link.userId), base: baseUrl(req),
+      notice: done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.`
+        : saved ? `Profile “${saved}” saved. Copy its connector URL into your assistant.` : deleted ? `Profile “${deleted}” deleted. Remove its connector from your assistant too.` : undefined,
       error: req.query.error ? String(req.query.error).slice(0, 200) : undefined
     }));
+  });
+
+  // Profiles. Registered before /connections/:provider so "profiles" is never read as a platform.
+  app.post("/connections/profiles/save", async (req, res) => {
+    if (!store) return unavailable(res);
+    const link = readLink(open, req.query.t);
+    if (!link) return expired(res);
+    const back = params => res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}&${new URLSearchParams(params)}`);
+    const body = req.body || {};
+    const slug = String(body.slug || "");
+    if (slug && !SLUG_PATTERN.test(slug)) return back({ error: "That profile no longer exists." });
+    const existing = slug ? await store.getProfile(link.userId, slug) : null;
+    if (slug && !existing) return back({ error: "That profile no longer exists." });
+    if (!existing && (await store.listProfiles(link.userId)).length >= MAX_PROFILES) return back({ error: `You can have up to ${MAX_PROFILES} profiles.` });
+    const connections = await current(link.userId);
+    const choices = accountChoices(connections);
+    const input = {
+      name: body.name, platforms: body.platform,
+      accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, body[`account_${family}`]])),
+      defaults: Object.fromEntries(Object.entries(PROFILE_DEFAULTS).map(([family, fields]) => [family, Object.fromEntries(Object.keys(fields).map(arg => [arg, body[`default_${family}_${arg}`]]))]))
+    };
+    const built = buildProfile(input, {
+      accountOptions: Object.fromEntries(Object.entries(choices).map(([family, list]) => [family, list.map(([value]) => value)])),
+      labels: Object.fromEntries(Object.entries(choices).map(([family, list]) => [family, Object.fromEntries(list.map(([value, label]) => [value, value === "main" ? "Main sign-in" : label]))])),
+      platformOptions: platformChoices(connections).map(([id]) => id),
+      existing
+    });
+    if (built.error) return back({ error: built.error });
+    await store.saveProfile(link.userId, built.profile);
+    back({ profile_saved: built.profile.name });
+  });
+
+  app.post("/connections/profiles/:slug/delete", async (req, res) => {
+    if (!store) return unavailable(res);
+    const link = readLink(open, req.query.t);
+    if (!link) return expired(res);
+    const slug = String(req.params.slug);
+    const profile = SLUG_PATTERN.test(slug) ? await store.getProfile(link.userId, slug) : null;
+    if (profile) await store.removeProfile(link.userId, slug);
+    res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}&${new URLSearchParams(profile ? { profile_deleted: profile.name } : { error: "That profile no longer exists." })}`);
   });
 
   app.post("/connections/:provider", async (req, res) => {

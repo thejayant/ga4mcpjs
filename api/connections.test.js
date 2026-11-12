@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import http from "node:http";
+import crypto from "node:crypto";
 import { bingDate } from "./connections/providers.js";
 import { createConnectionStore, memoryStore } from "./connections/store.js";
 import { createAccountRouter, resourceKeys } from "./connections/routing.js";
@@ -56,6 +57,70 @@ test("connections encrypt their values and list per user", async () => {
   assert.deepEqual(await store.list("u2"), [], "another user sees nothing");
   await store.remove("u1", "bing_webmaster");
   assert.equal(await store.get("u1", "bing_webmaster"), null);
+});
+
+test("stored values only open under their own key", async () => {
+  const raw = memoryStore();
+  const store = createConnectionStore({ seal: testSupport.encryptJson, open: testSupport.decryptJson, isCurrent: testSupport.isCurrentSeal, backend: raw });
+  await store.save("u1", "bing_webmaster", { credentials: { apiKey: "k1" } });
+  // Someone with write access to Redis copies u1's value onto u2's key: it must not open there.
+  await raw.set("conn:u2:bing_webmaster", await raw.get("conn:u1:bing_webmaster"));
+  assert.equal(await store.get("u2", "bing_webmaster"), null);
+  assert.equal((await store.get("u1", "bing_webmaster")).credentials.apiKey, "k1");
+  // A sign-in token (sealed without a storage key) does not open as a stored connection either.
+  await raw.set("conn:u1:google_account:x", testSupport.encryptJson({ credentials: { apiKey: "planted" } }));
+  assert.equal(await store.get("u1", "google_account:x"), null);
+});
+
+// The pre-key-ID format: iv.tag.ciphertext with no context, as stored before this change.
+function legacySeal(payload, key = Buffer.alloc(32, 9)) {
+  const b64 = value => Buffer.from(value).toString("base64url");
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const body = Buffer.concat([cipher.update(JSON.stringify(payload)), cipher.final()]);
+  return [b64(iv), b64(cipher.getAuthTag()), b64(body)].join(".");
+}
+
+test("values sealed before key IDs still open and are rewritten in the new format", async () => {
+  const raw = memoryStore();
+  const store = createConnectionStore({ seal: testSupport.encryptJson, open: testSupport.decryptJson, isCurrent: testSupport.isCurrentSeal, backend: raw });
+  await raw.set("conn:u1:bing_webmaster", legacySeal({ credentials: { apiKey: "old" } }));
+  assert.equal(testSupport.decryptJson(legacySeal({ ok: 1 })).ok, 1, "old sign-in tokens keep working");
+  assert.equal((await store.get("u1", "bing_webmaster")).credentials.apiKey, "old");
+  const rewritten = await raw.get("conn:u1:bing_webmaster");
+  assert.ok(testSupport.isCurrentSeal(rewritten), "rewritten with the current key ID");
+  assert.equal((await store.get("u1", "bing_webmaster")).credentials.apiKey, "old");
+});
+
+test("rotating the encryption key keeps stored connections readable", async () => {
+  const saved = { current: process.env.APP_ENCRYPTION_KEY, previous: process.env.APP_ENCRYPTION_KEY_PREVIOUS };
+  const oldKey = saved.current, newKey = Buffer.alloc(32, 7).toString("base64");
+  const raw = memoryStore();
+  const store = createConnectionStore({ seal: testSupport.encryptJson, open: testSupport.decryptJson, isCurrent: testSupport.isCurrentSeal, backend: raw });
+  try {
+    await store.save("u1", "bing_webmaster", { credentials: { apiKey: "rotated" } });
+    const token = testSupport.encryptJson({ ok: 1 });
+    process.env.APP_ENCRYPTION_KEY = newKey;
+    process.env.APP_ENCRYPTION_KEY_PREVIOUS = oldKey;
+    assert.equal(testSupport.decryptJson(token).ok, 1, "tokens sealed with the previous key still open");
+    assert.ok(!testSupport.isCurrentSeal(await raw.get("conn:u1:bing_webmaster")));
+    assert.equal((await store.get("u1", "bing_webmaster")).credentials.apiKey, "rotated");
+    assert.ok(testSupport.isCurrentSeal(await raw.get("conn:u1:bing_webmaster")), "re-sealed with the new key");
+    delete process.env.APP_ENCRYPTION_KEY_PREVIOUS;
+    assert.throws(() => testSupport.decryptJson(token), /no longer has/, "a removed key no longer opens anything");
+    assert.equal((await store.get("u1", "bing_webmaster")).credentials.apiKey, "rotated", "already moved to the new key");
+  } finally {
+    process.env.APP_ENCRYPTION_KEY = saved.current;
+    if (saved.previous === undefined) delete process.env.APP_ENCRYPTION_KEY_PREVIOUS; else process.env.APP_ENCRYPTION_KEY_PREVIOUS = saved.previous;
+  }
+});
+
+test("a background rewrite never undoes a newer save", async () => {
+  const raw = memoryStore();
+  await raw.set("k", "old");
+  await raw.set("k", "newer");
+  await raw.replaceIf("k", "old", "rewrite");
+  assert.equal(await raw.get("k"), "newer");
 });
 
 test("Bing WCF dates become plain dates", () => {
@@ -266,7 +331,7 @@ test("extra Google accounts: each GA4 property is read with the login that can s
   // A second sign-in with the same Google account replaces it rather than adding a duplicate.
   await signIn(t, "google_account", async url => url.includes("token") ? json({ access_token: "g2-access", refresh_token: "g2-refresh", expires_in: 3600 }) : json({ sub: "222", email: "agency@example.com" }));
   const page = await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
-  assert.equal(page.match(/agency@example\.com/g).length, 1);
+  assert.equal(page.match(/Connected · agency@example\.com/g).length, 1);
 
   const used = [];
   const google = async (url, init) => {

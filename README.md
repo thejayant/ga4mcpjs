@@ -534,6 +534,10 @@ npm start
 
 - This server keeps OAuth state stateless by encrypting authorization codes and Vercel-issued access and refresh tokens instead of storing them in a database.
 - Keep `APP_ENCRYPTION_KEY` or `SESSION_SECRET` stable across deploys so sessions and tokens remain decryptable.
+- To rotate `APP_ENCRYPTION_KEY`: set the new key, and put the old one in `APP_ENCRYPTION_KEY_PREVIOUS` (comma-separated, newest first). Everything sealed with an old key still opens, and stored connections are re-sealed with the new key the next time they are read. Keep the original key in that list (or copy it to `USER_ID_KEY`): connection-store user IDs are derived from the oldest configured key, so removing it disconnects everyone's extra accounts.
+- Each stored connection is sealed with its own Redis key as AES-GCM associated data, so a value copied to another user's key does not open.
+- Profiles (Connections page → Profiles) give each client its own connector URL, `/mcp/p/<slug>`. Add one custom connector per profile in Claude, ChatGPT (developer mode) or any MCP client; every request on that URL uses only the profile's Google, Meta and CallRail accounts, fills its default IDs, and offers only its platforms' tools. Profile URLs also accept tokens issued for `/mcp`; a deleted profile answers 404, never a sign-in prompt.
+- On `/mcp`, any tool's `account` argument also takes `profile:<slug>` or a profile's name, and `run_across_profiles` runs one read-only tool for up to 10 profiles in turn (20 seconds each, 45 seconds in total).
 - `/mcp` validates only Vercel-issued MCP bearer tokens. It does not accept raw Google tokens directly.
 - Those Vercel-issued tokens include issuer, resource, scope, expiry, and the Google credentials needed for downstream Google API calls.
 - The current server-side session store is in-process memory. For stronger persistence across cold starts and regions on Vercel, move session storage to a durable store such as Redis or Vercel KV.

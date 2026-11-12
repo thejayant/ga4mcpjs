@@ -81,13 +81,15 @@ export function createAccountRouter({ store, listers, credentialsFor, labels }) 
   async function choose({ userId, family, args = {}, account, primary }) {
     if (!store || !userId) return null;
     const options = await accounts(userId, family, primary);
-    if (!options.length || (options.length === 1 && options[0].key === MAIN)) return null;
-    if (account) {
+    // A named account must exist, even with only the main sign-in left (a profile pinned to a
+    // removed account must fail rather than quietly use another login).
+    if (account && options.length) {
       const wanted = String(account).toLowerCase();
       const match = options.find(option => option.key.toLowerCase() === wanted || String(option.label).toLowerCase() === wanted);
       if (!match) throw new Error(`No connected ${family} account called "${account}". Connected: ${options.map(o => `${o.label} (${o.key})`).join(", ")}.`);
       return use(match);
     }
+    if (!options.length || (options.length === 1 && options[0].key === MAIN)) return null;
     const wanted = resourceKeys(family, args);
     if (wanted.length) {
       for (const option of options) {

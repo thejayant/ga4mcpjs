@@ -5,6 +5,7 @@ import { z } from "zod";
 import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeAnalytics } from "./providers.js";
 import { connectionsLink } from "./routes.js";
 import { freshAccessToken } from "./oauth.js";
+import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
 
 export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", "clarity_insights",
   "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report"];
@@ -42,13 +43,18 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
 
   server.registerTool("manage_connections", {
     title: "Manage Connections",
-    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too; tools then use whichever account can see the property asked about. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects them. Give the user the link; never ask for keys in chat.`,
+    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too; tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects platforms and builds profiles. Give the user the link; never ask for keys in chat.`,
     inputSchema: {}, annotations: { readOnlyHint: true }
   }, forUser(null, async ({ auth }) => {
     const ids = await store.list(auth.userId);
     const connected = (await Promise.all(ids.map(async id => publicConnection(id, await store.get(auth.userId, id))))).filter(Boolean);
     const link = connectionsLink(baseUrl(req), seal, auth.userId);
-    return result({ connected, available: Object.entries(PROVIDERS).filter(([id, p]) => p.multi || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
+    const profiles = (await store.listProfiles(auth.userId)).map(profile => ({
+      name: profile.name, slug: profile.slug, connectorUrl: profileUrl(baseUrl(req), profile.slug),
+      accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).filter(family => profile.accounts?.[family]).map(family => [family, profile.accountLabels?.[family] || profile.accounts[family]])),
+      platforms: profile.platforms || [], defaults: profile.defaults || {}
+    }));
+    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), connected, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => p.multi || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
   }));
 
   server.registerTool("bing_webmaster_sites", {

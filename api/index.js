@@ -8,7 +8,9 @@ import { GBP_SCOPE } from "../MCP GBP/client.js";
 import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
 import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
 import { registerPublicPages } from "./pages.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createConnectionStore } from "./connections/store.js";
+import { PROFILE_FAMILIES, PROFILE_PREFIX, SLUG_PATTERN, findProfile, profileInstructions, profileShape, profileToolAllowed, registerRunAcrossProfiles } from "./connections/profiles.js";
 import { registerConnectionRoutes } from "./connections/routes.js";
 import { CONNECTION_TOOL_NAMES, registerConnectionTools } from "./connections/tools.js";
 import { PROVIDERS, configureAccountProviders } from "./connections/providers.js";
@@ -917,6 +919,7 @@ function getBaseUrl(req) {
 }
 
 function getResourceUrl(req) {
+  if (req.profileSlug) return `${getBaseUrl(req)}/mcp/p/${req.profileSlug}`;
   return `${getBaseUrl(req)}${req.path === "/cbx" ? "/cbx" : "/mcp"}`;
 }
 
@@ -1330,20 +1333,41 @@ function getGoogleAdsApiVersion() {
   return String(process.env.GOOGLE_ADS_API_VERSION || "v22").trim();
 }
 
+function parseEncryptionKey(encoded, name) {
+  const key = Buffer.from(String(encoded).trim(), "base64");
+  if (key.length !== 32) throw new Error(`${name} must be a base64-encoded 32-byte key.`);
+  return key;
+}
+
+// A short public ID for a key, written in front of every sealed value so rotation knows which key opens it.
+const encryptionKeyId = key => `k${crypto.createHash("sha256").update(key).digest("hex").slice(0, 8)}`;
+
+// APP_ENCRYPTION_KEY seals; APP_ENCRYPTION_KEY_PREVIOUS (comma-separated, newest first) still opens
+// values sealed before a rotation. Parsed once per distinct set of environment values.
+let encryptionKeyCache = { source: null, keys: null };
+function encryptionKeys() {
+  const { APP_ENCRYPTION_KEY: encodedKey, SESSION_SECRET: sessionSecret, APP_ENCRYPTION_KEY_PREVIOUS: previousKeys } = process.env;
+  const source = [encodedKey, sessionSecret, previousKeys].join("\n");
+  if (encryptionKeyCache.source === source) return encryptionKeyCache.keys;
+  let current;
+  if (encodedKey) current = parseEncryptionKey(encodedKey, "APP_ENCRYPTION_KEY");
+  else if (sessionSecret) current = crypto.createHash("sha256").update(sessionSecret).digest();
+  else throw new Error("Missing required environment variable: APP_ENCRYPTION_KEY or SESSION_SECRET");
+  const previous = String(previousKeys || "").split(",").filter(value => value.trim()).map(value => parseEncryptionKey(value, "APP_ENCRYPTION_KEY_PREVIOUS"));
+  const all = [current, ...previous].map(key => ({ id: encryptionKeyId(key), key }));
+  encryptionKeyCache = { source, keys: { current: all[0], all } };
+  return encryptionKeyCache.keys;
+}
+
 function getEncryptionKey() {
-  const encodedKey = process.env.APP_ENCRYPTION_KEY;
-  if (encodedKey) {
-    const key = Buffer.from(encodedKey, "base64");
-    if (key.length !== 32) throw new Error("APP_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
-    return key;
-  }
+  return encryptionKeys().current.key;
+}
 
-  const sessionSecret = process.env.SESSION_SECRET;
-  if (sessionSecret) {
-    return crypto.createHash("sha256").update(sessionSecret).digest();
-  }
-
-  throw new Error("Missing required environment variable: APP_ENCRYPTION_KEY or SESSION_SECRET");
+// Connection-store user IDs must survive a key rotation: USER_ID_KEY when set, otherwise the oldest
+// key still configured (the last of APP_ENCRYPTION_KEY_PREVIOUS), otherwise the current key.
+function userIdKey() {
+  if (process.env.USER_ID_KEY) return parseEncryptionKey(process.env.USER_ID_KEY, "USER_ID_KEY");
+  return encryptionKeys().all.at(-1).key;
 }
 
 function base64UrlEncode(value) {
@@ -1356,21 +1380,45 @@ function base64UrlDecode(value) {
   return Buffer.from(`${normalized}${padding}`, "base64");
 }
 
-function encryptJson(payload) {
+// Sealed values are "<keyId>.<iv>.<tag>.<ciphertext>". `context` (for example the storage key a value
+// lives under) is authenticated but not stored: the value only opens again under that same context.
+function encryptJson(payload, context) {
+  const { id, key } = encryptionKeys().current;
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", getEncryptionKey(), iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  if (context) cipher.setAAD(Buffer.from(String(context), "utf8"));
   const plaintext = Buffer.from(JSON.stringify(payload), "utf8");
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  return [base64UrlEncode(iv), base64UrlEncode(cipher.getAuthTag()), base64UrlEncode(ciphertext)].join(".");
+  return [id, base64UrlEncode(iv), base64UrlEncode(cipher.getAuthTag()), base64UrlEncode(ciphertext)].join(".");
 }
 
-function decryptJson(token) {
-  const [ivPart, tagPart, cipherPart] = String(token || "").split(".");
-  if (!ivPart || !tagPart || !cipherPart) throw new Error("Malformed token.");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", getEncryptionKey(), base64UrlDecode(ivPart));
-  decipher.setAuthTag(base64UrlDecode(tagPart));
-  const plaintext = Buffer.concat([decipher.update(base64UrlDecode(cipherPart)), decipher.final()]);
-  return JSON.parse(plaintext.toString("utf8"));
+// Also opens the older three-part format (no key ID, no context), tried against every configured key,
+// so tokens and stored connections sealed before key IDs existed keep working.
+function decryptJson(token, context) {
+  const parts = String(token || "").split(".");
+  const legacy = parts.length === 3;
+  const [idPart, ivPart, tagPart, cipherPart] = legacy ? [null, ...parts] : parts;
+  if (parts.length < 3 || parts.length > 4 || !ivPart || !tagPart || !cipherPart || (!legacy && !/^k[0-9a-f]{8}$/.test(idPart))) throw new Error("Malformed token.");
+  const keys = encryptionKeys().all.filter(candidate => legacy || candidate.id === idPart);
+  if (!keys.length) throw new Error("Sealed with an encryption key this server no longer has.");
+  let failure;
+  for (const { key } of keys) {
+    try {
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, base64UrlDecode(ivPart));
+      if (!legacy && context) decipher.setAAD(Buffer.from(String(context), "utf8"));
+      decipher.setAuthTag(base64UrlDecode(tagPart));
+      const plaintext = Buffer.concat([decipher.update(base64UrlDecode(cipherPart)), decipher.final()]);
+      return JSON.parse(plaintext.toString("utf8"));
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
+}
+
+// True when a sealed value already uses the current key and format (so it needs no rewrite).
+function isCurrentSeal(token) {
+  return String(token || "").startsWith(`${encryptionKeys().current.id}.`);
 }
 
 function sha256Base64Url(value) {
@@ -1471,7 +1519,7 @@ async function googleUserId(oauthClient, idToken) {
   try {
     const ticket = await oauthClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
     const sub = ticket.getPayload()?.sub;
-    return sub ? crypto.createHmac("sha256", getEncryptionKey()).update(`google:${sub}`).digest("hex").slice(0, 32) : null;
+    return sub ? crypto.createHmac("sha256", userIdKey()).update(`google:${sub}`).digest("hex").slice(0, 32) : null;
   } catch {
     return null;
   }
@@ -1902,7 +1950,9 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
     });
   }
   const tokenAudience = payload.resource || payload.aud;
-  if (!resourcesMatch(tokenAudience, resource)) {
+  // A profile connector (/mcp/p/<slug>) also takes tokens issued for /mcp: the URL picks the profile and
+  // owning it grants access, so clients that only read the root metadata don't loop on sign-in.
+  if (!resourcesMatch(tokenAudience, resource) && !(req.profileSlug && resourcesMatch(tokenAudience, `${issuer}/mcp`))) {
     throw buildAuthError({
       httpStatus: 401,
       error: "invalid_token",
@@ -2104,7 +2154,35 @@ const META_STAND_IN_ERRORS = ["no_meta_credentials", "meta_token_expired", "miss
 // The main sign-in's credentials, or an extra account's (added on the Connections page) when the
 // request names a property, site, ad account or page that only that account can see.
 // `route` is { args, account } and defaults to the current tool call's.
-async function authForTool(req, requiredScopes, route = req.toolCall) {
+// The tool call being served: run_across_profiles runs tools under its own call, so work still
+// finishing for one profile never reads the next profile's account.
+const toolCallContext = new AsyncLocalStorage();
+const currentToolCall = req => toolCallContext.getStore() || req.toolCall;
+
+function profileError(message) {
+  return Object.assign(new Error(message), { code: "profile_account_missing" });
+}
+
+// The account a request names, with profiles resolved. On a profile connector it is always that
+// profile's account for the platform; on /mcp, "profile:<slug>" or a profile's name picks the
+// profile's account; anything else (an account key or label) passes through unchanged.
+async function resolveRequestedAccount(req, userId, family, account) {
+  if (req.profile) {
+    const pinned = req.profile.accounts?.[family];
+    if (!pinned) throw profileError(`The profile "${req.profile.name}" has no ${PROFILE_FAMILIES[family]} account. Add one to it on the Connections page, or use another connector.`);
+    return pinned;
+  }
+  if (!account || !connectionStore || !userId || /^(main|google_account:|meta_account:|callrail_key:)/i.test(String(account))) return account;
+  const profile = findProfile(await connectionStore.listProfiles(userId), account);
+  if (!profile) {
+    if (String(account).toLowerCase().startsWith(PROFILE_PREFIX)) throw profileError(`No profile called "${String(account).slice(PROFILE_PREFIX.length)}".`);
+    return account;
+  }
+  if (!profile.accounts?.[family]) throw profileError(`The profile "${profile.name}" has no ${PROFILE_FAMILIES[family]} account.`);
+  return profile.accounts[family];
+}
+
+async function authForTool(req, requiredScopes, route = currentToolCall(req)) {
   const needsGoogle = scopesInclude(requiredScopes, GOOGLE_SCOPES);
   const needsMeta = scopesInclude(requiredScopes, META_SCOPES);
   let auth, metaError;
@@ -2120,8 +2198,8 @@ async function authForTool(req, requiredScopes, route = req.toolCall) {
     return auth;
   }
   const routed = { ...auth };
-  const pick = (family, primary) => accountRouter.choose({ userId: auth.userId, family, args: route?.args,
-    account: !route?.family || route.family === family ? route?.account : undefined, primary });
+  const pick = async (family, primary) => accountRouter.choose({ userId: auth.userId, family, args: route?.args,
+    account: await resolveRequestedAccount(req, auth.userId, family, !route?.family || route.family === family ? route?.account : undefined), primary });
   if (needsGoogle) {
     const chosen = await pick("google", auth.googleCredentials);
     if (chosen) Object.assign(routed, { googleCredentials: chosen.credentials, account: chosen.label });
@@ -2147,12 +2225,13 @@ async function withVerifiedToolAuth(req, requiredScopes, handler, route) {
   }
 }
 
-async function withCallRailTool(req, handler, route = req.toolCall) {
+async function withCallRailTool(req, handler, route = currentToolCall(req)) {
   try {
     const auth = await verifyMcpAccessToken(req, []);
     let apiToken = req.cbxInternal ? process.env.CALLRAIL_API_TOKEN : auth.callrailToken;
     if (!req.cbxInternal && connectionStore && auth.userId) {
-      const chosen = await accountRouter.choose({ userId: auth.userId, family: "callrail", args: route?.args, account: route?.account, primary: apiToken || null });
+      const account = await resolveRequestedAccount(req, auth.userId, "callrail", route?.account);
+      const chosen = await accountRouter.choose({ userId: auth.userId, family: "callrail", args: route?.args, account, primary: apiToken || null });
       if (chosen) apiToken = chosen.credentials;
     }
     if (!apiToken) return buildToolResult({
@@ -5517,23 +5596,40 @@ const ACCOUNT_INPUT = z.string().trim().min(1).max(200).optional()
 
 function toolFamily(name) {
   if (CALLRAIL_TOOL_NAMES.includes(name)) return "callrail";
-  if (/meta/.test(name)) return "meta";
+  // A whole word: get_ga4_metadata is a Google tool.
+  if (/(^|_)meta(_|$)/.test(name)) return "meta";
   if (/ga4|search_console|google_ads|merchant|^gbp_|tag_manager|gtm|bigquery/.test(name)) return "google";
   return null;
 }
 
 // Records each tool call's platform and arguments on the request so tool auth can pick the account,
 // and gives every Google, Meta and CallRail tool an optional `account` input.
+// On a profile connector (req.profile) tools for platforms outside the profile are not offered, no
+// `account` input is added (the profile decides), and IDs the profile has defaults for are optional.
+// Plain-shape tools are also kept in req.toolRegistry for run_across_profiles.
+const HIDDEN_TOOL = { enabled: false, enable() {}, disable() {}, update() {}, remove() {} };
 function routeToolsByAccount(server, req) {
   const register = server.registerTool.bind(server);
+  const profile = req.profile;
+  req.toolRegistry = new Map();
   server.registerTool = (name, config, handler) => {
     const family = toolFamily(name);
+    if (profile && !profileToolAllowed(profile, name, family)) return HIDDEN_TOOL;
     const shape = config?.inputSchema;
     if (!family || typeof handler !== "function") return register(name, config, handler);
     if (!shape || typeof shape !== "object" || shape instanceof z.ZodType || shape.account) {
       return register(name, config, (...args) => {
         req.toolCall = { name, family, args: shape ? args[0] || {} : {} };
         return handler(...args);
+      });
+    }
+    req.toolRegistry.set(name, { family, schema: z.object(shape), handler, readOnly: config.annotations?.readOnlyHint === true });
+    if (profile) {
+      const { shape: profiled, defaults } = profileShape(shape, profile.defaults?.[family], profile.name);
+      return register(name, { ...config, inputSchema: profiled }, (args = {}, extra) => {
+        const filled = { ...defaults, ...args };
+        req.toolCall = { name, family, args: filled };
+        return handler(filled, extra);
       });
     }
     return register(name, { ...config, inputSchema: { ...shape, account: ACCOUNT_INPUT } }, (args = {}, extra) => {
@@ -5550,11 +5646,13 @@ async function toolAccounts(req, family) {
   const auth = await verifyMcpAccessToken(req, []).catch(() => null);
   if (!auth?.userId) return [];
   const primary = { google: auth.googleCredentials, meta: auth.metaCredentials?.accessToken ? auth.metaCredentials : null, callrail: auth.callrailToken }[family] || null;
-  return (await accountRouter.accounts(auth.userId, family, primary)).map(({ key, label }) => ({ key, label }));
+  const accounts = (await accountRouter.accounts(auth.userId, family, primary)).map(({ key, label }) => ({ key, label }));
+  // A profile connector shows only the profile's own account.
+  return req.profile ? accounts.filter(account => account.key === req.profile.accounts?.[family]) : accounts;
 }
 
 function createServer(req) {
-  const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" });
+  const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
   routeToolsByAccount(server, req);
   if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
     req, withVerifiedToolAuth, buildToolResult,
@@ -5569,6 +5667,16 @@ function createServer(req) {
   });
   if (GBP_ENABLED) registerGbpTools(server, { req, withVerifiedToolAuth, buildToolResult });
   registerConnectionTools(server, { req, store: connectionStore, seal: encryptJson, withAuth: withVerifiedToolAuth, result: buildToolResult, baseUrl: getBaseUrl });
+  if (connectionStore && !req.profile && !req.cbxInternal) registerRunAcrossProfiles(server, {
+    registry: req.toolRegistry,
+    result: buildToolResult,
+    async profilesFor() {
+      const auth = await verifyMcpAccessToken(req, []);
+      if (!auth.userId) throw new Error("Disconnect and reconnect Marketer Companion once to use profiles.");
+      return connectionStore.listProfiles(auth.userId);
+    },
+    run: (entry, name, args, account, extra) => toolCallContext.run({ name, family: entry.family, args, account }, () => entry.handler(args, extra))
+  });
   server.registerTool("list_marketing_presets", {
     title: "List Marketing Presets",
     description: "List expert Google Ads, GA4, and Search Console presets with their intended analyst use cases.",
@@ -8279,7 +8387,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 registerPublicPages(app, { getBaseUrl });
 // Extra platforms connected on the Connections page, stored encrypted per user (null when no store is configured).
-const connectionStore = createConnectionStore({ seal: encryptJson, open: decryptJson });
+const connectionStore = createConnectionStore({ seal: encryptJson, open: decryptJson, isCurrent: isCurrentSeal });
 // Extra Google accounts and Meta logins ask for the same permissions as the main sign-in.
 configureAccountProviders({ googleScopes: GOOGLE_SCOPES, metaScopes: META_SCOPES, metaVersion: getMetaGraphApiVersion(), metaConfigId: getMetaLoginConfigId(), callrailBase: getCallRailBaseUrl() });
 // Which resources each extra account reaches, listed at most once an hour per account (see routing.js).
@@ -9399,6 +9507,13 @@ app.get("/.well-known/oauth-protected-resource/cbx", (req, res) => {
   res.json({ ...buildProtectedResourceMetadata(req), resource: `${getBaseUrl(req)}/cbx` });
 });
 
+// A profile connector is its own protected resource, so each one is signed in separately.
+app.get("/.well-known/oauth-protected-resource/mcp/p/:slug", (req, res) => {
+  const slug = String(req.params.slug).toLowerCase();
+  if (!SLUG_PATTERN.test(slug)) return res.status(404).json({ error: "not_found" });
+  res.json({ ...buildProtectedResourceMetadata(req), resource: `${getBaseUrl(req)}/mcp/p/${slug}` });
+});
+
 function sendUnauthorized(req, res, error) {
   // WWW-Authenticate is the signal that starts an OAuth flow, so it must only go out
   // when re-authorizing is genuinely the fix. A retryable upstream failure carries no
@@ -9408,7 +9523,8 @@ function sendUnauthorized(req, res, error) {
   if (status !== 401 && status !== 403) {
     return res.status(status).json(formatAuthErrorResponse(error || {}));
   }
-  const metadataPath = req.path === "/cbx" ? "/.well-known/oauth-protected-resource/cbx" : "/.well-known/oauth-protected-resource";
+  const metadataPath = req.profileSlug ? `/.well-known/oauth-protected-resource/mcp/p/${req.profileSlug}`
+    : req.path === "/cbx" ? "/.well-known/oauth-protected-resource/cbx" : "/.well-known/oauth-protected-resource";
   const parts = ['Bearer realm="mcp"', `resource_metadata="${getBaseUrl(req)}${metadataPath}"`];
   if (error?.oauthError) parts.push(`error="${error.oauthError}"`);
   if (error?.oauthErrorDescription) {
@@ -9433,11 +9549,16 @@ function internalAccessKeyId() {
     : null;
 }
 
-app.all(["/mcp", "/cbx"], async (req, res) => {
+app.all(["/mcp", "/cbx", "/mcp/p/:slug"], async (req, res) => {
+  if (req.params.slug !== undefined) {
+    req.profileSlug = String(req.params.slug).toLowerCase();
+    if (!SLUG_PATTERN.test(req.profileSlug)) return res.status(404).json({ error: "profile_not_found", error_description: "This connector URL is not a profile." });
+  }
   // The MCP authorization spec expects a real 401 with WWW-Authenticate here so the
   // client can discover the authorization server and start the OAuth flow.
+  let auth;
   try {
-    const auth = await verifyMcpAccessToken(req, []);
+    auth = await verifyMcpAccessToken(req, []);
     if (req.path === "/cbx") {
       if (!auth.googleCredentials?.refreshToken || !internalAccessKeyId() || auth.internalAccessKeyId !== internalAccessKeyId()) {
         throw buildAuthError({ httpStatus: 401, error: "invalid_token", errorDescription: "Internal CBX approval is required. Reconnect to /cbx.", details: { debug: "internal_access_required" } });
@@ -9462,6 +9583,20 @@ app.all(["/mcp", "/cbx"], async (req, res) => {
       host: req.get("host")
     }));
     return sendUnauthorized(req, res, error);
+  }
+
+  // A profile connector serves only its profile. A missing profile is a 404, not a 401: signing in
+  // again can't bring it back, and a 401 would send the client into a sign-in loop.
+  if (req.profileSlug) {
+    if (!connectionStore) return res.status(503).json({ error: "profiles_unavailable", error_description: "Profiles are not set up on this server." });
+    if (!auth.userId) return sendUnauthorized(req, res, buildAuthError({ httpStatus: 401, error: "invalid_token", errorDescription: "Sign in again to use this profile.", details: { debug: "no_user_id" } }));
+    try {
+      req.profile = await connectionStore.getProfile(auth.userId, req.profileSlug);
+    } catch {
+      return res.status(503).json({ error: "profiles_unavailable", error_description: "The profile store could not be reached. Try again in a moment." });
+    }
+    if (!req.profile) return res.status(404).json({ error: "profile_not_found", error_description: "This profile was deleted, or belongs to a different Google sign-in. Remove this connector, or reconnect it with the Google account that created the profile." });
+    req.extraCallRail = Boolean(req.profile.accounts?.callrail && req.profile.accounts.callrail !== "main");
   }
 
   const transport = new StreamableHTTPServerTransport({
@@ -9491,4 +9626,4 @@ app.all(["/mcp", "/cbx"], async (req, res) => {
 
 export default app;
 
-export const testSupport = { encryptJson, decryptJson, buildCallRailStepUrl, internalAccessKeyId, mintAccessToken, saveSession, deleteSession };
+export const testSupport = { connectionStore, encryptJson, decryptJson, isCurrentSeal, buildCallRailStepUrl, internalAccessKeyId, mintAccessToken, saveSession, deleteSession };
