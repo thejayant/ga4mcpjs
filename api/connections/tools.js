@@ -54,7 +54,8 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
       accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).filter(family => profile.accounts?.[family]).map(family => [family, profile.accountLabels?.[family] || profile.accounts[family]])),
       platforms: profile.platforms || [], defaults: profile.defaults || {}
     }));
-    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), connected, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => p.multi || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
+    const mainGoogle = (await store.getAccountInfo(auth.userId))?.googleEmail || null;
+    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => p.multi || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
   }));
 
   server.registerTool("bing_webmaster_sites", {

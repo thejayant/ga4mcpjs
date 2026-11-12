@@ -149,10 +149,11 @@ Generate `APP_ENCRYPTION_KEY` as a base64-encoded 32-byte secret. Example:
    - Merchant API
    - Google Ads API
 3. Create OAuth 2.0 credentials for a Web application.
-4. Add this authorized redirect URI:
+4. Add these authorized redirect URIs (the second is for extra Google accounts and YouTube added on the Connections page):
 
 ```text
 https://YOUR-VERCEL-DOMAIN/auth/google/callback
+https://YOUR-VERCEL-DOMAIN/connections/oauth/callback
 ```
 
 ## Scopes used
@@ -381,7 +382,7 @@ Keyword Planner is part of the Google Ads API and needs nothing extra to enable.
 ### Setup
 
 1. Create a Meta app and add the **Facebook Login for Business** product.
-2. Set the redirect URI to `https://<your-domain>/auth/meta/callback`. Note there is **no** `/api` prefix: `vercel.json` rewrites every path to `api/index.js`, but Express still matches the original path.
+2. Set the redirect URI to `https://<your-domain>/auth/meta/callback`, and also add `https://<your-domain>/connections/oauth/callback` for extra Meta logins added on the Connections page. Note there is **no** `/api` prefix: `vercel.json` rewrites every path to `api/index.js`, but Express still matches the original path.
 3. Paste that URI into **Valid OAuth Redirect URIs**. The *Redirect URI Validator* on the same page is only a checker; pasting it there does not allow-list it.
 4. Set `META_APP_ID` and `META_APP_SECRET`, and set `META_GRAPH_API_VERSION` to a Graph version Meta still supports.
 5. Create a **Business Login Configuration** under Facebook Login for Business, select the permissions below, and copy its **Configuration ID** into `META_LOGIN_CONFIG_ID`.

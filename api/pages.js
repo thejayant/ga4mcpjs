@@ -230,7 +230,8 @@ function privacyPage() {
 <li><strong>CallRail</strong> (optional): call data through an API key you enter.</li>
 <li><strong>Other platforms you connect on the Connections page</strong> (optional), such as YouTube, Bing Webmaster Tools and Microsoft Clarity: the data those platforms' keys or sign-ins allow (for YouTube, read-only channel details and YouTube Analytics reports).</li>
 <li><strong>Extra Google accounts, Meta logins and CallRail keys</strong> (optional), added on the Connections page: the same data as the main connection for that platform, for the accounts each login can access. For each extra Google account or Meta login the service keeps its email address or name so you can tell them apart.</li>
-<li><strong>An anonymous account ID</strong>: Google's sign-in tells the service a fixed ID for your Google account (not your email or profile), which the service scrambles with a secret key so it can keep your connections separate from other users'.</li></ul>
+<li><strong>An anonymous account ID</strong>: Google's sign-in tells the service a fixed ID for your Google account, which the service scrambles with a secret key so it can keep your connections separate from other users'.</li>
+<li><strong>Your main Google account's email address</strong>, shown on your Connections page so you can tell your main sign-in from extra accounts. It is stored encrypted and is not used for anything else.</li></ul>
 
 <h2>How it is used</h2>
 <p>Data is fetched only when you, or ChatGPT on your behalf, run a report or open the dashboard, and is used only to answer that request. The dashboard and reports are read-only. The service changes something only when you explicitly ask ChatGPT to: Google Business Profile actions such as replying to a review or publishing a post, creating a GA4 audience export, or registering the service with your Merchant Center account. ChatGPT asks you to confirm these actions.</p>

@@ -26,8 +26,9 @@ function readLink(open, token) {
 // The accounts a profile can use per platform: the main sign-in's, or one added on this page.
 const MULTI_FAMILY = { google_account: "google", meta_account: "meta", callrail_key: "callrail" };
 const MAIN_LABELS = { google: "Main sign-in (the Google account you sign in with)", meta: "Main sign-in's Meta login", callrail: "Main sign-in's CallRail key" };
-function accountChoices(connections) {
-  const choices = Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, [["main", MAIN_LABELS[family]]]]));
+function accountChoices(connections, mainGoogle) {
+  const labels = { ...MAIN_LABELS, ...(mainGoogle ? { google: `Main sign-in (${mainGoogle})` } : {}) };
+  const choices = Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, [["main", labels[family]]]]));
   for (const connection of Object.values(connections)) {
     const family = MULTI_FAMILY[connection.provider];
     if (family) choices[family].push([connection.id, connection.label || connection.summary || connection.id]);
@@ -52,8 +53,8 @@ function profileForm(q, choices, platforms, profile) {
     </form>`;
 }
 
-function profilesSection(q, base, profiles, connections) {
-  const choices = accountChoices(connections), platforms = platformChoices(connections);
+function profilesSection(q, base, profiles, connections, mainGoogle) {
+  const choices = accountChoices(connections, mainGoogle), platforms = platformChoices(connections);
   const known = new Set(Object.values(choices).flat().map(([value]) => value));
   const cards = profiles.map(profile => {
     const accounts = Object.entries(PROFILE_FAMILIES).filter(([family]) => profile.accounts?.[family]).map(([family, title]) => {
@@ -75,7 +76,11 @@ ${cards.join("\n")}
 ${profiles.length < MAX_PROFILES ? `<div class="card"><span class="tag">New</span><h3>New profile</h3>${profileForm(q, choices, platforms)}</div>` : ""}`;
 }
 
-function page(t, connections, { notice, error, profiles = [], base = "" } = {}) {
+// The main sign-in is managed in the assistant (Claude, ChatGPT…), so it has no Disconnect button here.
+const mainEntry = mainGoogle => `<div class="entry"><p class="status ok">Main sign-in${mainGoogle ? ` · ${escapeHtml(mainGoogle)}` : ""} · Analytics, Search Console, Ads, Merchant Center</p>
+         <p class="muted">${mainGoogle ? "The account you signed in with in your assistant. To change it, reconnect there." : "The Google account you signed in with in your assistant. Reconnect there once to show its email here."}</p></div>`;
+
+function page(t, connections, { notice, error, profiles = [], base = "", mainGoogle = null } = {}) {
   const q = `?t=${encodeURIComponent(t)}`;
   const entry = connected => `<div class="entry"><p class="status ${connected.expired ? "expired" : "ok"}">${connected.expired ? "Expired, connect again" : "Connected"}${connected.label ? ` · ${escapeHtml(connected.label)}` : ""}${connected.summary ? ` · ${escapeHtml(connected.summary)}` : ""}</p>
          <form method="post" action="/connections/${encodeURIComponent(connected.id)}/disconnect${q}"><button type="submit" class="secondary-btn">Disconnect</button></form></div>`;
@@ -86,7 +91,7 @@ function page(t, connections, { notice, error, profiles = [], base = "" } = {}) 
     const action = `/connections/${id}${q}`;
     const body = connected
       ? entry(connected)
-      : mine.map(entry).join("") + (provider.oauth
+      : (id === "google_account" ? mainEntry(mainGoogle) : "") + mine.map(entry).join("") + (provider.oauth
         ? oauthReady(provider)
           ? `<p>${escapeHtml(provider.help)}</p><a class="cta" href="/connections/${id}/start?t=${encodeURIComponent(t)}">${escapeHtml(provider.oauth.buttonLabel || `Connect ${provider.name}`)}</a>`
           : `<p>${escapeHtml(provider.name)} isn’t set up on this server yet.</p>`
@@ -120,12 +125,13 @@ function page(t, connections, { notice, error, profiles = [], base = "" } = {}) 
 .url input{font:13px/1.4 ui-monospace,monospace;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--page);color:var(--ink);width:100%}
 .plain{margin:6px 0;padding-left:18px}
 .warn{color:#d03b3b}
+.muted{color:var(--muted);font-size:13.5px;margin:0;flex-basis:100%}
 </style>
 <h1>Your connections</h1>
 <p class="lead">Connect more platforms to Marketer Companion. Keys are encrypted and only used to answer your requests. This private page link expires 30 minutes after it was created; ask your assistant for a new one any time.</p>
 ${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${error ? `<p class="notice error">${escapeHtml(error)}</p>` : ""}
 ${cards}
-${profilesSection(q, base, profiles, connections)}
+${profilesSection(q, base, profiles, connections, mainGoogle)}
 <p>After connecting, go back to your chat and ask, for example, <em>“Show my Bing search queries”</em> or <em>“What do Clarity rage clicks say about my site?”</em> With extra Google, Meta or CallRail accounts, just name the property, site, ad account or company: your assistant uses whichever account can see it.</p>`);
 }
 
@@ -148,9 +154,12 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     const removed = PROVIDERS[baseProvider(req.query.disconnected)]?.name;
     const saved = req.query.profile_saved ? String(req.query.profile_saved).slice(0, 60) : null;
     const deleted = req.query.profile_deleted ? String(req.query.profile_deleted).slice(0, 60) : null;
+    const info = await store.getAccountInfo(link.userId);
     send(res, 200, page(req.query.t, await current(link.userId), {
-      profiles: await store.listProfiles(link.userId), base: baseUrl(req),
-      notice: done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.`
+      profiles: await store.listProfiles(link.userId), base: baseUrl(req), mainGoogle: info?.googleEmail || null,
+      notice: req.query.refreshed && done ? `This ${done} was already connected, so its sign-in was refreshed instead of adding another. To add a different account, choose “Use another account” in Google’s account picker.`
+        : req.query.main ? "That’s your main sign-in, which is already connected. To add a different account, choose “Use another account” in Google’s account picker."
+        : done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.`
         : saved ? `Profile “${saved}” saved. Copy its connector URL into your assistant.` : deleted ? `Profile “${deleted}” deleted. Remove its connector from your assistant too.` : undefined,
       error: req.query.error ? String(req.query.error).slice(0, 200) : undefined
     }));
@@ -169,7 +178,7 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     if (slug && !existing) return back({ error: "That profile no longer exists." });
     if (!existing && (await store.listProfiles(link.userId)).length >= MAX_PROFILES) return back({ error: `You can have up to ${MAX_PROFILES} profiles.` });
     const connections = await current(link.userId);
-    const choices = accountChoices(connections);
+    const choices = accountChoices(connections, (await store.getAccountInfo(link.userId))?.googleEmail);
     const input = {
       name: body.name, platforms: body.platform,
       accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, body[`account_${family}`]])),
@@ -242,8 +251,12 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
       const described = provider.describe ? await provider.describe(oauth.accessToken) : { ok: true };
       if (!described.ok) return back({ error: described.message });
       const id = provider.multi ? `${providerId}:${described.instance}` : providerId;
+      // The main sign-in is already connected; adding it again would only duplicate it.
+      const mainGoogle = providerId === "google_account" ? (await store.getAccountInfo(link.userId))?.googleEmail : null;
+      if (mainGoogle && described.label && mainGoogle.toLowerCase() === String(described.label).toLowerCase()) return back({ main: "1" });
+      const existed = provider.multi && Boolean(await store.get(link.userId, id));
       await store.save(link.userId, id, { oauth, label: described.label, summary: described.summary, meta: described.meta, connectedAt: Date.now() });
-      back({ connected: providerId });
+      back({ connected: providerId, ...(existed ? { refreshed: "1" } : {}) });
     } catch (error) {
       back({ error: `${provider.name} couldn’t be connected: ${String(error.message).slice(0, 160)}` });
     }

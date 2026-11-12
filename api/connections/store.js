@@ -105,6 +105,12 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
       await kv.removeFromSet(`conns:${userId}`, provider);
     },
     list: userId => kv.members(`conns:${userId}`),
+    // About the user's main sign-in (its Google email), shown on the Connections page.
+    getAccountInfo: userId => read(`account:${userId}`),
+    async saveAccountInfo(userId, info) {
+      const storageKey = `account:${userId}`;
+      await kv.set(storageKey, seal({ ...info, updatedAt: Date.now() }, storageKey));
+    },
     // Profiles: a named set of one account per platform plus default IDs, served at /mcp/p/<slug>.
     getProfile: (userId, slug) => cachedProfile(`${userId}:${slug}`, () => read(profileKey(userId, slug))),
     async listProfiles(userId) {

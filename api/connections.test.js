@@ -288,6 +288,32 @@ async function signIn(t, provider, upstream) {
   } finally { globalThis.fetch = realFetch; }
 }
 
+test("the Connections page shows the main sign-in and says when a Google account was only refreshed", async () => {
+  const token = tokenFor("user-main-label");
+  const t = await linkFor(token);
+  const pageText = async () => (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
+  assert.match(await pageText(), /Main sign-in · Analytics[\s\S]*Reconnect there once to show its email/, "before the email is known");
+
+  await testSupport.connectionStore.saveAccountInfo("user-main-label", { googleEmail: "owner@example.com" });
+  const labelled = await pageText();
+  assert.match(labelled, /Main sign-in · owner@example\.com/);
+  assert.match(labelled, /<option value="main">Main sign-in \(owner@example\.com\)<\/option>/, "profiles name it too");
+  assert.equal((await callTool(token, "manage_connections")).structuredContent.mainSignIn.google, "owner@example.com");
+
+  const googleSays = (sub, email) => async url => url.includes("token") ? json({ access_token: `${sub}-access`, refresh_token: `${sub}-refresh`, expires_in: 3600 }) : json({ sub, email });
+  const first = await signIn(t, "google_account", googleSays("333", "second@example.com"));
+  assert.doesNotMatch(first.location, /refreshed/);
+  const again = await signIn(t, "google_account", googleSays("333", "second@example.com"));
+  assert.match(again.location, /refreshed=1/);
+  assert.match(await (await realFetch(new URL(again.location, baseUrl))).text(), /already connected, so its sign-in was refreshed/);
+
+  const main = await signIn(t, "google_account", googleSays("111", "Owner@example.com"));
+  assert.match(main.location, /main=1/, "the main sign-in isn't added as an extra account");
+  assert.match(await (await realFetch(new URL(main.location, baseUrl))).text(), /That’s your main sign-in/);
+  const ids = await testSupport.connectionStore.list("user-main-label");
+  assert.equal(ids.filter(id => id.startsWith("google_account:")).length, 1);
+});
+
 test("the router keys requests by the IDs they name and keeps the main sign-in when nothing else matches", async () => {
   assert.deepEqual(resourceKeys("google", { propertyId: "properties/123", siteUrl: "https://www.Example.com/" }), ["ga4:123", "gsc:example.com"]);
   assert.deepEqual(resourceKeys("google", { gbpLocation: "accounts/55/locations/9" }), ["gbp:55"]);

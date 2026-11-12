@@ -1514,14 +1514,17 @@ function createOauthClient(req) {
 
 // Anonymous user ID: an HMAC of Google's account ID ("sub") with the server key. Stable across
 // reconnects and apps, reveals nothing about the account, and is null if Google sent no ID token.
-async function googleUserId(oauthClient, idToken) {
-  if (!idToken) return null;
+// The signed-in Google account: an anonymous user ID (HMAC of Google's fixed ID) and, when Google
+// shares it, the email, kept only to label the main sign-in on the Connections page.
+async function googleIdentity(oauthClient, idToken) {
+  if (!idToken) return { userId: null, email: null };
   try {
     const ticket = await oauthClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
-    const sub = ticket.getPayload()?.sub;
-    return sub ? crypto.createHmac("sha256", userIdKey()).update(`google:${sub}`).digest("hex").slice(0, 32) : null;
+    const payload = ticket.getPayload() || {};
+    const userId = payload.sub ? crypto.createHmac("sha256", userIdKey()).update(`google:${payload.sub}`).digest("hex").slice(0, 32) : null;
+    return { userId, email: payload.email_verified !== false && payload.email ? String(payload.email) : null };
   } catch {
-    return null;
+    return { userId: null, email: null };
   }
 }
 
@@ -8619,9 +8622,9 @@ app.get("/auth/google/start", (req, res) => {
     });
 
     const oauthClient = createOauthClient(req);
-    // openid only identifies the Google account (no email or profile); it gives each user a
-    // stable anonymous ID for the Connections store.
-    const requestedScopes = [...normalizeGoogleAuthScopes(req.query.scope), "openid"];
+    // openid gives each user a stable anonymous ID for the Connections store; email labels the
+    // main sign-in there (stored encrypted, never in the MCP token).
+    const requestedScopes = [...normalizeGoogleAuthScopes(req.query.scope), "openid", "email"];
     const resource = getRequestedResource(req, getResourceUrl(req));
     const clientRedirectUri = resolveClientRedirectUri(req);
     const appState = {
@@ -8688,7 +8691,8 @@ app.get("/auth/google/callback", async (req, res) => {
     }
 
     const grantedScopes = normalizeGoogleAuthScopes(tokens.scope || appState.scope);
-    const userId = await googleUserId(oauthClient, tokens.id_token);
+    const { userId, email: googleEmail } = await googleIdentity(oauthClient, tokens.id_token);
+    if (connectionStore && userId && googleEmail) await connectionStore.saveAccountInfo(userId, { googleEmail }).catch(() => {});
     const sessionId = crypto.randomUUID();
     saveSession(sessionId, {
       sessionId,
