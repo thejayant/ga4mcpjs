@@ -482,7 +482,7 @@ The resulting token carries both credential sets, so Google and Meta tools work 
 
 ## YouTube notes
 
-YouTube is connected on the Connections page (Google sign-in with `youtube.force-ssl`, `youtube.readonly` and `yt-analytics.readonly`; add `youtube.force-ssl` to the OAuth consent screen). No tool uploads or deletes videos.
+YouTube is connected on the Connections page (Google sign-in with `youtube.force-ssl`, `youtube.readonly` and `yt-analytics.readonly`; add `youtube.force-ssl` to the OAuth consent screen).
 
 | Area | Tools |
 |---|---|
@@ -493,6 +493,10 @@ YouTube is connected on the Connections page (Google sign-in with `youtube.force
 | Comments | `youtube_list_comments` (one video or the whole channel, incl. review queue), `youtube_reply_comment`, `youtube_moderate_comments` |
 | Livestreams | `youtube_list_broadcasts` (upcoming, live with concurrent viewers, completed) |
 | Research | `youtube_search` (100 quota units per call), `youtube_public_videos`, `youtube_public_channel` |
+| Upload & delete | `youtube_upload_video`, `youtube_continue_upload`, `youtube_delete_video` (needs the exact current title as confirmation) |
+| Captions | `youtube_list_captions`, `youtube_download_caption`, `youtube_upload_caption` (add or replace), `youtube_delete_caption` |
+
+**Uploads** use YouTube's resumable protocol. With `videoUrl` (public https, must report its size) the server streams the file for up to `YOUTUBE_UPLOAD_BUDGET_MS` (default 50 s, safe on every Vercel plan) and returns a `sessionUrl`; `youtube_continue_upload` resumes from the byte YouTube has (the source must support Range requests). Raise the budget to about 240000 if the project uses Fluid compute (300 s functions). Without `videoUrl` the tool returns a `curl` command that uploads straight from your computer, best for large recordings. Projects that haven't passed YouTube's API audit have uploads locked to private; the tool says so when it happens.
 
 Every edit reads the current resource first and sends untouched fields back, because YouTube replaces whole parts (`snippet`, `status`, `brandingSettings`) on update. Busy responses (409 ABORTED, 5xx) are retried twice; comment replies are not retried so they can't post twice. Daily Data API quota is 10,000 units: reads 1, writes ~50, thumbnails 50, search 100.
 

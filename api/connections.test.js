@@ -330,6 +330,68 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
   assert.equal(search.results[0].views, 5000);
   assert.deepEqual(search.results[0].tags, ["gta 6"]);
 
+  // Upload from a URL: opens a resumable session, streams, pauses at the time budget, resumes from YouTube's offset.
+  const file = Buffer.alloc(1000, 7);
+  let putCount = 0, sessionHas = 0, metadataSent = null;
+  const SESSION = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&upload_id=abc123";
+  const media = async (url, init = {}) => {
+    const method = init.method || "GET";
+    if (url.startsWith("https://cdn.example.com/")) {
+      const range = init.headers?.Range;
+      if (range) { const from = Number(range.match(/bytes=(\d+)-/)[1]); return new Response(file.subarray(from), { status: 206, headers: { "content-type": "video/mp4", "content-range": `bytes ${from}-999/1000`, "content-length": String(1000 - from) } }); }
+      return new Response(file, { status: 200, headers: { "content-type": "video/mp4", "content-length": "1000" } });
+    }
+    if (url.startsWith("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part")) { metadataSent = JSON.parse(init.body); return new Response(null, { status: 200, headers: { location: SESSION } }); }
+    if (url === SESSION && init.headers["Content-Range"]?.startsWith("bytes */")) return sessionHas >= 1000 ? new Response(JSON.stringify({ id: "newvideo123", status: { privacyStatus: "private", uploadStatus: "uploaded" } }), { status: 200 }) : new Response(null, { status: 308, headers: { range: `bytes=0-${sessionHas - 1}` } });
+    if (url === SESSION && method === "PUT") {
+      putCount += 1;
+      if (putCount === 1) { sessionHas = 500; return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason))); }
+      assert.equal(init.headers["Content-Range"], "bytes 500-999/1000");
+      sessionHas = 1000;
+      return new Response(JSON.stringify({ id: "newvideo123", snippet: { title: "Test" }, status: { privacyStatus: "private", uploadStatus: "uploaded" } }), { status: 201 });
+    }
+    return yt(url, init);
+  };
+  process.env.YOUTUBE_UPLOAD_BUDGET_MS = "200";
+  const started = (await callTool(token, "youtube_upload_video", { title: "GTA 6 Commentary Part 1", privacyStatus: "public", videoUrl: "https://cdn.example.com/v.mp4" }, media)).structuredContent;
+  delete process.env.YOUTUBE_UPLOAD_BUDGET_MS;
+  assert.equal(started.status, "in_progress");
+  assert.equal(started.uploadedBytes, 500);
+  assert.equal(started.percent, 50);
+  assert.equal(metadataSent.snippet.categoryId, "20");
+  const resumed = (await callTool(token, "youtube_continue_upload", { sessionUrl: started.sessionUrl, videoUrl: "https://cdn.example.com/v.mp4" }, media)).structuredContent;
+  assert.equal(resumed.status, "complete");
+  assert.equal(resumed.videoId, "newvideo123");
+  assert.equal((await callTool(token, "youtube_continue_upload", { sessionUrl: "https://evil.example.com/videos?upload_id=x" }, media)).isError, true);
+  // Without a URL it only opens the session and returns a curl command.
+  const fromPc = (await callTool(token, "youtube_upload_video", { title: "Big PS5 recording" }, media)).structuredContent;
+  assert.equal(fromPc.status, "awaiting_file");
+  assert.match(fromPc.uploadCommand, /curl -X PUT/);
+  assert.equal((await callTool(token, "youtube_upload_video", { title: "x", videoUrl: "https://192.168.1.5/v.mp4" }, media)).structuredContent.error, "bad_source");
+
+  // Delete needs the exact current title.
+  const delVideo = async (url, init = {}) => {
+    if (url.includes("/youtube/v3/videos") && init.method === "DELETE") return new Response(null, { status: 204 });
+    if (url.includes("/youtube/v3/videos")) return new Response(JSON.stringify({ items: [{ id: "abcdefghijk", snippet: { title: "Old clip" }, statistics: { viewCount: "3" } }] }), { status: 200 });
+    return yt(url, init);
+  };
+  assert.equal((await callTool(token, "youtube_delete_video", { videoId: "abcdefghijk", confirmTitle: "Wrong" }, delVideo)).structuredContent.error, "title_mismatch");
+  assert.equal((await callTool(token, "youtube_delete_video", { videoId: "abcdefghijk", confirmTitle: "Old clip" }, delVideo)).structuredContent.deleted, true);
+
+  // Captions: upload sends multipart metadata + file; download returns the text.
+  let captionBody = "";
+  const caps = async (url, init = {}) => {
+    if (url.startsWith("https://www.googleapis.com/upload/youtube/v3/captions")) { captionBody = init.body.toString(); return new Response(JSON.stringify({ id: "capTrack1", snippet: { language: "hi", name: "Hindi", isDraft: false } }), { status: 200 }); }
+    if (url.startsWith("https://www.googleapis.com/youtube/v3/captions/capTrack1")) return new Response("1\n00:00:00,000 --> 00:00:02,000\nNamaste\n", { status: 200 });
+    return yt(url, init);
+  };
+  const cap = (await callTool(token, "youtube_upload_caption", { videoId: "abcdefghijk", language: "hi", name: "Hindi", captionText: "1\n00:00:00,000 --> 00:00:02,000\nNamaste\n" }, caps)).structuredContent;
+  assert.equal(cap.captionId, "capTrack1");
+  assert.match(captionBody, /"videoId":"abcdefghijk"/);
+  assert.match(captionBody, /Namaste/);
+  const dl = await callTool(token, "youtube_download_caption", { captionId: "capTrack1" }, caps);
+  assert.match(dl.structuredContent.text, /Namaste/);
+
   const channel = await run("youtube_update_channel", { keywords: ["GTA 6", "PS5 gameplay", "no commentary"] });
   assert.deepEqual(channel.after.keywords, ["GTA 6", "PS5 gameplay", "no commentary"]);
   assert.equal(JSON.parse(calls.findLast(c => c.method === "PUT" && c.url.includes("/channels")).init.body).brandingSettings.channel.description, "Old");
