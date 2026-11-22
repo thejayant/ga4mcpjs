@@ -3,8 +3,8 @@
 // Connections made before user IDs existed get a clear "reconnect once" message.
 import { z } from "zod";
 import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeDataWrite, youtubeAnalytics, youtubeRetry } from "./providers.js";
-import { YOUTUBE_EXTRA_TOOL_NAMES, registerYouTubeExtraTools } from "./youtube-tools.js";
-import { YOUTUBE_MEDIA_TOOL_NAMES, registerYouTubeMediaTools } from "./youtube-media-tools.js";
+import { YOUTUBE_EXTRA_TOOL_NAMES, registerYouTubeExtraTools } from "./_youtube-tools.js";
+import { YOUTUBE_MEDIA_TOOL_NAMES, registerYouTubeMediaTools } from "./_youtube-media-tools.js";
 import { connectionsLink } from "./routes.js";
 import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
