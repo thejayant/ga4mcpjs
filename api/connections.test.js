@@ -270,6 +270,38 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
   assert.equal((await callTool(token, "youtube_update_video", { videoId: "abcdefghijk", title: "New" }, readOnly)).structuredContent.error, "reconnect_platform");
   assert.equal((await callTool(token, "youtube_update_video", { videoId: "abcdefghijk" }, editable)).structuredContent.error, "nothing_to_change");
 
+  // Creating a playlist adds the videos in order and skips ones already in it.
+  const inserted = [];
+  let playlistBody = null;
+  const playlists = async (url, init = {}) => {
+    if (url.includes("/youtube/v3/playlists") && init.method === "POST") {
+      playlistBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ id: "PLgta6abcdef", snippet: playlistBody.snippet, status: playlistBody.status }), { status: 200 });
+    }
+    if (url.includes("/youtube/v3/playlists")) return new Response(JSON.stringify({ items: [{ id: "PLold1234567", snippet: { title: "Wolverine" }, status: { privacyStatus: "public" }, contentDetails: { itemCount: 3 } }] }), { status: 200 });
+    if (url.includes("/youtube/v3/playlistItems") && init.method === "POST") {
+      inserted.push(JSON.parse(init.body).snippet);
+      return new Response(JSON.stringify({ id: `item${inserted.length}` }), { status: 200 });
+    }
+    if (url.includes("/youtube/v3/playlistItems")) return new Response(JSON.stringify({ items: url.includes("PLgta6abcdef") && inserted.length ? inserted.map(s => ({ contentDetails: { videoId: s.resourceId.videoId } })) : [] }), { status: 200 });
+    return google(url, init);
+  };
+  const listed = (await callTool(token, "youtube_list_playlists", {}, playlists)).structuredContent;
+  assert.equal(listed.playlists[0].videoCount, 3);
+  const made = (await callTool(token, "youtube_create_playlist", { title: "GTA 6 Hindi Playthrough – PS5", description: "GTA 6 ki poori journey", videoIds: ["HkWzyLGHHSg", "xnnb5k0ojhE", "ulKPUQXLyi0"] }, playlists)).structuredContent;
+  assert.equal(made.playlistId, "PLgta6abcdef");
+  assert.equal(playlistBody.status.privacyStatus, "public");
+  assert.deepEqual(made.added, ["HkWzyLGHHSg", "xnnb5k0ojhE", "ulKPUQXLyi0"]);
+  assert.deepEqual(inserted.map(s => s.resourceId.videoId), ["HkWzyLGHHSg", "xnnb5k0ojhE", "ulKPUQXLyi0"]);
+  const more = (await callTool(token, "youtube_add_to_playlist", { playlistId: "PLgta6abcdef", videoIds: ["xnnb5k0ojhE", "hZOGHGlsxbA"], position: 0 }, playlists)).structuredContent;
+  assert.deepEqual(more.skipped, ["xnnb5k0ojhE"]);
+  assert.deepEqual(more.added, ["hZOGHGlsxbA"]);
+  assert.equal(inserted.at(-1).position, 0);
+  const readOnlyPlaylists = async (url, init = {}) => init.method === "POST"
+    ? new Response(JSON.stringify({ error: { code: 403, message: "Request had insufficient authentication scopes." } }), { status: 403 })
+    : playlists(url, init);
+  assert.equal((await callTool(token, "youtube_create_playlist", { title: "X" }, readOnlyPlaylists)).structuredContent.error, "reconnect_platform");
+
   // An expired access token is refreshed with the stored refresh token.
   let refreshed = false;
   const expiring = async (url, init) => {
