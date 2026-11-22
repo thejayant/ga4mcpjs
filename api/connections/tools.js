@@ -8,7 +8,8 @@ import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
 
 export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", "clarity_insights",
-  "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video"];
+  "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video",
+  "youtube_list_playlists", "youtube_create_playlist", "youtube_add_to_playlist"];
 
 const videoId = z.string().regex(/^[A-Za-z0-9_-]{11}$/).describe("11-character YouTube video ID");
 // YouTube rejects < and > in titles and descriptions.
@@ -205,6 +206,79 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     if (!updated.ok) return reply(updated);
     const pick = s => ({ title: s.title, description: s.description, tags: s.tags || [], categoryId: s.categoryId, defaultLanguage: s.defaultLanguage });
     return result({ videoId: args.videoId, changed: changes, before: pick(old), after: pick(updated.body?.snippet || snippet), url: `https://www.youtube.com/watch?v=${args.videoId}` });
+  }));
+
+  const writeScopeError = auth => result({ error: "reconnect_platform", error_description: "YouTube was connected with read-only access. Reconnect YouTube once on the Connections page to allow managing playlists, then ask again.", connectUrl: connectionsLink(baseUrl(req), seal, auth.userId).url }, true);
+  const playlistId = z.string().regex(/^[A-Za-z0-9_-]{10,64}$/).describe("Playlist ID from youtube_list_playlists or youtube_create_playlist");
+  const videoIds = z.array(videoId).min(1).max(50).describe("Video IDs, added in this order");
+
+  // Adds videos one by one (the API takes one per call) so the order is kept. Videos already in the
+  // playlist are skipped; one failure does not stop the rest.
+  const addVideos = async (accessToken, id, ids, position) => {
+    const existing = new Set();
+    let pageToken;
+    do {
+      const page = await youtubeData(accessToken, "playlistItems", { part: "contentDetails", playlistId: id, maxResults: 50, pageToken });
+      if (!page.ok) break;
+      (page.body.items || []).forEach(item => existing.add(item.contentDetails?.videoId));
+      pageToken = page.body.nextPageToken;
+    } while (pageToken);
+    const added = [], skipped = [], failed = [];
+    let at = position;
+    for (const vid of [...new Set(ids)]) {
+      if (existing.has(vid)) { skipped.push(vid); continue; }
+      const snippet = { playlistId: id, resourceId: { kind: "youtube#video", videoId: vid }, ...(at !== undefined ? { position: at } : {}) };
+      const response = await youtubeDataWrite(accessToken, "playlistItems", { part: "snippet" }, { snippet }, "POST");
+      if (missingWriteScope(response)) return { scopeError: true };
+      if (response.ok) { added.push(vid); if (at !== undefined) at += 1; }
+      else failed.push({ videoId: vid, status: response.status, error: response.body?.error?.message || `YouTube returned ${response.status}.` });
+    }
+    return { added, skipped, failed };
+  };
+
+  server.registerTool("youtube_list_playlists", {
+    title: "YouTube List Playlists",
+    description: "The channel's playlists, including private and unlisted ones: playlist ID, title, description, privacy, video count and link.",
+    inputSchema: { maxResults: z.number().int().min(1).max(50).optional().describe("Default 25") },
+    annotations: { readOnlyHint: true }
+  }, forUser("youtube", async ({ accessToken, args }) => reply(
+    await youtubeData(accessToken, "playlists", { part: "snippet,status,contentDetails", mine: "true", maxResults: args.maxResults || 25 }),
+    body => ({ playlists: (body.items || []).map(item => ({ playlistId: item.id, title: item.snippet?.title, description: item.snippet?.description, privacyStatus: item.status?.privacyStatus, videoCount: item.contentDetails?.itemCount, url: `https://www.youtube.com/playlist?list=${item.id}` })) })
+  )));
+
+  server.registerTool("youtube_create_playlist", {
+    title: "YouTube Create Playlist",
+    description: "Create a playlist on the connected channel and optionally add videos to it in the given order. Check youtube_list_playlists first so you don't create a duplicate, and confirm the title, description, privacy and videos with the user before calling.",
+    inputSchema: {
+      title: z.string().min(1).max(150).refine(noAngles, "Titles cannot contain < or >").describe("Max 150 characters"),
+      description: z.string().max(5000).refine(noAngles, "Descriptions cannot contain < or >").optional(),
+      privacyStatus: z.enum(["public", "unlisted", "private"]).optional().describe("Default public"),
+      defaultLanguage: z.string().max(10).optional().describe("e.g. hi, en"),
+      videoIds: videoIds.optional()
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
+  }, forUser("youtube", async ({ auth, accessToken, args }) => {
+    const created = await youtubeDataWrite(accessToken, "playlists", { part: "snippet,status" }, {
+      snippet: { title: args.title, description: args.description || "", ...(args.defaultLanguage ? { defaultLanguage: args.defaultLanguage } : {}) },
+      status: { privacyStatus: args.privacyStatus || "public" }
+    }, "POST");
+    if (missingWriteScope(created)) return writeScopeError(auth);
+    if (!created.ok) return reply(created);
+    const id = created.body?.id;
+    const videos = args.videoIds?.length ? await addVideos(accessToken, id, args.videoIds) : { added: [], skipped: [], failed: [] };
+    if (videos.scopeError) return writeScopeError(auth);
+    return result({ playlistId: id, title: created.body?.snippet?.title, privacyStatus: created.body?.status?.privacyStatus, url: `https://www.youtube.com/playlist?list=${id}`, ...videos });
+  }));
+
+  server.registerTool("youtube_add_to_playlist", {
+    title: "YouTube Add To Playlist",
+    description: "Add videos to one of the channel's playlists in the given order. Videos already in the playlist are skipped. position (0 = first) inserts them there; otherwise they go at the end.",
+    inputSchema: { playlistId, videoIds, position: z.number().int().min(0).optional().describe("0-based; default end of playlist") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+  }, forUser("youtube", async ({ auth, accessToken, args }) => {
+    const videos = await addVideos(accessToken, args.playlistId, args.videoIds, args.position);
+    if (videos.scopeError) return writeScopeError(auth);
+    return result({ playlistId: args.playlistId, url: `https://www.youtube.com/playlist?list=${args.playlistId}`, ...videos }, videos.added.length === 0 && videos.failed.length > 0);
   }));
 
   server.registerTool("clarity_insights", {
