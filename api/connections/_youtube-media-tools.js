@@ -10,7 +10,7 @@
 // Note: projects Google hasn't audited get uploads locked to private (YouTube policy).
 import { z } from "zod";
 import { youtubeData, youtubeDataWrite, youtubeRetry } from "./providers.js";
-import { isPublicHttpsUrl } from "./youtube-tools.js";
+import { isPublicHttpsUrl } from "./_youtube-tools.js";
 
 export const YOUTUBE_MEDIA_TOOL_NAMES = [
   "youtube_upload_video", "youtube_continue_upload", "youtube_delete_video",

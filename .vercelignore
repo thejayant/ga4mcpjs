@@ -1,0 +1,2 @@
+# Tests are not deployed (each .js in /api counts toward the Hobby plan's 12-function limit)
+api/**/*.test.js
