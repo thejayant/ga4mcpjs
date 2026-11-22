@@ -100,7 +100,7 @@ export const PROVIDERS = {
   youtube: {
     name: "YouTube",
     category: "Video",
-    help: "Sign in with the Google account that owns or manages the channel. If it manages several channels or Brand Accounts, Google asks which one to share. Access covers reports, editing video titles, descriptions and tags, and creating playlists and adding videos to them. No tool uploads or deletes videos or playlists.",
+    help: "Sign in with the Google account that owns or manages the channel. If it manages several channels or Brand Accounts, Google asks which one to share. Access covers reports and analytics, editing video details and settings, thumbnails, captions, playlists, comment replies and moderation, uploading videos, and deleting a video after you confirm its title. Every change needs your confirmation in chat. Uses YouTube API Services: you agree to the YouTube Terms of Service (youtube.com/t/terms); see the Google Privacy Policy (policies.google.com/privacy).",
     helpUrl: "https://studio.youtube.com/",
     oauth: {
       authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",

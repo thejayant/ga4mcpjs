@@ -6,7 +6,10 @@ import { buildPluginZip } from "../plugin/zip.js";
 
 const OWNER = "Jayant Solanki";
 const OWNER_SITE = "https://thejayant.in";
-const UPDATED = "30 October 2026";
+const UPDATED = "22 November 2026";
+const YT_TERMS = "https://www.youtube.com/t/terms";
+const GOOGLE_PRIVACY = "https://policies.google.com/privacy";
+const GOOGLE_PERMISSIONS = "https://security.google.com/settings/security/permissions";
 
 export const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
@@ -76,7 +79,7 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--border);font-
 <a href="/install">Marketer Companion</a>
 <nav class="links"><a href="/install">Install</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></nav></header>
 ${body}
-<footer>Marketer Companion is built by <a href="${OWNER_SITE}">${OWNER}</a>. It is not affiliated with or endorsed by OpenAI, Google, Meta or CallRail.</footer>
+<footer>Marketer Companion is built by <a href="${OWNER_SITE}">${OWNER}</a>. It uses YouTube API Services. It is not affiliated with or endorsed by OpenAI, Anthropic, Google, YouTube, Meta or CallRail.</footer>
 </main></body></html>`;
 }
 
@@ -129,7 +132,11 @@ function installPage(baseUrl) {
 
   return layout("Install", `
 <h1>Add Marketer Companion to your AI assistant</h1>
-<p class="lead">See your GA4, Search Console, Google Ads, Merchant Center, Business Profile and CallRail numbers by asking in chat. Setup takes about two minutes and needs no technical knowledge.</p>
+<p class="lead">See your GA4, Search Console, Google Ads, Merchant Center, Business Profile, YouTube and CallRail numbers by asking in chat. Setup takes about two minutes and needs no technical knowledge.</p>
+<div class="card" id="youtube"><span class="tag" style="color:#ff0033">YouTube</span><h3>Manage your YouTube channel from chat</h3>
+<p>Connect the YouTube channel you own to see its YouTube Analytics, edit video titles, descriptions, tags and settings, organise playlists, reply to and moderate comments, set thumbnails and captions, and upload videos. Your assistant shows every change and asks you to confirm before anything is saved to YouTube.</p>
+<p>After installing, ask your assistant to <em>“connect YouTube”</em>. It gives you a link to the Connections page, where you sign in with Google and pick your channel. You can disconnect there at any time.</p>
+<p class="hint">These features use YouTube API Services. By using them you agree to the <a href="${YT_TERMS}">YouTube Terms of Service</a>. See our <a href="/privacy#youtube">privacy policy</a> and the <a href="${GOOGLE_PRIVACY}">Google Privacy Policy</a> for how your data is handled.</p></div>
 <p class="needs">You need: the Google account that can see your marketing data.</p>
 
 <h2 class="pick-title">Which app do you use?</h2>
@@ -221,38 +228,49 @@ ${button(zipUrl, "Download plugin file", { primary: false, download: true })}
 function privacyPage() {
   return layout("Privacy policy", `
 <h1>Privacy policy</h1>
-<p>Last updated ${UPDATED}. This policy covers the Marketer Companion ChatGPT plugin and its server (“the service”), operated by ${OWNER}.</p>
+<p>Last updated ${UPDATED}. This policy covers the Marketer Companion plugin and connector for ChatGPT and Claude, and its server (“the service”), operated by ${OWNER}.</p>
 
 <h2>What the service accesses</h2>
 <p>Only what you authorise when you connect:</p>
 <ul><li><strong>Google</strong> (through Google sign-in): Google Analytics, Search Console, Google Ads, Merchant Center and Business Profile data for the accounts your Google user can access, and Tag Manager or BigQuery data where those features are enabled. Google shows the exact list before you approve.</li>
 <li><strong>Meta</strong> (optional): ad account and page data, if you connect Meta.</li>
 <li><strong>CallRail</strong> (optional): call data through an API key you enter.</li>
-<li><strong>Other platforms you connect on the Connections page</strong> (optional), such as YouTube, Bing Webmaster Tools and Microsoft Clarity: the data those platforms' keys or sign-ins allow (for YouTube, read-only channel details and YouTube Analytics reports).</li>
+<li><strong>YouTube</strong> (optional, through Google sign-in on the Connections page): your channel's details, videos, playlists, comments, captions, live broadcasts and YouTube Analytics reports, for the channel you choose. See <a href="#youtube">YouTube API Services</a> below.</li>
+<li><strong>Other platforms you connect on the Connections page</strong> (optional), such as Bing Webmaster Tools and Microsoft Clarity: the data those platforms' keys or sign-ins allow.</li>
 <li><strong>Extra Google accounts, Meta logins and CallRail keys</strong> (optional), added on the Connections page: the same data as the main connection for that platform, for the accounts each login can access. For each extra Google account or Meta login the service keeps its email address or name so you can tell them apart.</li>
 <li><strong>An anonymous account ID</strong>: Google's sign-in tells the service a fixed ID for your Google account, which the service scrambles with a secret key so it can keep your connections separate from other users'.</li>
 <li><strong>Your main Google account's email address</strong>, shown on your Connections page so you can tell your main sign-in from extra accounts. It is stored encrypted and is not used for anything else.</li></ul>
 
 <h2>How it is used</h2>
-<p>Data is fetched only when you, or ChatGPT on your behalf, run a report or open the dashboard, and is used only to answer that request. The dashboard and reports are read-only. The service changes something only when you explicitly ask ChatGPT to: Google Business Profile actions such as replying to a review or publishing a post, creating a GA4 audience export, or registering the service with your Merchant Center account. ChatGPT asks you to confirm these actions.</p>
-<p>Report results are returned to ChatGPT so it can show and discuss them with you. OpenAI's handling of conversation content is covered by OpenAI's own terms and privacy policy.</p>
+<p>Data is fetched only when you, or your AI assistant (ChatGPT or Claude) on your behalf, run a report or open the dashboard, and is used only to answer that request. The dashboard and reports are read-only. The service changes something only when you explicitly ask your assistant to: Google Business Profile actions such as replying to a review or publishing a post, creating a GA4 audience export, registering the service with your Merchant Center account, or the YouTube actions listed below. Your assistant asks you to confirm these actions.</p>
+<p>Report results are returned to your assistant so it can show and discuss them with you. OpenAI's and Anthropic's handling of conversation content is covered by their own terms and privacy policies.</p>
 
 <h2>What is stored</h2>
 <ul><li>Report data is not stored after a request completes, except that Microsoft Clarity answers are kept for up to one hour (encrypted) because Clarity allows only 10 requests a day. With extra accounts connected, the list of property, site and ad account IDs each one can reach is also kept for up to one hour (encrypted), so each request goes to the right account.</li>
-<li>Keys and sign-ins for platforms you add on the Connections page are stored in a database (Upstash Redis), encrypted with AES-256-GCM, under your anonymous account ID. They are deleted when you disconnect the platform on that page.</li>
+<li>Keys and sign-ins for platforms you add on the Connections page, including your YouTube sign-in, are stored in a database (Upstash Redis), encrypted with AES-256-GCM, under your anonymous account ID. They are deleted when you disconnect the platform on that page.</li>
 <li>Your Google, Meta and CallRail credentials are encrypted (AES-256-GCM) inside the access and refresh tokens that ChatGPT keeps for your connection. Access tokens expire after 30 days and refresh tokens after 90 days.</li>
 <li>A short-lived session cache may be held in server memory and is discarded when the server instance stops.</li>
 <li>The hosting provider (Vercel) keeps standard request logs, such as time, path and status code, for operating and securing the service.</li></ul>
 
 <h2>Sharing</h2>
-<p>Your data is not sold, rented or used for advertising, and is not shared with anyone other than the providers needed to fulfil your request (Google, Meta, CallRail, OpenAI and the hosting provider).</p>
+<p>Your data is not sold, rented or used for advertising, and is not shared with anyone other than the providers needed to fulfil your request (Google and YouTube, Meta, CallRail, OpenAI or Anthropic, and the hosting provider).</p>
+
+<h2 id="youtube">YouTube API Services</h2>
+<p>Marketer Companion uses YouTube API Services (the YouTube Data API and YouTube Analytics API) to provide its YouTube features. By using those features you agree to be bound by the <a href="${YT_TERMS}">YouTube Terms of Service</a>, and Google's handling of your data is covered by the <a href="${GOOGLE_PRIVACY}">Google Privacy Policy</a>.</p>
+<ul><li><strong>What is accessed:</strong> only the channel you choose when you sign in. With the scopes youtube.force-ssl, youtube.readonly and yt-analytics.readonly the service can read your channel, videos, playlists, comments, captions, live broadcasts and analytics, and public YouTube search results for research you ask for.</li>
+<li><strong>What it changes, only when you ask and confirm:</strong> video titles, descriptions, tags, settings, thumbnails, captions and translations; playlists and their videos; comment replies and moderation; channel branding; uploading new videos; and deleting a video (only after you confirm its exact title).</li>
+<li><strong>What is stored:</strong> only your YouTube sign-in (an encrypted OAuth refresh token) and your channel's ID and name, so the service can act for you. YouTube data such as videos, comments and analytics is used to answer your request and is not stored after it.</li>
+<li><strong>Cookies:</strong> the service does not place cookies or similar tracking technology on your device for its YouTube features.</li>
+<li><strong>Sharing:</strong> YouTube data is returned only to you, through your AI assistant. It is not shared with other users or third parties, sold, or used for advertising.</li>
+<li><strong>Revoking access:</strong> disconnect YouTube on the Connections page, or revoke Marketer Companion's access at any time in your <a href="${GOOGLE_PERMISSIONS}">Google security settings</a>.</li>
+<li><strong>Deletion:</strong> disconnecting YouTube on the Connections page deletes the stored sign-in and channel details immediately. If you revoke access in Google instead, the stored sign-in stops working at once and is deleted the next time the service tries to use it. You can also ask for deletion at any time using the contact details below.</li></ul>
 
 <h2>Google user data</h2>
 <p>The service's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Google user data is not used to develop, improve or train generalised AI or machine-learning models, and humans do not read it except with your consent, for security, or where the law requires.</p>
 
 <h2>Your choices</h2>
 <ul><li>Disconnect the app in ChatGPT or Claude to stop all access through it.</li>
-<li>Revoke Google access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, Meta access in your Facebook Business settings, and rotate your CallRail API key in CallRail.</li>
+<li>Revoke Google and YouTube access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, Meta access in your Facebook Business settings, and rotate your CallRail API key in CallRail.</li>
 <li>Disconnecting a platform on the Connections page deletes its stored key or sign-in immediately. To have everything stored under your account ID deleted, contact us below.</li></ul>
 
 <h2>Contact</h2>
@@ -262,12 +280,15 @@ function privacyPage() {
 function termsPage() {
   return layout("Terms of service", `
 <h1>Terms of service</h1>
-<p>Last updated ${UPDATED}. These terms apply to the Marketer Companion ChatGPT plugin and its server (“the service”), provided by ${OWNER}.</p>
+<p>Last updated ${UPDATED}. These terms apply to the Marketer Companion plugin and connector for ChatGPT and Claude, and its server (“the service”), provided by ${OWNER}.</p>
 
 <h2>Using the service</h2>
-<ul><li>Connect only accounts you are authorised to access, and use the service in line with the terms of Google, Meta, CallRail and OpenAI.</li>
+<ul><li>Connect only accounts you are authorised to access, and use the service in line with the terms of Google, YouTube, Meta, CallRail, OpenAI and Anthropic.</li>
 <li>You are responsible for decisions you make from the reports and from ChatGPT's analysis of them. Check important figures in the source platform.</li>
 <li>Do not use the service to overload, probe or disrupt it or the APIs it calls.</li></ul>
+
+<h2 id="youtube">YouTube features</h2>
+<p>The YouTube features use YouTube API Services. By using them you agree to be bound by the <a href="${YT_TERMS}">YouTube Terms of Service</a>. Google's handling of your data is covered by the <a href="${GOOGLE_PRIVACY}">Google Privacy Policy</a>. Connect only channels you own or manage, and confirm each change before it is saved; you are responsible for the changes and uploads you approve.</p>
 
 <h2>Availability</h2>
 <p>The service is provided free of charge, “as is” and “as available”, without warranties of any kind. Platform API limits, outages or policy changes can make sources temporarily unavailable. Features may change or be withdrawn.</p>

@@ -26,7 +26,7 @@ async function tokenRequest(provider, fields) {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" }, body, signal: AbortSignal.timeout(TIMEOUT_MS)
   });
   const json = await response.json().catch(() => ({}));
-  if (!response.ok || !json.access_token) throw new Error(json.error_description || json.error || `Token request failed (${response.status})`);
+  if (!response.ok || !json.access_token) throw Object.assign(new Error(json.error_description || json.error || `Token request failed (${response.status})`), { code: json.error });
   return {
     accessToken: json.access_token,
     // Some platforms rotate the refresh token on every refresh; keep the old one if none comes back.
@@ -51,6 +51,9 @@ export async function freshAccessToken({ store, userId, providerId, provider, re
   try {
     refreshed = await tokenRequest(provider, { grant_type: "refresh_token", refresh_token: oauth.refreshToken });
   } catch (error) {
+    // invalid_grant means the user revoked access (or the grant expired): the stored sign-in can
+    // never work again, so delete it now rather than keep it (YouTube API data policy).
+    if (error.code === "invalid_grant") await store.remove(userId, providerId).catch(() => {});
     throw new Error(`${provider.name} access expired or was removed. Connect it again on the Connections page. (${error.message})`);
   }
   await store.save(userId, providerId, { ...record, oauth: { ...oauth, ...refreshed } });
