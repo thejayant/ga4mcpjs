@@ -61,6 +61,13 @@ export async function youtubeData(accessToken, path, params = {}) {
   return getJson(url.toString(), { headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" } });
 }
 
+// Writes (videos.update): PUT a JSON resource. Needs the youtube.force-ssl scope.
+export async function youtubeDataWrite(accessToken, path, params = {}, body = {}, method = "PUT") {
+  const url = new URL(`https://www.googleapis.com/youtube/v3/${path}`);
+  for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  return getJson(url.toString(), { method, headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
+
 export async function youtubeAnalytics(accessToken, params) {
   const url = new URL("https://youtubeanalytics.googleapis.com/v2/reports");
   for (const [key, value] of Object.entries({ ids: "channel==MINE", ...params })) if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
@@ -74,12 +81,13 @@ export const PROVIDERS = {
   youtube: {
     name: "YouTube",
     category: "Video",
-    help: "Sign in with the Google account that owns or manages the channel. If it manages several channels or Brand Accounts, Google asks which one to share. Access is read-only.",
+    help: "Sign in with the Google account that owns or manages the channel. If it manages several channels or Brand Accounts, Google asks which one to share. Access covers reports plus editing video titles, descriptions and tags. No tool uploads or deletes videos.",
     helpUrl: "https://studio.youtube.com/",
     oauth: {
       authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
       tokenUrl: "https://oauth2.googleapis.com/token",
-      scopes: ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"],
+      // force-ssl covers reading and editing video metadata (videos.update); readonly kept for older grants.
+      scopes: ["https://www.googleapis.com/auth/youtube.force-ssl", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"],
       clientId: () => process.env.GOOGLE_CLIENT_ID,
       clientSecret: () => process.env.GOOGLE_CLIENT_SECRET,
       // offline + consent so Google returns a refresh token; select_account to pick the channel's account.

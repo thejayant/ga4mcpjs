@@ -2,13 +2,24 @@
 // token (an anonymous ID), loads that user's encrypted connection, and calls the platform.
 // Connections made before user IDs existed get a clear "reconnect once" message.
 import { z } from "zod";
-import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeAnalytics } from "./providers.js";
+import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeDataWrite, youtubeAnalytics } from "./providers.js";
 import { connectionsLink } from "./routes.js";
 import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
 
 export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", "clarity_insights",
-  "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report"];
+  "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video"];
+
+const videoId = z.string().regex(/^[A-Za-z0-9_-]{11}$/).describe("11-character YouTube video ID");
+// YouTube rejects < and > in titles and descriptions.
+const noAngles = s => !/[<>]/.test(s);
+const videoSummary = item => ({
+  videoId: item.id, title: item.snippet?.title, description: item.snippet?.description, tags: item.snippet?.tags || [],
+  categoryId: item.snippet?.categoryId, defaultLanguage: item.snippet?.defaultLanguage, defaultAudioLanguage: item.snippet?.defaultAudioLanguage,
+  publishedAt: item.snippet?.publishedAt, privacyStatus: item.status?.privacyStatus, liveBroadcastContent: item.snippet?.liveBroadcastContent,
+  duration: item.contentDetails?.duration, views: item.statistics?.viewCount ? Number(item.statistics.viewCount) : undefined,
+  url: `https://www.youtube.com/watch?v=${item.id}`
+});
 
 const DAY = 86_400_000;
 const isoDay = time => new Date(time).toISOString().slice(0, 10);
@@ -126,6 +137,74 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     const { startDate, endDate } = period(args);
     return reply(await youtubeAnalytics(accessToken, { startDate, endDate, metrics: args.metrics, dimensions: args.dimensions, filters: args.filters, sort: args.sort, maxResults: args.maxResults }),
       body => ({ startDate, endDate, rows: body.rows }));
+  }));
+
+  // A YouTube connection made before editing was added has no write scope: ask for one reconnect.
+  const missingWriteScope = response => response.status === 403 && /insufficient|scope/i.test(JSON.stringify(response.body || ""));
+
+  server.registerTool("youtube_list_videos", {
+    title: "YouTube List Videos",
+    description: "The channel's uploads, newest first, including past livestreams and private or unlisted videos: video ID, title, description, tags, category, privacy, duration, views and publish date. Use it to find the ID for youtube_update_video.",
+    inputSchema: { maxResults: z.number().int().min(1).max(50).optional().describe("Default 25") },
+    annotations: { readOnlyHint: true }
+  }, forUser("youtube", async ({ accessToken, args }) => {
+    const channel = await youtubeData(accessToken, "channels", { part: "contentDetails", mine: "true" });
+    if (!channel.ok) return reply(channel);
+    const uploads = channel.body?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+    if (!uploads) return result({ error: "no_channel", error_description: "No uploads playlist found for this channel." }, true);
+    const list = await youtubeData(accessToken, "playlistItems", { part: "contentDetails", playlistId: uploads, maxResults: args.maxResults || 25 });
+    if (!list.ok) return reply(list);
+    const ids = (list.body.items || []).map(item => item.contentDetails?.videoId).filter(Boolean);
+    if (!ids.length) return result({ videos: [] });
+    const videos = await youtubeData(accessToken, "videos", { part: "snippet,status,contentDetails,statistics", id: ids.join(",") });
+    return reply(videos, body => ({ videos: (body.items || []).map(videoSummary).sort((a, b) => String(b.publishedAt).localeCompare(String(a.publishedAt))) }));
+  }));
+
+  server.registerTool("youtube_get_video", {
+    title: "YouTube Get Video",
+    description: "Full current metadata for one of the channel's videos: title, description, tags, category, languages, privacy, duration and views.",
+    inputSchema: { videoId }, annotations: { readOnlyHint: true }
+  }, forUser("youtube", async ({ accessToken, args }) => {
+    const response = await youtubeData(accessToken, "videos", { part: "snippet,status,contentDetails,statistics", id: args.videoId });
+    if (!response.ok) return reply(response);
+    const item = response.body?.items?.[0];
+    return item ? result(videoSummary(item)) : result({ error: "not_found", error_description: `No video ${args.videoId} on this channel.` }, true);
+  }));
+
+  server.registerTool("youtube_update_video", {
+    title: "YouTube Update Video",
+    description: "Change a video's title, description, tags, category or language on the connected channel. Only the fields given change: the current metadata is read first and everything else is kept. Returns the metadata before and after. Confirm the new text with the user before calling.",
+    inputSchema: {
+      videoId,
+      title: z.string().min(1).max(100).refine(noAngles, "Titles cannot contain < or >").optional().describe("Max 100 characters"),
+      description: z.string().max(5000).refine(noAngles, "Descriptions cannot contain < or >").optional().describe("Max 5000 characters"),
+      tags: z.array(z.string().min(1).max(100)).max(60).optional().describe("Replaces all tags; total about 500 characters max"),
+      categoryId: z.string().regex(/^\d{1,3}$/).optional().describe("e.g. 20 = Gaming, 22 = People & Blogs"),
+      defaultLanguage: z.string().max(10).optional().describe("Language of the title and description, e.g. hi, en")
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+  }, forUser("youtube", async ({ auth, accessToken, args }) => {
+    const changes = ["title", "description", "tags", "categoryId", "defaultLanguage"].filter(key => args[key] !== undefined);
+    if (!changes.length) return result({ error: "nothing_to_change", error_description: "Give at least one of title, description, tags, categoryId or defaultLanguage." }, true);
+    const current = await youtubeData(accessToken, "videos", { part: "snippet", id: args.videoId });
+    if (!current.ok) return reply(current);
+    const item = current.body?.items?.[0];
+    if (!item) return result({ error: "not_found", error_description: `No video ${args.videoId} on this channel.` }, true);
+    // videos.update replaces the whole snippet, so send every kept field back with the changes.
+    const old = item.snippet || {};
+    const snippet = {
+      title: args.title ?? old.title,
+      description: args.description ?? old.description ?? "",
+      categoryId: args.categoryId ?? old.categoryId,
+      ...((args.tags ?? old.tags) ? { tags: args.tags ?? old.tags } : {}),
+      ...((args.defaultLanguage ?? old.defaultLanguage) ? { defaultLanguage: args.defaultLanguage ?? old.defaultLanguage } : {}),
+      ...(old.defaultAudioLanguage ? { defaultAudioLanguage: old.defaultAudioLanguage } : {})
+    };
+    const updated = await youtubeDataWrite(accessToken, "videos", { part: "snippet" }, { id: args.videoId, snippet });
+    if (missingWriteScope(updated)) return result({ error: "reconnect_platform", error_description: "YouTube was connected with read-only access. Reconnect YouTube once on the Connections page to allow editing titles and descriptions, then ask again.", connectUrl: connectionsLink(baseUrl(req), seal, auth.userId).url }, true);
+    if (!updated.ok) return reply(updated);
+    const pick = s => ({ title: s.title, description: s.description, tags: s.tags || [], categoryId: s.categoryId, defaultLanguage: s.defaultLanguage });
+    return result({ videoId: args.videoId, changed: changes, before: pick(old), after: pick(updated.body?.snippet || snippet), url: `https://www.youtube.com/watch?v=${args.videoId}` });
   }));
 
   server.registerTool("clarity_insights", {
