@@ -68,6 +68,25 @@ export async function youtubeDataWrite(accessToken, path, params = {}, body = {}
   return getJson(url.toString(), { method, headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
+// Media uploads (thumbnails.set): raw bytes to the upload endpoint.
+export async function youtubeUploadMedia(accessToken, path, params = {}, bytes, contentType) {
+  const url = new URL(`https://www.googleapis.com/upload/youtube/v3/${path}`);
+  for (const [key, value] of Object.entries({ uploadType: "media", ...params })) if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  return getJson(url.toString(), { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json", "Content-Type": contentType, "Content-Length": String(bytes.length) }, body: bytes });
+}
+
+// YouTube answers some writes with 409 ABORTED or 5xx when it is busy (often right after a
+// playlist is created). Retry those a couple of times with a short pause.
+export async function youtubeRetry(call, { tries = 3, pauseMs = 1200 } = {}) {
+  let response;
+  for (let i = 0; i < tries; i++) {
+    response = await call().catch(error => ({ ok: false, status: 0, body: { error: { message: error.message } } }));
+    if (response.ok || !(response.status === 409 || response.status === 0 || response.status >= 500)) return response;
+    if (i < tries - 1) await new Promise(resolve => setTimeout(resolve, pauseMs * (i + 1)));
+  }
+  return response;
+}
+
 export async function youtubeAnalytics(accessToken, params) {
   const url = new URL("https://youtubeanalytics.googleapis.com/v2/reports");
   for (const [key, value] of Object.entries({ ids: "channel==MINE", ...params })) if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));

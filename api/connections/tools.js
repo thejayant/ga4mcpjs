@@ -2,14 +2,15 @@
 // token (an anonymous ID), loads that user's encrypted connection, and calls the platform.
 // Connections made before user IDs existed get a clear "reconnect once" message.
 import { z } from "zod";
-import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeDataWrite, youtubeAnalytics } from "./providers.js";
+import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeDataWrite, youtubeAnalytics, youtubeRetry } from "./providers.js";
+import { YOUTUBE_EXTRA_TOOL_NAMES, registerYouTubeExtraTools } from "./youtube-tools.js";
 import { connectionsLink } from "./routes.js";
 import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
 
 export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", "clarity_insights",
   "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video",
-  "youtube_list_playlists", "youtube_create_playlist", "youtube_add_to_playlist"];
+  "youtube_list_playlists", "youtube_create_playlist", "youtube_add_to_playlist", ...YOUTUBE_EXTRA_TOOL_NAMES];
 
 const videoId = z.string().regex(/^[A-Za-z0-9_-]{11}$/).describe("11-character YouTube video ID");
 // YouTube rejects < and > in titles and descriptions.
@@ -228,7 +229,7 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     for (const vid of [...new Set(ids)]) {
       if (existing.has(vid)) { skipped.push(vid); continue; }
       const snippet = { playlistId: id, resourceId: { kind: "youtube#video", videoId: vid }, ...(at !== undefined ? { position: at } : {}) };
-      const response = await youtubeDataWrite(accessToken, "playlistItems", { part: "snippet" }, { snippet }, "POST");
+      const response = await youtubeRetry(() => youtubeDataWrite(accessToken, "playlistItems", { part: "snippet" }, { snippet }, "POST"));
       if (missingWriteScope(response)) return { scopeError: true };
       if (response.ok) { added.push(vid); if (at !== undefined) at += 1; }
       else failed.push({ videoId: vid, status: response.status, error: response.body?.error?.message || `YouTube returned ${response.status}.` });
@@ -280,6 +281,11 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     if (videos.scopeError) return writeScopeError(auth);
     return result({ playlistId: args.playlistId, url: `https://www.youtube.com/playlist?list=${args.playlistId}`, ...videos }, videos.added.length === 0 && videos.failed.length > 0);
   }));
+
+  registerYouTubeExtraTools(server, {
+    forUser, reply, result, missingWriteScope, videoId, playlistId, noAngles, videoSummary, period, periodInput,
+    reconnect: auth => result({ error: "reconnect_platform", error_description: "YouTube was connected with read-only access. Reconnect YouTube once on the Connections page to allow changes, then ask again.", connectUrl: connectionsLink(baseUrl(req), seal, auth.userId).url }, true)
+  });
 
   server.registerTool("clarity_insights", {
     title: "Microsoft Clarity Insights",

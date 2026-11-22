@@ -270,6 +270,70 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
   assert.equal((await callTool(token, "youtube_update_video", { videoId: "abcdefghijk", title: "New" }, readOnly)).structuredContent.error, "reconnect_platform");
   assert.equal((await callTool(token, "youtube_update_video", { videoId: "abcdefghijk" }, editable)).structuredContent.error, "nothing_to_change");
 
+  // Extra YouTube tools: each write keeps untouched fields and sends the right request.
+  const calls = [];
+  let busyOnce = true;
+  const yt = async (url, init = {}) => {
+    const method = init.method || "GET";
+    calls.push({ method, url, init });
+    const u = new URL(url);
+    if (u.pathname.endsWith("/playlists") && method === "GET") return new Response(JSON.stringify({ items: [{ id: "PLtest12345", snippet: { title: "GTA 6 Hindi Playthrough", description: "Keep", defaultLanguage: "hi" }, status: { privacyStatus: "public" } }] }), { status: 200 });
+    if (u.pathname.endsWith("/playlists") && method === "PUT") { const b = JSON.parse(init.body); return new Response(JSON.stringify(b), { status: 200 }); }
+    if (u.pathname.endsWith("/playlistItems") && method === "GET") return new Response(JSON.stringify({ items: [{ id: "item-1", snippet: { position: 0, title: "A" }, contentDetails: { videoId: "abcdefghijk" }, status: { privacyStatus: "public" } }] }), { status: 200 });
+    if (u.pathname.endsWith("/playlistItems") && method === "DELETE") return new Response(null, { status: 204 });
+    if (u.pathname.endsWith("/playlistItems") && method === "POST") {
+      if (busyOnce) { busyOnce = false; return new Response(JSON.stringify({ error: { code: 409, message: "The operation was aborted." } }), { status: 409 }); }
+      return new Response(JSON.stringify({ id: "item-2" }), { status: 200 });
+    }
+    if (u.pathname.endsWith("/videos") && method === "GET" && u.searchParams.get("part") === "status") return new Response(JSON.stringify({ items: [{ id: "abcdefghijk", status: { privacyStatus: "public", embeddable: true, license: "youtube", publicStatsViewable: true, selfDeclaredMadeForKids: false } }] }), { status: 200 });
+    if (u.pathname.endsWith("/videos") && method === "PUT") return new Response(init.body, { status: 200 });
+    if (u.pathname.endsWith("/videos")) return new Response(JSON.stringify({ items: [{ id: "zzzzzzzzzzz", snippet: { title: "GTA 6 no commentary", channelTitle: "Rival", tags: ["gta 6"] }, statistics: { viewCount: "5000", likeCount: "90" }, contentDetails: { duration: "PT20M" } }] }), { status: 200 });
+    if (u.pathname.endsWith("/search")) return new Response(JSON.stringify({ pageInfo: { totalResults: 1 }, items: [{ id: { videoId: "zzzzzzzzzzz" } }] }), { status: 200 });
+    if (u.pathname.endsWith("/channels") && method === "GET") return new Response(JSON.stringify({ items: [{ id: "UC1", brandingSettings: { channel: { description: "Old", keywords: "ps5" } } }] }), { status: 200 });
+    if (u.pathname.endsWith("/channels") && method === "PUT") return new Response(init.body, { status: 200 });
+    if (u.pathname.endsWith("/thumbnails/set")) return new Response(JSON.stringify({ items: [{ default: { url: "x" } }] }), { status: 200 });
+    return google(url, init);
+  };
+  const run = async (name, args) => (await callTool(token, name, args, yt)).structuredContent;
+
+  const renamed = await run("youtube_update_playlist", { playlistId: "PLtest12345", title: "GTA 6 Full Playthrough (No Commentary) | PS5" });
+  assert.equal(renamed.after.title, "GTA 6 Full Playthrough (No Commentary) | PS5");
+  assert.equal(renamed.after.description, "Keep");
+  assert.equal(renamed.after.privacyStatus, "public");
+
+  assert.equal((await run("youtube_update_video_settings", { videoId: "abcdefghijk", publishAt: "2099-01-01T10:00:00Z" })).error, "invalid_schedule");
+  const scheduled = await run("youtube_update_video_settings", { videoId: "abcdefghijk", privacyStatus: "private", publishAt: "2099-01-01T10:00:00Z" });
+  const statusSent = JSON.parse(calls.findLast(c => c.method === "PUT" && c.url.includes("/videos")).init.body).status;
+  assert.equal(statusSent.publishAt, "2099-01-01T10:00:00Z");
+  assert.equal(statusSent.embeddable, true);
+  assert.equal(scheduled.after.privacyStatus, "private");
+
+  const removed = await run("youtube_remove_from_playlist", { playlistId: "PLtest12345", videoIds: ["abcdefghijk", "bbbbbbbbbbb"] });
+  assert.deepEqual(removed.removed, ["abcdefghijk"]);
+  assert.deepEqual(removed.notInPlaylist, ["bbbbbbbbbbb"]);
+  assert.match(calls.find(c => c.method === "DELETE").url, /id=item-1/);
+
+  // A busy 409 on adding is retried instead of failing.
+  const added = await run("youtube_add_to_playlist", { playlistId: "PLtest12345", videoIds: ["ccccccccccc"] });
+  assert.deepEqual(added.added, ["ccccccccccc"]);
+
+  assert.equal((await run("youtube_set_thumbnail", { videoId: "abcdefghijk", imageBase64: Buffer.from("not an image").toString("base64") })).error, "bad_image");
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);
+  const thumb = await run("youtube_set_thumbnail", { videoId: "abcdefghijk", imageBase64: `data:image/png;base64,${png.toString("base64")}` });
+  assert.equal(thumb.contentType, "image/png");
+  const upload = calls.find(c => c.url.includes("/thumbnails/set"));
+  assert.match(upload.url, /upload\/youtube\/v3\/thumbnails\/set\?uploadType=media&videoId=abcdefghijk/);
+  assert.equal(upload.init.headers["Content-Type"], "image/png");
+  assert.equal((await run("youtube_set_thumbnail", { videoId: "abcdefghijk", imageUrl: "https://127.0.0.1/x.png" })).error, "bad_image");
+
+  const search = await run("youtube_search", { query: "gta 6 no commentary", regionCode: "in" });
+  assert.equal(search.results[0].views, 5000);
+  assert.deepEqual(search.results[0].tags, ["gta 6"]);
+
+  const channel = await run("youtube_update_channel", { keywords: ["GTA 6", "PS5 gameplay", "no commentary"] });
+  assert.deepEqual(channel.after.keywords, ["GTA 6", "PS5 gameplay", "no commentary"]);
+  assert.equal(JSON.parse(calls.findLast(c => c.method === "PUT" && c.url.includes("/channels")).init.body).brandingSettings.channel.description, "Old");
+
   // Creating a playlist adds the videos in order and skips ones already in it.
   const inserted = [];
   let playlistBody = null;

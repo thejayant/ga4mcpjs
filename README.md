@@ -148,6 +148,7 @@ Generate `APP_ENCRYPTION_KEY` as a base64-encoded 32-byte secret. Example:
    - Google Analytics Admin API
    - Merchant API
    - Google Ads API
+   - YouTube Data API v3 and YouTube Analytics API (for the YouTube connection)
 3. Create OAuth 2.0 credentials for a Web application.
 4. Add these authorized redirect URIs (the second is for extra Google accounts and YouTube added on the Connections page):
 
@@ -478,6 +479,22 @@ The resulting token carries both credential sets, so Google and Meta tools work 
 - Meta attributes conversions on its **own** attribution windows, so Meta conversion counts will not tie out exactly against GA4 or Google Ads. Compare trends, not absolute totals.
 - Instagram follower demographics need at least 100 followers; Instagram stories only cover the last 24 hours.
 - No auto-pagination. Page explicitly with the returned `nextCursor`.
+
+## YouTube notes
+
+YouTube is connected on the Connections page (Google sign-in with `youtube.force-ssl`, `youtube.readonly` and `yt-analytics.readonly`; add `youtube.force-ssl` to the OAuth consent screen). No tool uploads or deletes videos.
+
+| Area | Tools |
+|---|---|
+| Reports | `youtube_channel_report`, `youtube_top_videos`, `youtube_analytics_report`, `youtube_video_report` (totals, live vs on-demand, traffic sources, search terms, retention curve) |
+| Channel | `youtube_get_channel`, `youtube_update_channel` (description, keywords, country, language, trailer) |
+| Videos | `youtube_list_videos`, `youtube_get_video`, `youtube_update_video` (title, description, tags, category, language), `youtube_update_video_settings` (privacy, scheduling, made for kids, embedding, licence, synthetic-content label), `youtube_set_thumbnail`, `youtube_set_video_translations` |
+| Playlists | `youtube_list_playlists`, `youtube_create_playlist`, `youtube_update_playlist`, `youtube_list_playlist_items`, `youtube_add_to_playlist`, `youtube_move_in_playlist`, `youtube_remove_from_playlist` |
+| Comments | `youtube_list_comments` (one video or the whole channel, incl. review queue), `youtube_reply_comment`, `youtube_moderate_comments` |
+| Livestreams | `youtube_list_broadcasts` (upcoming, live with concurrent viewers, completed) |
+| Research | `youtube_search` (100 quota units per call), `youtube_public_videos`, `youtube_public_channel` |
+
+Every edit reads the current resource first and sends untouched fields back, because YouTube replaces whole parts (`snippet`, `status`, `brandingSettings`) on update. Busy responses (409 ABORTED, 5xx) are retried twice; comment replies are not retried so they can't post twice. Daily Data API quota is 10,000 units: reads 1, writes ~50, thumbnails 50, search 100.
 
 ## CallRail notes
 
