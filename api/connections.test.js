@@ -246,6 +246,30 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
   assert.equal(top.videos[0].title, "Carport install timelapse");
   assert.equal(top.videos[0].url, "https://www.youtube.com/watch?v=vid1");
 
+  // Editing a title keeps the description, tags and category; a read-only grant asks for a reconnect.
+  let sent = null;
+  const editable = async (url, init = {}) => {
+    if (url.includes("/youtube/v3/videos") && init.method === "PUT") {
+      sent = JSON.parse(init.body);
+      return new Response(JSON.stringify(sent), { status: 200 });
+    }
+    if (url.includes("/youtube/v3/videos")) return new Response(JSON.stringify({ items: [{ id: "abcdefghijk", snippet: { title: "Old", description: "Keep me", tags: ["gta6"], categoryId: "20", defaultAudioLanguage: "hi" } }] }), { status: 200 });
+    return google(url, init);
+  };
+  const edit = (await callTool(token, "youtube_update_video", { videoId: "abcdefghijk", title: "GTA 6 Launch Day Livestream in Hindi" }, editable)).structuredContent;
+  assert.deepEqual(edit.changed, ["title"]);
+  assert.equal(sent.snippet.title, "GTA 6 Launch Day Livestream in Hindi");
+  assert.equal(sent.snippet.description, "Keep me");
+  assert.deepEqual(sent.snippet.tags, ["gta6"]);
+  assert.equal(sent.snippet.categoryId, "20");
+  assert.equal(sent.snippet.defaultAudioLanguage, "hi");
+  assert.equal(edit.before.title, "Old");
+  const readOnly = async (url, init = {}) => init.method === "PUT"
+    ? new Response(JSON.stringify({ error: { code: 403, message: "Request had insufficient authentication scopes.", errors: [{ reason: "insufficientPermissions" }] } }), { status: 403 })
+    : editable(url, init);
+  assert.equal((await callTool(token, "youtube_update_video", { videoId: "abcdefghijk", title: "New" }, readOnly)).structuredContent.error, "reconnect_platform");
+  assert.equal((await callTool(token, "youtube_update_video", { videoId: "abcdefghijk" }, editable)).structuredContent.error, "nothing_to_change");
+
   // An expired access token is refreshed with the stored refresh token.
   let refreshed = false;
   const expiring = async (url, init) => {
