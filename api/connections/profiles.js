@@ -46,7 +46,7 @@ export const profileUrl = (baseUrl, slug) => `${baseUrl}/mcp/p/${slug}`;
  * each platform may use ("main" or a connection id), `platformOptions` the connected extra platforms,
  * `labels` the display name of each account key per platform. Returns { profile } or { error }.
  */
-export function buildProfile(input, { accountOptions, platformOptions, labels = {}, existing } = {}) {
+export function buildProfile(input, { accountOptions, platformOptions, youtubeOptions, labels = {}, existing } = {}) {
   const name = String(input.name || "").trim().replace(/\s+/g, " ").slice(0, 60);
   if (!name) return { error: "Give the profile a name." };
   const accounts = {}, accountLabels = {};
@@ -58,6 +58,16 @@ export function buildProfile(input, { accountOptions, platformOptions, labels = 
     accountLabels[family] = labels[family]?.[value] || value;
   }
   const platforms = [...new Set([].concat(input.platforms || []).map(String))].filter(id => platformOptions?.includes(id));
+  // YouTube: none, any connected channel ("any"), or one channel (its connection ID).
+  let youtubeChannel = null;
+  const youtube = String(input.youtubeChannel || "").trim();
+  if (youtube) {
+    const choice = (youtubeOptions || []).find(([value]) => value === youtube);
+    if (youtube !== "any" && !choice) return { error: "Pick a YouTube channel from the list." };
+    if (youtube === "any" && !(youtubeOptions || []).length) return { error: "Connect a YouTube channel first." };
+    platforms.push("youtube");
+    if (choice) { youtubeChannel = choice[0]; accountLabels.youtube = choice[1]; }
+  }
   if (!Object.values(accounts).some(Boolean) && !platforms.length) return { error: "Choose at least one account or platform for this profile." };
   const defaults = {};
   for (const [family, fields] of Object.entries(PROFILE_DEFAULTS)) {
@@ -69,7 +79,7 @@ export function buildProfile(input, { accountOptions, platformOptions, labels = 
       (defaults[family] ||= {})[arg] = arg === "customerId" ? value.replace(/-/g, "") : value;
     }
   }
-  return { profile: { slug: existing?.slug || newSlug(name), name, accounts, accountLabels, platforms, defaults, createdAt: existing?.createdAt || Date.now() } };
+  return { profile: { slug: existing?.slug || newSlug(name), name, accounts, accountLabels, platforms, youtubeChannel, defaults, createdAt: existing?.createdAt || Date.now() } };
 }
 
 // A profile by "profile:<slug>", slug or name (case-insensitive).
@@ -105,7 +115,8 @@ export function profileShape(shape, defaults, profileName) {
 // What a model is told about a profile connector, in the MCP initialize instructions.
 export function profileInstructions(profile) {
   const accounts = Object.entries(PROFILE_FAMILIES).filter(([family]) => profile.accounts?.[family])
-    .map(([family, title]) => `${title}: ${profile.accountLabels?.[family] || profile.accounts[family]}`);
+    .map(([family, title]) => `${title}: ${profile.accountLabels?.[family] || profile.accounts[family]}`)
+    .concat(profile.youtubeChannel ? [`YouTube channel: ${profile.accountLabels?.youtube || "set"}`] : []);
   const defaults = Object.values(profile.defaults || {}).flatMap(Object.entries).map(([arg, value]) => `${arg} ${value}`);
   return [
     `This connector is the profile "${profile.name}". Every request on it uses only this profile's accounts${accounts.length ? ` (${accounts.join("; ")})` : ""}.`,

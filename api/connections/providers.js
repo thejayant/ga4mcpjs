@@ -100,26 +100,34 @@ export const PROVIDERS = {
   youtube: {
     name: "YouTube",
     category: "Video",
-    help: "Sign in with the Google account that owns or manages the channel. If it manages several channels or Brand Accounts, Google asks which one to share. Access covers reports and analytics, editing video details and settings, thumbnails, captions, playlists, comment replies and moderation, uploading videos, and deleting a video after you confirm its title. Every change needs your confirmation in chat. Uses YouTube API Services: you agree to the YouTube Terms of Service (youtube.com/t/terms); see the Google Privacy Policy (policies.google.com/privacy).",
+    // One connection per channel, up to five (see _youtube-channels.js).
+    multi: true,
+    maxConnections: 5,
+    help: "Sign in with the Google account that owns or manages the channel. If it manages several channels or Brand Accounts, Google asks which one to share. Add up to 5 channels, from the same or different Google accounts: sign in again and pick another channel. Access covers reports and analytics, editing video details and settings, thumbnails, captions, playlists, comment replies and moderation, uploading videos, and deleting a video after you confirm its title. Every change needs your confirmation in chat. Uses YouTube API Services: you agree to the YouTube Terms of Service (youtube.com/t/terms); see the Google Privacy Policy (policies.google.com/privacy).",
     helpUrl: "https://studio.youtube.com/",
     oauth: {
       authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
       tokenUrl: "https://oauth2.googleapis.com/token",
       // force-ssl covers reading and editing video metadata (videos.update); readonly kept for older grants.
-      scopes: ["https://www.googleapis.com/auth/youtube.force-ssl", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"],
+      // openid + email name the Google account behind each channel on the Connections page.
+      scopes: ["https://www.googleapis.com/auth/youtube.force-ssl", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly", "openid", "email"],
       clientId: () => process.env.GOOGLE_CLIENT_ID,
       clientSecret: () => process.env.GOOGLE_CLIENT_SECRET,
       // offline + consent so Google returns a refresh token; select_account to pick the channel's account.
       authParams: { access_type: "offline", prompt: "consent select_account" },
-      buttonLabel: "Connect with Google"
+      buttonLabel: "Add a YouTube channel"
     },
-    // Names the channel that was shared, for the Connections page and tools.
+    // Names the channel that was shared (and the Google account behind it), keyed by channel ID.
     async describe(accessToken) {
-      const result = await youtubeData(accessToken, "channels", { part: "snippet,statistics", mine: "true" });
+      const [result, me] = await Promise.all([
+        youtubeData(accessToken, "channels", { part: "snippet,statistics", mine: "true" }),
+        getJson("https://openidconnect.googleapis.com/v1/userinfo", { headers: { Authorization: `Bearer ${accessToken}` } }).catch(() => null)
+      ]);
       const channel = result.ok ? result.body?.items?.[0] : null;
       if (!channel) return { ok: false, message: result.ok ? "This Google account has no YouTube channel. Choose the account (or Brand Account) that owns the channel." : "YouTube could not be reached. Try again." };
       const subscribers = Number(channel.statistics?.subscriberCount || 0);
-      return { ok: true, label: channel.snippet?.title, summary: `${subscribers.toLocaleString("en-US")} subscribers`, meta: { channelId: channel.id, title: channel.snippet?.title } };
+      const email = me?.ok && typeof me.body?.email === "string" ? me.body.email : null;
+      return { ok: true, instance: shortHash(`youtube:${channel.id}`), label: channel.snippet?.title, summary: `${subscribers.toLocaleString("en-US")} subscribers${email ? ` · via ${email}` : ""}`, meta: { channelId: channel.id, title: channel.snippet?.title, email } };
     }
   },
   bing_webmaster: {

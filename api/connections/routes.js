@@ -35,9 +35,15 @@ function accountChoices(connections, mainGoogle) {
   }
   return choices;
 }
-const platformChoices = connections => Object.keys(PROFILE_PLATFORMS).filter(id => connections[id]).map(id => [id, PROVIDERS[id].name]);
+// Checkbox platforms (YouTube has its own channel choice); a platform counts if any of its connections exists.
+const platformChoices = connections => Object.keys(PROFILE_PLATFORMS).filter(id => id !== "youtube" && Object.values(connections).some(c => c.provider === id)).map(id => [id, PROVIDERS[id].name]);
+const youtubeChoices = connections => Object.values(connections).filter(c => c.provider === "youtube").map(c => [c.id, c.label || "YouTube channel"]);
 
-function profileForm(q, choices, platforms, profile) {
+function profileForm(q, choices, platforms, profile, channels = []) {
+  const youtubeValue = profile?.youtubeChannel || (profile?.platforms?.includes("youtube") ? "any" : "");
+  const youtube = channels.length ? `<label>YouTube channel
+      <select name="youtube_channel"><option value="">None</option>${channels.length > 1 ? `<option value="any"${youtubeValue === "any" ? " selected" : ""}>Any connected channel (asks which one)</option>` : ""}${channels.map(([value, label]) =>
+        `<option value="${escapeHtml(value)}"${youtubeValue === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>` : "";
   const select = family => `<label>${PROFILE_FAMILIES[family]} account
       <select name="account_${family}"><option value="">None</option>${choices[family].map(([value, label]) =>
         `<option value="${escapeHtml(value)}"${profile?.accounts?.[family] === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>`;
@@ -47,6 +53,7 @@ function profileForm(q, choices, platforms, profile) {
       ${profile ? `<input type="hidden" name="slug" value="${escapeHtml(profile.slug)}">` : ""}
       <label>Name<input name="name" required maxlength="60" value="${escapeHtml(profile?.name || "")}" placeholder="Client A" autocomplete="off"></label>
       ${Object.keys(PROFILE_FAMILIES).map(select).join("")}
+      ${youtube}
       ${platforms.length ? `<fieldset><legend>Also include</legend>${platforms.map(([id, name]) => `<label class="check"><input type="checkbox" name="platform" value="${id}"${profile?.platforms?.includes(id) ? " checked" : ""}> ${escapeHtml(name)}</label>`).join("")}</fieldset>` : ""}
       <details><summary>Default IDs, used when a request leaves them out</summary><div class="connect-form">${defaults}</div></details>
       <button type="submit" class="cta">${profile ? "Save changes" : "Create profile"}</button>
@@ -54,7 +61,7 @@ function profileForm(q, choices, platforms, profile) {
 }
 
 function profilesSection(q, base, profiles, connections, mainGoogle) {
-  const choices = accountChoices(connections, mainGoogle), platforms = platformChoices(connections);
+  const choices = accountChoices(connections, mainGoogle), platforms = platformChoices(connections), channels = youtubeChoices(connections);
   const known = new Set(Object.values(choices).flat().map(([value]) => value));
   const cards = profiles.map(profile => {
     const accounts = Object.entries(PROFILE_FAMILIES).filter(([family]) => profile.accounts?.[family]).map(([family, title]) => {
@@ -62,18 +69,20 @@ function profilesSection(q, base, profiles, connections, mainGoogle) {
       const missing = !known.has(key);
       return `<li>${title}: ${escapeHtml(profile.accountLabels?.[family] || key)}${missing ? ` <strong class="warn">(disconnected: pick another account)</strong>` : ""}</li>`;
     });
-    const extras = (profile.platforms || []).map(id => `<li>${escapeHtml(PROVIDERS[id]?.name || id)}</li>`);
+    const extras = (profile.platforms || []).map(id => id === "youtube" && profile.youtubeChannel
+      ? `<li>YouTube: ${escapeHtml(profile.accountLabels?.youtube || "channel")}${connections[profile.youtubeChannel] ? "" : ` <strong class="warn">(disconnected: pick another channel)</strong>`}</li>`
+      : `<li>${escapeHtml(PROVIDERS[id]?.name || id)}</li>`);
     return `<div class="card"><span class="tag">Profile</span><h3>${escapeHtml(profile.name)}</h3>
       <ul class="plain">${accounts.concat(extras).join("")}</ul>
       <label class="url">Connector URL<input readonly value="${escapeHtml(profileUrl(base, profile.slug))}" onclick="this.select()"></label>
-      <details><summary>Edit</summary>${profileForm(q, choices, platforms, profile)}</details>
+      <details><summary>Edit</summary>${profileForm(q, choices, platforms, profile, channels)}</details>
       <form method="post" action="/connections/profiles/${encodeURIComponent(profile.slug)}/delete${q}"><button type="submit" class="secondary-btn">Delete profile</button></form>
     </div>`;
   });
   return `<h2>Profiles</h2>
 <p class="lead">A profile is one client: which Google, Meta and CallRail account to use, plus default IDs. Each profile has its own connector URL. In Claude, open Settings → Connectors → Add custom connector, paste the URL, name it after the client and sign in; then turn on that client's connector in a chat. Any other assistant that takes a remote MCP server URL works the same way. On your main connector, ask for a client by profile name, or compare clients side by side.</p>
 ${cards.join("\n")}
-${profiles.length < MAX_PROFILES ? `<div class="card"><span class="tag">New</span><h3>New profile</h3>${profileForm(q, choices, platforms)}</div>` : ""}`;
+${profiles.length < MAX_PROFILES ? `<div class="card"><span class="tag">New</span><h3>New profile</h3>${profileForm(q, choices, platforms, null, channels)}</div>` : ""}`;
 }
 
 // The main sign-in is managed in the assistant (Claude, ChatGPT…), so it has no Disconnect button here.
@@ -89,11 +98,14 @@ function page(t, connections, { notice, error, profiles = [], base = "", mainGoo
     const mine = provider.multi ? Object.values(connections).filter(c => c.provider === id) : [];
     const connected = provider.multi ? null : connections[id];
     const action = `/connections/${id}${q}`;
+    // A capped provider (YouTube: 5 channels) shows its count; at the cap the button only refreshes.
+    const full = provider.maxConnections && mine.length >= provider.maxConnections;
+    const count = provider.maxConnections && mine.length ? `<p class="muted">${mine.length} of ${provider.maxConnections} ${id === "youtube" ? "channels" : "connections"} connected.${full ? " Disconnect one to add another; signing in again with a connected one refreshes it." : ""}</p>` : "";
     const body = connected
       ? entry(connected)
-      : (id === "google_account" ? mainEntry(mainGoogle) : "") + mine.map(entry).join("") + (provider.oauth
+      : (id === "google_account" ? mainEntry(mainGoogle) : "") + mine.map(entry).join("") + count + (provider.oauth
         ? oauthReady(provider)
-          ? `<p>${escapeHtml(provider.help)}</p><a class="cta" href="/connections/${id}/start?t=${encodeURIComponent(t)}">${escapeHtml(provider.oauth.buttonLabel || `Connect ${provider.name}`)}</a>`
+          ? `<p>${escapeHtml(provider.help)}</p><a class="cta" href="/connections/${id}/start?t=${encodeURIComponent(t)}">${escapeHtml(full ? "Refresh a connected channel" : provider.oauth.buttonLabel || `Connect ${provider.name}`)}</a>`
           : `<p>${escapeHtml(provider.name)} isn’t set up on this server yet.</p>`
       : `<p>${escapeHtml(provider.help)} <a href="${escapeHtml(provider.helpUrl)}" target="_blank" rel="noopener">Open ${escapeHtml(provider.name)} ↗</a></p>
          <form method="post" action="${action}" class="connect-form">
@@ -157,7 +169,8 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     const info = await store.getAccountInfo(link.userId);
     send(res, 200, page(req.query.t, await current(link.userId), {
       profiles: await store.listProfiles(link.userId), base: baseUrl(req), mainGoogle: info?.googleEmail || null,
-      notice: req.query.refreshed && done ? `This ${done} was already connected, so its sign-in was refreshed instead of adding another. To add a different account, choose “Use another account” in Google’s account picker.`
+      notice: req.query.refreshed && done === "YouTube" ? "This YouTube channel was already connected, so its sign-in was refreshed instead of adding another. To add a different channel, pick it in Google’s chooser (or “Use another account” for a channel on another Google account)."
+        : req.query.refreshed && done ? `This ${done} was already connected, so its sign-in was refreshed instead of adding another. To add a different account, choose “Use another account” in Google’s account picker.`
         : req.query.main ? "That’s your main sign-in, which is already connected. To add a different account, choose “Use another account” in Google’s account picker."
         : done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.`
         : saved ? `Profile “${saved}” saved. Copy its connector URL into your assistant.` : deleted ? `Profile “${deleted}” deleted. Remove its connector from your assistant too.` : undefined,
@@ -180,7 +193,7 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     const connections = await current(link.userId);
     const choices = accountChoices(connections, (await store.getAccountInfo(link.userId))?.googleEmail);
     const input = {
-      name: body.name, platforms: body.platform,
+      name: body.name, platforms: body.platform, youtubeChannel: body.youtube_channel,
       accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, body[`account_${family}`]])),
       defaults: Object.fromEntries(Object.entries(PROFILE_DEFAULTS).map(([family, fields]) => [family, Object.fromEntries(Object.keys(fields).map(arg => [arg, body[`default_${family}_${arg}`]]))]))
     };
@@ -188,6 +201,7 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
       accountOptions: Object.fromEntries(Object.entries(choices).map(([family, list]) => [family, list.map(([value]) => value)])),
       labels: Object.fromEntries(Object.entries(choices).map(([family, list]) => [family, Object.fromEntries(list.map(([value, label]) => [value, value === "main" ? "Main sign-in" : label]))])),
       platformOptions: platformChoices(connections).map(([id]) => id),
+      youtubeOptions: youtubeChoices(connections),
       existing
     });
     if (built.error) return back({ error: built.error });
@@ -254,8 +268,22 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
       // The main sign-in is already connected; adding it again would only duplicate it.
       const mainGoogle = providerId === "google_account" ? (await store.getAccountInfo(link.userId))?.googleEmail : null;
       if (mainGoogle && described.label && mainGoogle.toLowerCase() === String(described.label).toLowerCase()) return back({ main: "1" });
-      const existed = provider.multi && Boolean(await store.get(link.userId, id));
+      // A channel connected before several were allowed is stored as plain "youtube"; the same
+      // channel signing in again moves to its own ID (and profiles follow it).
+      const legacy = providerId === "youtube" ? await store.get(link.userId, "youtube") : null;
+      const legacySame = Boolean(legacy && described.meta?.channelId && legacy.meta?.channelId === described.meta.channelId);
+      const existed = provider.multi && (legacySame || Boolean(await store.get(link.userId, id)));
+      if (!existed && provider.maxConnections) {
+        const count = (await store.list(link.userId)).filter(other => other === providerId || other.startsWith(`${providerId}:`)).length;
+        if (count >= provider.maxConnections) return back({ error: `You can connect up to ${provider.maxConnections} ${providerId === "youtube" ? "YouTube channels" : `${provider.name} accounts`}. Disconnect one to add another.` });
+      }
       await store.save(link.userId, id, { oauth, label: described.label, summary: described.summary, meta: described.meta, connectedAt: Date.now() });
+      if (legacySame) {
+        await store.remove(link.userId, "youtube");
+        for (const profile of await store.listProfiles(link.userId)) {
+          if (profile.youtubeChannel === "youtube") await store.saveProfile(link.userId, { ...profile, youtubeChannel: id });
+        }
+      }
       back({ connected: providerId, ...(existed ? { refreshed: "1" } : {}) });
     } catch (error) {
       back({ error: `${provider.name} couldn’t be connected: ${String(error.message).slice(0, 160)}` });

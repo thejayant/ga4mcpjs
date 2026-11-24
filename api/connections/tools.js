@@ -5,13 +5,15 @@ import { z } from "zod";
 import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeDataWrite, youtubeAnalytics, youtubeRetry } from "./providers.js";
 import { YOUTUBE_EXTRA_TOOL_NAMES, registerYouTubeExtraTools } from "./_youtube-tools.js";
 import { YOUTUBE_MEDIA_TOOL_NAMES, registerYouTubeMediaTools } from "./_youtube-media-tools.js";
+import { YOUTUBE_LIVE_TOOL_NAMES, registerYouTubeLiveTools } from "./_youtube-live-tools.js";
 import { connectionsLink } from "./routes.js";
 import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
+import { ANY_CHANNEL_TOOLS, MAX_YOUTUBE_CHANNELS, channelSummary, listYouTubeChannels, pickYouTubeChannel } from "./_youtube-channels.js";
 
 export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", "clarity_insights",
   "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video",
-  "youtube_list_playlists", "youtube_create_playlist", "youtube_add_to_playlist", ...YOUTUBE_EXTRA_TOOL_NAMES, ...YOUTUBE_MEDIA_TOOL_NAMES];
+  "youtube_list_playlists", "youtube_create_playlist", "youtube_add_to_playlist", ...YOUTUBE_EXTRA_TOOL_NAMES, ...YOUTUBE_MEDIA_TOOL_NAMES, ...YOUTUBE_LIVE_TOOL_NAMES];
 
 const videoId = z.string().regex(/^[A-Za-z0-9_-]{11}$/).describe("11-character YouTube video ID");
 // YouTube rejects < and > in titles and descriptions.
@@ -33,12 +35,57 @@ const periodInput = { startDate: dateInput.optional().describe("YYYY-MM-DD; defa
 
 const siteInput = { siteUrl: z.string().min(4).max(300).describe("A verified site exactly as listed by bing_webmaster_sites, e.g. https://www.example.com/") };
 
+const CHANNEL_INPUT = z.string().trim().min(1).max(200).optional()
+  .describe("Only with several YouTube channels connected: the channel's name or ID (from manage_connections). Usually omit it.");
+
 export function registerConnectionTools(server, { req, store, seal, withAuth, result, baseUrl }) {
+  // Every YouTube tool takes an optional `channel` (except on a profile connector set to one channel)
+  // and records its name, so public-data tools can use any channel's sign-in.
+  const registerTool = server.registerTool;
+  server.registerTool = (name, config, handler) => {
+    if (!name.startsWith("youtube_") || typeof handler !== "function") return registerTool.call(server, name, config, handler);
+    const inputSchema = req.profile?.youtubeChannel ? config.inputSchema : { ...(config.inputSchema || {}), channel: CHANNEL_INPUT };
+    return registerTool.call(server, name, { ...config, inputSchema }, (args = {}, extra) => { req.youtubeTool = name; return handler(args, extra); });
+  };
+
+  // YouTube: pick the channel, then run with that channel's sign-in. With several channels the
+  // result names the channel that answered.
+  async function forYouTube(auth, args, run) {
+    const { channel: wanted, ...rest } = args;
+    const channels = await listYouTubeChannels(store, auth.userId);
+    const tokenFor = channel => freshAccessToken({ store, userId: auth.userId, providerId: channel.id, provider: PROVIDERS.youtube, record: channel.record });
+    // A livestream's broadcast ID is its video ID.
+    const video = rest.videoId || rest.broadcastId;
+    const lookup = video ? ["videos", video] : rest.playlistId ? ["playlists", rest.playlistId] : null;
+    const picked = await pickYouTubeChannel({
+      channels, wanted, pinned: req.profile?.youtubeChannel, anyChannel: ANY_CHANNEL_TOOLS.has(req.youtubeTool),
+      ownerOf: lookup && (async () => {
+        const found = await youtubeData(await tokenFor(channels[0]), lookup[0], { part: "snippet", id: lookup[1] });
+        return found.ok ? found.body?.items?.[0]?.snippet?.channelId || null : null;
+      })
+    });
+    if (picked.error === "not_connected") {
+      const link = connectionsLink(baseUrl(req), seal, auth.userId);
+      return result({ error: "not_connected", error_description: "YouTube is not connected. Open this private link to connect a channel, then ask again.", connectUrl: link.url, linkExpiresAt: link.expiresAt }, true);
+    }
+    if (picked.error) return result({ error: picked.error, error_description: picked.message, ...(picked.channels ? { channels: picked.channels } : {}) }, true);
+    const accessToken = await tokenFor(picked.channel).catch(error => ({ error }));
+    if (accessToken?.error) return result({ error: "reconnect_platform", error_description: `${picked.channel.title}: ${accessToken.error.message}`, connectUrl: connectionsLink(baseUrl(req), seal, auth.userId).url }, true);
+    const outcome = await run({ auth, args: rest, credentials: picked.channel.record.credentials, accessToken, record: picked.channel.record });
+    const content = outcome?.structuredContent;
+    if (channels.length > 1 && content && typeof content === "object" && !Array.isArray(content)) {
+      outcome.structuredContent = { youtubeChannel: channelSummary(picked.channel), ...content };
+      outcome.content = [{ type: "text", text: JSON.stringify(outcome.structuredContent, null, 2) }, ...(outcome.content || []).slice(1)];
+    }
+    return outcome;
+  }
+
   // Runs a tool for the signed-in user; `needs` names the platform connection it requires.
   const forUser = (needs, run) => async (args = {}) => withAuth(req, [], async auth => {
     if (!store) return result({ error: "connections_unavailable", error_description: "Connections are not set up on this server yet." }, true);
     if (!auth.userId) return result({ error: "reconnect_required", error_description: "Disconnect and reconnect Marketer Companion once to use connected platforms. Your existing tools keep working meanwhile." }, true);
     if (!needs) return run({ auth, args });
+    if (needs === "youtube") return forYouTube(auth, args, run);
     const record = await store.get(auth.userId, needs);
     if (!record) {
       const link = connectionsLink(baseUrl(req), seal, auth.userId);
@@ -57,7 +104,7 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
 
   server.registerTool("manage_connections", {
     title: "Manage Connections",
-    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too; tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects platforms and builds profiles. Give the user the link; never ask for keys in chat.`,
+    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too, and up to ${MAX_YOUTUBE_CHANNELS} YouTube channels (YouTube tools then take \`channel\`); tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects platforms and builds profiles. Give the user the link; never ask for keys in chat.`,
     inputSchema: {}, annotations: { readOnlyHint: true }
   }, forUser(null, async ({ auth }) => {
     const ids = await store.list(auth.userId);
@@ -69,7 +116,8 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
       platforms: profile.platforms || [], defaults: profile.defaults || {}
     }));
     const mainGoogle = (await store.getAccountInfo(auth.userId))?.googleEmail || null;
-    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => p.multi || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
+    const youtubeChannels = (await listYouTubeChannels(store, auth.userId)).map(channelSummary);
+    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
   }));
 
   server.registerTool("bing_webmaster_sites", {
@@ -289,6 +337,7 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
   };
   registerYouTubeExtraTools(server, youtubeContext);
   registerYouTubeMediaTools(server, youtubeContext);
+  registerYouTubeLiveTools(server, youtubeContext);
 
   server.registerTool("clarity_insights", {
     title: "Microsoft Clarity Insights",
@@ -304,4 +353,5 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     if (response.status === 429) return result({ error: "daily_limit", error_description: "Clarity's limit of 10 requests a day for this project is used up. Try again tomorrow, or reuse an earlier answer." }, true);
     return reply(response, metrics => ({ numOfDays, dimensions, servedFromCache: Boolean(response.cached), metrics }));
   }));
+  server.registerTool = registerTool;
 }

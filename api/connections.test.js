@@ -203,7 +203,7 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
   const token = tokenFor("user-yt");
   const t = new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
   const page = await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
-  assert.match(page, /Connect with Google/);
+  assert.match(page, /Add a YouTube channel/);
 
   const start = await realFetch(`${baseUrl}/connections/youtube/start?t=${encodeURIComponent(t)}`, { redirect: "manual" });
   const consent = new URL(start.headers.get("location"));
