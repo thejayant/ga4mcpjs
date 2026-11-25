@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import express from "express";
 import { google } from "googleapis";
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer, createMcpHandler, isLegacyRequest } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from "@modelcontextprotocol/node";
 import { GBP_SCOPE } from "../MCP GBP/client.js";
 import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
 import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
@@ -5658,8 +5658,8 @@ async function toolAccounts(req, family) {
 // Loaded once per cold start; see skills/ and api/_skills.js.
 const SKILLS = loadSkills();
 
-function createServer(req) {
-  const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
+async function createServer(req) {
+  const server = new McpServer({ name: "marketing-data-mcp", version: "2.0.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
   routeToolsByAccount(server, req);
   if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
     req, withVerifiedToolAuth, buildToolResult,
@@ -8387,7 +8387,7 @@ function createServer(req) {
   }
   // Skills last, so each one is offered only where at least half of the tools it uses are on this connector.
   const registered = server._registeredTools || {};
-  registerSkills(server, { skills: SKILLS, isAvailable: skill => skill.tools.filter(name => registered[name]).length * 2 >= skill.tools.length });
+  await registerSkills(server, { skills: SKILLS, isAvailable: skill => skill.tools.filter(name => registered[name]).length * 2 >= skill.tools.length });
   return server;
 }
 
@@ -9610,20 +9610,27 @@ app.all(["/mcp", "/cbx", "/mcp/p/:slug"], async (req, res) => {
     req.extraCallRail = Boolean(req.profile.accounts?.callrail && req.profile.accounts.callrail !== "main");
   }
 
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true
-  });
-  const server = createServer(req);
-
+  // 2025-era clients (initialize handshake) are served exactly as before: stateless, one JSON response.
+  // 2026-07-28 clients (per-request envelope, server/discover) go to the SDK's modern handler.
+  // Both build the same server for this request's auth and profile.
   try {
-    res.on("close", () => {
-      transport.close().catch(() => {});
-      server.close().catch(() => {});
+    if (await isLegacyRequest(await toWebRequest(req, req.body), req.body)) {
+      const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      const server = await createServer(req);
+      res.on("close", () => {
+        transport.close().catch(() => {});
+        server.close().catch(() => {});
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
+    }
+    const handler = createMcpHandler(() => createServer(req), {
+      legacy: "reject",
+      onerror: error => console.log(JSON.stringify({ type: "mcp_handler_error", message: error?.message }))
     });
-
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    res.on("close", () => { handler.close().catch(() => {}); });
+    await toNodeHandler(handler)(req, res, req.body);
   } catch (error) {
     const statusCode = error?.statusCode || 500;
     if (!res.headersSent) {

@@ -1,21 +1,21 @@
-// Skills: expert playbooks (skills/<name>/SKILL.md) served three ways, so every client gets them:
+// Skills: expert playbooks (skills/<name>/SKILL.md) served two ways, so every client gets them:
 // - MCP prompts (prompts/list, prompts/get): the widest client support today.
-// - skill:// resources (resources/list, resources/read): plain files any resource-aware client can read.
-// - The skills extension (io.modelcontextprotocol/skills: skills/list, skills/get), for hosts that
-//   load skills on demand. Declared on initialize; SDK v2 moves this to server/discover.
+// - The skills extension (io.modelcontextprotocol/skills, SEP-2640) through the SDK's SkillCatalog:
+//   skills/list, skills/get and skill:// resources. 2026-07-28 clients see it in server/discover,
+//   2025-era clients in the initialize capabilities.
 // Skills are only added to the server: no tool changes behavior.
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { SKILLS_EXTENSION_ID, SkillsExtension, memorySkillFiles } from "@modelcontextprotocol/server/ext/skills";
 
-export const SKILLS_EXTENSION_ID = "io.modelcontextprotocol/skills";
+export { SKILLS_EXTENSION_ID };
 export const SKILLS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
 const SKILL_SCHEME = "skill://";
-const TTL_MS = 300_000;
+const CACHE_HINT = { ttlMs: 300_000, cacheScope: "public" };
 const NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
-const INVALID_PARAMS = -32602;
 
 // The small YAML subset SKILL.md frontmatter uses: `key: value` lines and one level of nested maps.
 export function parseFrontmatter(text) {
@@ -61,7 +61,6 @@ export function loadSkills(dir = SKILLS_DIR) {
 }
 
 // What a skills/list or skills/get entry looks like on the wire.
-const entryFor = skill => ({ uri: skill.uri, frontmatter: skill.frontmatter, resources: skill.resources });
 const title = name => name.split("-").map(word => word === "ga4" || word === "seo" ? word.toUpperCase() : word[0].toUpperCase() + word.slice(1)).join(" ");
 
 function promptText(skill, args) {
@@ -74,17 +73,22 @@ function promptText(skill, args) {
   ].join("\n");
 }
 
-const listSkillsRequest = z.object({ method: z.literal("skills/list"), params: z.object({ cursor: z.string().optional() }).passthrough().optional() });
-const getSkillRequest = z.object({ method: z.literal("skills/get"), params: z.object({ uri: z.string() }).passthrough() });
-
-function invalidParams(message) {
-  const error = new Error(message);
-  error.code = INVALID_PARAMS;
-  return error;
+// One SDK catalog per distinct set of offered skills (usually one or two per deployment), built once.
+const catalogs = new Map();
+function catalogFor(skills) {
+  const key = skills.map(skill => skill.name).join(",");
+  if (!catalogs.has(key)) {
+    const files = Object.fromEntries(skills.map(skill => [`${skill.name}/SKILL.md`, skill.text]));
+    const loading = SkillsExtension.load(memorySkillFiles(files), { strict: true, cacheHint: CACHE_HINT });
+    loading.catch(() => catalogs.delete(key));
+    catalogs.set(key, loading);
+  }
+  return catalogs.get(key);
 }
 
 // `isAvailable(skill)` hides a skill whose tools aren't on this connector (e.g. a profile without that platform).
-export function registerSkills(server, { skills = loadSkills(), isAvailable = () => true } = {}) {
+// Async because the catalog computes digests once; attach before the server connects.
+export async function registerSkills(server, { skills = loadSkills(), isAvailable = () => true } = {}) {
   const offered = skills.filter(isAvailable);
   if (!offered.length) return [];
   for (const skill of offered) {
@@ -92,28 +96,12 @@ export function registerSkills(server, { skills = loadSkills(), isAvailable = ()
     server.registerPrompt(skill.name, {
       title: title(skill.name),
       description: skill.frontmatter.description,
-      ...(skill.args.length ? { argsSchema } : {})
+      ...(skill.args.length ? { argsSchema: z.object(argsSchema) } : {})
     }, args => ({
       description: skill.frontmatter.description,
       messages: [{ role: "user", content: { type: "text", text: promptText(skill, args) } }]
     }));
-    server.registerResource(`skill-${skill.name}`, skill.uri, {
-      title: `${title(skill.name)} skill`,
-      description: skill.frontmatter.description,
-      mimeType: "text/markdown"
-    }, async uri => ({ contents: [{ uri: uri.href, mimeType: "text/markdown", text: skill.text }] }));
   }
-
-  const lowLevel = server.server;
-  const byUri = new Map(offered.map(skill => [skill.uri, skill]));
-  lowLevel.registerCapabilities({ extensions: { [SKILLS_EXTENSION_ID]: {} } });
-  lowLevel.setRequestHandler(listSkillsRequest, () => ({
-    resultType: "complete", skills: offered.map(entryFor), ttlMs: TTL_MS, cacheScope: "public"
-  }));
-  lowLevel.setRequestHandler(getSkillRequest, request => {
-    const skill = byUri.get(request.params.uri);
-    if (!skill) throw invalidParams(`Unknown skill: ${request.params.uri}`);
-    return { resultType: "complete", skill: entryFor(skill), ttlMs: TTL_MS, cacheScope: "public" };
-  });
+  (await catalogFor(offered)).attach(server);
   return offered;
 }
