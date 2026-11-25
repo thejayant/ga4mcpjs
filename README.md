@@ -270,6 +270,16 @@ Keyword Planner is part of the Google Ads API and needs nothing extra to enable.
 - Meta support covers three separate surfaces through one connector: Meta Ads (Marketing API insights), Facebook Page organic insights, and Instagram business insights. `query_meta_graph` is the raw escape hatch.
 - The expert preset layer is designed for common analyst workflows, while the raw tools remain available for deeper custom work.
 
+## Skills and prompts
+
+`skills/<name>/SKILL.md` holds expert playbooks (YouTube video repackage, SEO audit, GA4 performance review, Google Ads audit, Meta ads review, local business growth, Merchant Center health). `api/_skills.js` serves each one three ways, so every client gets it:
+
+- **Prompts** (`prompts/list`, `prompts/get`): the playbook with its optional inputs filled in. Works in nearly every MCP client.
+- **Resources** (`skill://<name>/SKILL.md`, `text/markdown`).
+- **Skills extension** (`io.modelcontextprotocol/skills`: `skills/list`, `skills/get`, declared under `capabilities.extensions`), for hosts that load skills on demand.
+
+A skill is offered only where at least half of the tools in its `metadata.tools` are on that connector, so a profile without YouTube doesn't get the YouTube skill. To add one, create `skills/<name>/SKILL.md` with `name` (matching the folder), `description` (say when to use it) and `metadata.tools`; `api/skills.test.js` fails if it names a tool or preset the server doesn't have. Tools are unchanged.
+
 ## Expert Layer
 
 - `run_google_ads_preset` supports 34 presets:
