@@ -11,13 +11,15 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.20.1",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "express": "^4.21.2",
     "googleapis": "^157.0.0",
-    "zod": "^3.24.2"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@modelcontextprotocol/ext-apps": "1.2.0",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/ext-tasks": "^0.2.3",
     "esbuild": "0.28.2",
     "gsap": "3.15.0"
   }

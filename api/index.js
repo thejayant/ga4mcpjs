@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import express from "express";
 import { google } from "googleapis";
 import { z } from "zod";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer, createMcpHandler, isLegacyRequest } from "@modelcontextprotocol/server";
+import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from "@modelcontextprotocol/node";
 import { GBP_SCOPE } from "../MCP GBP/client.js";
 import { GBP_TOOL_NAMES, registerGbpTools } from "../MCP GBP/tools.js";
 import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
@@ -18,6 +18,7 @@ import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
 import { gbpRequest } from "../MCP GBP/client.js";
 import { loadSkills, registerSkills } from "./_skills.js";
+import { enableTasks, withContinuation } from "./_tasks.js";
 
 // Every outbound call gets a deadline, so one hung upstream request fails clearly instead of
 // holding the function until the platform kills it. 50s leaves room for BigQuery's 45s wait.
@@ -5658,8 +5659,18 @@ async function toolAccounts(req, family) {
 // Loaded once per cold start; see skills/ and api/_skills.js.
 const SKILLS = loadSkills();
 
-function createServer(req) {
-  const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
+// Tools that can run as MCP tasks for clients that support them (see api/_tasks.js).
+const TASK_TOOL_NAMES = new Set(["youtube_upload_video", "youtube_continue_upload", "run_ga4_audience_export", "run_bigquery_ga4_query", "run_bigquery_ga4_preset", "run_across_profiles"]);
+
+// `era` is "modern" for 2026-07-28 requests and "legacy" for 2025-era ones (initialize handshake).
+async function createServer(req, era = "legacy") {
+  const server = new McpServer({ name: "marketing-data-mcp", version: "2.0.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
+  // Before routeToolsByAccount, so a task step calls the tool exactly as the client did (account routing included).
+  if (era === "modern" && connectionStore) enableTasks(server, {
+    store: connectionStore,
+    taskTools: TASK_TOOL_NAMES,
+    userId: async () => (await verifyMcpAccessToken(req, []).catch(() => null))?.userId
+  });
   routeToolsByAccount(server, req);
   if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
     req, withVerifiedToolAuth, buildToolResult,
@@ -7013,12 +7024,24 @@ function createServer(req) {
     } catch (error) {
       return buildToolResult({ error: "invalid_audience_export_request", error_description: error.message }, true);
     }
-    return buildToolResult({
+    const toolResult = buildToolResult({
       propertyId: normalizePropertyName(params.propertyId),
       action: params.action,
       hint: params.action === "create" ? "The export builds in the background. Call again with action get until state is ACTIVE, then action query." : undefined,
       raw: toGoogleDebugPayload(response)
     }, !response.ok);
+    // As an MCP task, keep checking until the export is ready (create returns an operation whose
+    // response names the export; get returns the export itself).
+    const exportResource = response.ok ? (response.body?.response || response.body) : null;
+    const exportName = params.action === "create"
+      ? JSON.stringify(response.body || {}).match(/properties\/\d+\/audienceExports\/[A-Za-z0-9_-]+/)?.[0]
+      : params.audienceExport;
+    const building = response.ok && ["create", "get"].includes(params.action) && Boolean(exportName) && !["ACTIVE", "FAILED"].includes(exportResource?.state);
+    return building ? withContinuation(toolResult, {
+      tool: "run_ga4_audience_export",
+      args: { propertyId: params.propertyId, action: "get", audienceExport: exportName },
+      statusMessage: `Audience export ${exportResource?.state === "CREATING" ? "building" : "starting"}${exportResource?.percentageCompleted ? ` (${Math.round(exportResource.percentageCompleted)}%)` : ""}`
+    }) : toolResult;
   }));
 
   server.registerTool("run_ga4_multi_property_report", {
@@ -7761,7 +7784,13 @@ function createServer(req) {
       }, !lastResponse?.ok);
     }));
 
-    const bigQueryResultPayload = (result, extra) => {
+    // A query still running becomes a task step that collects its results (see api/_tasks.js).
+    const stillRunning = (toolResult, summary, billingProjectId, params) => summary.jobComplete || !summary.jobId ? toolResult : withContinuation(toolResult, {
+      tool: "run_bigquery_ga4_query",
+      args: { billingProjectId, jobId: summary.jobId, ...(summary.location || params.location ? { location: summary.location || params.location } : {}), ...(params.maxResults ? { maxResults: params.maxResults } : {}) },
+      statusMessage: "BigQuery job running"
+    });
+    const bigQueryResultPayload = (result, extra, billingProjectId, params = {}) => {
       if (result.stage === "dry_run") return buildToolResult({ ...extra, error: "query_invalid", raw: toGoogleDebugPayload(result.response) }, true);
       if (result.stage === "dry_run_only") return buildToolResult({ ...extra, dryRun: true, cost: result.cost, maxBytesBilled: result.maxBytes, wouldRun: result.cost.bytesProcessed <= result.maxBytes });
       if (result.stage === "refused") {
@@ -7774,13 +7803,13 @@ function createServer(req) {
       }
       if (!result.response.ok) return buildToolResult({ ...extra, error: "query_failed", cost: result.cost, raw: toGoogleDebugPayload(result.response) }, true);
       const summary = summariseBigQueryRun(result);
-      return buildToolResult({
+      return stillRunning(buildToolResult({
         ...extra,
         requestCount: result.requestCount,
         cost: result.cost,
         ...summary,
         next: summary.jobComplete ? undefined : "The job is still running. Call run_bigquery_ga4_query with jobId to collect the results."
-      });
+      }), summary, billingProjectId, params);
     };
 
     server.registerTool("run_bigquery_ga4_query", {
@@ -7802,7 +7831,8 @@ function createServer(req) {
       if (params.jobId) {
         const response = await getBigQueryResults(googleCredentials.accessToken, params.billingProjectId, params.jobId, { ...params, timeoutMs: 30000 });
         if (!response.ok) return buildToolResult({ error: "results_failed", raw: toGoogleDebugPayload(response) }, true);
-        return buildToolResult({ jobId: params.jobId, ...summariseBigQueryRun({ response }) });
+        const summary = summariseBigQueryRun({ response });
+        return stillRunning(buildToolResult({ jobId: params.jobId, ...summary }), { ...summary, jobId: summary.jobId || params.jobId }, params.billingProjectId, params);
       }
       if (!params.sql) return buildToolResult({ error: "missing_sql", error_description: "Provide sql, or jobId to collect earlier results." }, true);
       try {
@@ -7811,7 +7841,7 @@ function createServer(req) {
         return buildToolResult({ error: "sql_not_allowed", error_description: error.message }, true);
       }
       const result = await executeBigQuerySql(googleCredentials.accessToken, params);
-      return bigQueryResultPayload(result, { billingProjectId: params.billingProjectId });
+      return bigQueryResultPayload(result, { billingProjectId: params.billingProjectId }, params.billingProjectId, params);
     }));
 
     server.registerTool("run_bigquery_ga4_preset", {
@@ -7841,7 +7871,7 @@ function createServer(req) {
       }
       const billingProjectId = params.billingProjectId || params.projectId;
       const result = await executeBigQuerySql(googleCredentials.accessToken, { ...params, sql, billingProjectId });
-      return bigQueryResultPayload(result, { preset: params.preset, description: BIGQUERY_GA4_PRESET_DEFINITIONS[params.preset], sql });
+      return bigQueryResultPayload(result, { preset: params.preset, description: BIGQUERY_GA4_PRESET_DEFINITIONS[params.preset], sql }, billingProjectId, params);
     }));
   }
 
@@ -8387,7 +8417,7 @@ function createServer(req) {
   }
   // Skills last, so each one is offered only where at least half of the tools it uses are on this connector.
   const registered = server._registeredTools || {};
-  registerSkills(server, { skills: SKILLS, isAvailable: skill => skill.tools.filter(name => registered[name]).length * 2 >= skill.tools.length });
+  await registerSkills(server, { skills: SKILLS, isAvailable: skill => skill.tools.filter(name => registered[name]).length * 2 >= skill.tools.length });
   return server;
 }
 
@@ -9610,20 +9640,27 @@ app.all(["/mcp", "/cbx", "/mcp/p/:slug"], async (req, res) => {
     req.extraCallRail = Boolean(req.profile.accounts?.callrail && req.profile.accounts.callrail !== "main");
   }
 
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true
-  });
-  const server = createServer(req);
-
+  // 2025-era clients (initialize handshake) are served exactly as before: stateless, one JSON response.
+  // 2026-07-28 clients (per-request envelope, server/discover) go to the SDK's modern handler.
+  // Both build the same server for this request's auth and profile.
   try {
-    res.on("close", () => {
-      transport.close().catch(() => {});
-      server.close().catch(() => {});
+    if (await isLegacyRequest(await toWebRequest(req, req.body), req.body)) {
+      const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      const server = await createServer(req);
+      res.on("close", () => {
+        transport.close().catch(() => {});
+        server.close().catch(() => {});
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
+    }
+    const handler = createMcpHandler(() => createServer(req, "modern"), {
+      legacy: "reject",
+      onerror: error => console.log(JSON.stringify({ type: "mcp_handler_error", message: error?.message }))
     });
-
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    res.on("close", () => { handler.close().catch(() => {}); });
+    await toNodeHandler(handler)(req, res, req.body);
   } catch (error) {
     const statusCode = error?.statusCode || 500;
     if (!res.headersSent) {

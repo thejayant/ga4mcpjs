@@ -174,7 +174,7 @@ export function registerGbpTools(server, { req, withVerifiedToolAuth, buildToolR
   add("gbp_get_media", "Get one business media item.", { ...legacyLocation, mediaId: id },
     (t, p) => call(t, "legacy", `${legacyPath(p)}/media/${gbpPathId(p.mediaId)}`));
   add("gbp_create_media_from_url", "Add a photo from a public HTTPS source URL. Video creation is not supported by this API version. Requires explicit confirmation.", {
-    ...legacyLocation, sourceUrl: z.string().url().startsWith("https://"), category: z.string().min(1), description: z.string().optional()
+    ...legacyLocation, sourceUrl: z.url({ protocol: /^https$/ }), category: z.string().min(1), description: z.string().optional()
   }, (t, p) => {
     if (p.category === "COVER" && p.description) throw new Error("Cover photos cannot have a description.");
     return call(t, "legacy", `${legacyPath(p)}/media`, { method: "POST", body: {

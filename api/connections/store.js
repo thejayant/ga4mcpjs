@@ -34,6 +34,8 @@ function redisStore({ url, token }) {
     get: key => command("GET", PREFIX + key),
     set: (key, value, { ttlSeconds } = {}) => ttlSeconds ? command("SET", PREFIX + key, value, "EX", String(ttlSeconds)) : command("SET", PREFIX + key, value),
     del: key => command("DEL", PREFIX + key),
+    // Sets the key only if it doesn't exist yet; true when this call set it (a lock).
+    setIfAbsent: async (key, value, ttlSeconds) => (await command("SET", PREFIX + key, value, "NX", "EX", String(ttlSeconds))) === "OK",
     // Writes only if the key still holds `expected`, so a background rewrite never undoes a newer save.
     replaceIf: (key, expected, value) => command("EVAL", "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('SET', KEYS[1], ARGV[2]) end return nil", "1", PREFIX + key, expected, value),
     addToSet: (key, member) => command("SADD", PREFIX + key, member),
@@ -51,6 +53,7 @@ export function memoryStore() {
     get: async key => live(key),
     set: async (key, value, { ttlSeconds } = {}) => { values.set(key, value); if (ttlSeconds) expiry.set(key, Date.now() + ttlSeconds * 1000); else expiry.delete(key); },
     del: async key => { values.delete(key); expiry.delete(key); },
+    setIfAbsent: async (key, value, ttlSeconds) => { if (live(key) !== null) return false; values.set(key, value); expiry.set(key, Date.now() + ttlSeconds * 1000); return true; },
     replaceIf: async (key, expected, value) => { if (live(key) === expected) values.set(key, value); },
     addToSet: async (key, member) => { if (!sets.has(key)) sets.set(key, new Set()); sets.get(key).add(member); },
     removeFromSet: async (key, member) => { sets.get(key)?.delete(member); },
@@ -129,6 +132,14 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
       await kv.removeFromSet(`profiles:${userId}`, slug);
       forgetProfiles(userId);
     },
+    // Long-running tool calls (MCP tasks), sealed and bound to their user like every other record.
+    getTask: (userId, taskId) => read(`task:${userId}:${taskId}`),
+    async saveTask(userId, taskId, record, ttlSeconds) {
+      const storageKey = `task:${userId}:${taskId}`;
+      await kv.set(storageKey, seal(record, storageKey), { ttlSeconds });
+    },
+    lockTask: (userId, taskId, ttlSeconds) => kv.setIfAbsent(`tasklock:${userId}:${taskId}`, "1", ttlSeconds),
+    unlockTask: (userId, taskId) => kv.del(`tasklock:${userId}:${taskId}`),
     // Short-lived cache for rate-limited providers (Clarity allows 10 requests a day).
     async cached(cacheKey, ttlSeconds, load) {
       const storageKey = `cache:${cacheKey}`;

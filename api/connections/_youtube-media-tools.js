@@ -11,6 +11,7 @@
 import { z } from "zod";
 import { youtubeData, youtubeDataWrite, youtubeRetry } from "./providers.js";
 import { isPublicHttpsUrl } from "./_youtube-tools.js";
+import { stepBudgetMs, withContinuation } from "../_tasks.js";
 
 export const YOUTUBE_MEDIA_TOOL_NAMES = [
   "youtube_upload_video", "youtube_continue_upload", "youtube_delete_video",
@@ -59,7 +60,7 @@ async function pushBytes(accessToken, sessionUrl, videoUrl, offset, knownTotal) 
   if (source.error) return { error: source.error };
   const total = knownTotal || source.total;
   if (!total) { await source.response.body?.cancel(); return { error: "The video URL does not report its size (Content-Length). Upload from your computer with the curl command instead." }; }
-  const deadline = AbortSignal.timeout(budgetMs());
+  const deadline = AbortSignal.timeout(stepBudgetMs() || budgetMs());
   try {
     const response = await fetch(sessionUrl, {
       method: "PUT", body: source.response.body, duplex: "half", signal: deadline,
@@ -87,6 +88,12 @@ const progress = (state, sessionUrl, videoUrl) => ({
   next: `Call youtube_continue_upload with this sessionUrl${videoUrl ? " and the same videoUrl" : ""} to keep going.`
 });
 
+// For task-capable clients: keep going with youtube_continue_upload on the next poll.
+const inProgress = (body, state, sessionUrl, videoUrl) => withContinuation(body, {
+  tool: "youtube_continue_upload", args: { sessionUrl, videoUrl },
+  statusMessage: state.total ? `Uploaded ${Math.floor((state.received / state.total) * 100)}% (${Math.round(state.received / 1e6)} of ${Math.round(state.total / 1e6)} MB)` : "Uploading"
+});
+
 // Captions upload as multipart/related: JSON metadata, then the caption file.
 function multipart(metadata, text) {
   const boundary = `cap${Math.random().toString(36).slice(2)}`;
@@ -104,7 +111,7 @@ export function registerYouTubeMediaTools(server, { forUser, reply, result, miss
 
   server.registerTool("youtube_upload_video", {
     title: "YouTube Upload Video",
-    description: "Upload a new video to the connected channel with its title, description, tags, category, privacy, optional scheduled publish time and made-for-kids setting. With videoUrl (a public https link with a known size, e.g. a direct Dropbox/Drive/S3 link) the server streams it; big files continue with youtube_continue_upload. Without videoUrl it opens an upload session and returns a curl command to upload straight from the user's computer (best for large PS5 recordings). Uses about 100 quota units. Confirm the title, description and privacy with the user before calling.",
+    description: "Upload a new video to the connected channel with its title, description, tags, category, privacy, optional scheduled publish time and made-for-kids setting. With videoUrl (a public https link with a known size, e.g. a direct Dropbox/Drive/S3 link) the server streams it; big files continue with youtube_continue_upload (clients that support MCP tasks get one background task instead). Without videoUrl it opens an upload session and returns a curl command to upload straight from the user's computer (best for large PS5 recordings). Uses about 100 quota units. Confirm the title, description and privacy with the user before calling.",
     inputSchema: {
       title: z.string().min(1).max(100).refine(noAngles, "Cannot contain < or >"),
       description: z.string().max(5000).refine(noAngles, "Cannot contain < or >").optional(),
@@ -167,7 +174,7 @@ export function registerYouTubeMediaTools(server, { forUser, reply, result, miss
     const pushed = await pushBytes(accessToken, sessionUrl, args.videoUrl, 0, size);
     if (pushed.done) return result(finished(pushed.video, privacy));
     if (pushed.error && !pushed.resumable && pushed.received === undefined) return result({ error: "upload_failed", error_description: pushed.error, sessionUrl }, true);
-    return result(progress(pushed, sessionUrl, args.videoUrl));
+    return inProgress(result(progress(pushed, sessionUrl, args.videoUrl)), pushed, sessionUrl, args.videoUrl);
   }));
 
   server.registerTool("youtube_continue_upload", {
@@ -193,7 +200,7 @@ export function registerYouTubeMediaTools(server, { forUser, reply, result, miss
     const pushed = await pushBytes(accessToken, args.sessionUrl, args.videoUrl, state.received, total);
     if (pushed.done) return result(finished(pushed.video));
     if (pushed.error && pushed.received === undefined && !pushed.resumable) return result({ error: "upload_failed", error_description: pushed.error, sessionUrl: args.sessionUrl }, true);
-    return result(progress(pushed, args.sessionUrl, args.videoUrl));
+    return inProgress(result(progress(pushed, args.sessionUrl, args.videoUrl)), pushed, args.sessionUrl, args.videoUrl);
   }));
 
   /* ---------------- Delete ---------------- */

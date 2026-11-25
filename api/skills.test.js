@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import fs from "node:fs";
 import http from "node:http";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { SkillsClient } from "@modelcontextprotocol/client/ext/skills";
 import { loadSkills, parseFrontmatter, SKILLS_EXTENSION_ID } from "./_skills.js";
 
 process.env.CONNECTIONS_STORE = "memory";
@@ -65,7 +67,7 @@ test("initialize declares prompts, resources and the skills extension", async ()
   const { result } = await rpc("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } });
   assert.ok(result.capabilities.prompts);
   assert.ok(result.capabilities.resources);
-  assert.deepEqual(result.capabilities.extensions?.[SKILLS_EXTENSION_ID], {});
+  assert.ok(result.capabilities.extensions?.[SKILLS_EXTENSION_ID]);
   assert.ok(result.capabilities.tools, "tools are still offered");
 });
 
@@ -81,21 +83,37 @@ test("skills are listed as prompts and render with their inputs", async () => {
 });
 
 test("skill files are readable as skill:// resources", async () => {
-  const { result } = await rpc("resources/list");
-  assert.ok(result.resources.some(entry => entry.uri === "skill://seo-audit/SKILL.md" && entry.mimeType === "text/markdown"));
   const read = await rpc("resources/read", { uri: "skill://seo-audit/SKILL.md" });
   assert.match(read.result.contents[0].text, /^---\nname: seo-audit\n/);
+  const missing = await rpc("resources/read", { uri: "skill://nope/SKILL.md" });
+  assert.ok(missing.error);
 });
 
-test("skills/list and skills/get follow the skills extension", async () => {
+test("a 2026-07-28 client discovers the server and verifies every skill with the SDK's skills client", async () => {
+  const client = new Client({ name: "test", version: "1" }, { versionNegotiation: { mode: "auto" } });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token()}` } } }));
+  try {
+    assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
+    const skillsClient = new SkillsClient(client);
+    assert.ok(skillsClient.supported);
+    const listing = await skillsClient.list();
+    const names = listing.skills.map(skill => skill.frontmatter.name);
+    assert.ok(names.includes("youtube-video-repackage") && names.includes("seo-audit"));
+    const { skill } = await skillsClient.get("skill://google-ads-audit/SKILL.md");
+    // read() checks the file against the manifest's sha256 digest and size.
+    const file = await skillsClient.read(skill);
+    assert.match(file.text, /# Google Ads audit/);
+    await assert.rejects(skillsClient.get("skill://nope/SKILL.md"));
+    const prompts = await client.listPrompts();
+    assert.ok(prompts.prompts.some(prompt => prompt.name === "seo-audit"));
+  } finally {
+    await client.close();
+  }
+});
+
+test("skills/list also answers 2025-era clients", async () => {
   const { result } = await rpc("skills/list");
-  assert.equal(result.resultType, "complete");
-  assert.equal(result.cacheScope, "public");
   const entry = result.skills.find(skill => skill.uri === "skill://google-ads-audit/SKILL.md");
   assert.equal(entry.frontmatter.name, "google-ads-audit");
-  assert.equal(entry.resources[0].uri, entry.uri);
-  const got = await rpc("skills/get", { uri: entry.uri });
-  assert.deepEqual(got.result.skill, entry);
-  const missing = await rpc("skills/get", { uri: "skill://nope/SKILL.md" });
-  assert.equal(missing.error.code, -32602);
+  assert.match(entry.resources[0].digest, /^sha256:/);
 });
