@@ -270,13 +270,29 @@ Keyword Planner is part of the Google Ads API and needs nothing extra to enable.
 - Meta support covers three separate surfaces through one connector: Meta Ads (Marketing API insights), Facebook Page organic insights, and Instagram business insights. `query_meta_graph` is the raw escape hatch.
 - The expert preset layer is designed for common analyst workflows, while the raw tools remain available for deeper custom work.
 
+## Protocol versions and tasks
+
+The server runs MCP TypeScript SDK v2 (`@modelcontextprotocol/server`). Each POST to `/mcp` is classified first:
+
+- **2025-era clients** (the `initialize` handshake): served exactly as before, statelessly, one JSON response per request.
+- **2026-07-28 clients** (`server/discover` and the per-request `_meta` envelope): served by the SDK's `createMcpHandler`, with the same tools, prompts, resources and skills.
+
+**Tasks** (`io.modelcontextprotocol/tasks`, 2026-07-28 only) let long tool calls run in the background, without background workers. A tool returns its normal result plus a continuation (`withContinuation` in `api/_tasks.js`). For a client that declared the tasks extension, that result becomes a task stored in Redis. Each `tasks/get` poll runs the next slice of work, by default up to `TASK_STEP_BUDGET_MS` (25 s), and saves where it got to. Every other client gets the original result and continues by hand, as before. Tasks are sealed per user, kept for 24 hours, and locked so two polls never run the same slice at once.
+
+The tools that can run as tasks are:
+
+- `youtube_upload_video` with `videoUrl`, and `youtube_continue_upload`: keep streaming until YouTube has the whole file.
+- `run_ga4_audience_export` (`create` or `get`): keep checking until the export is `ACTIVE`.
+
+To make another tool task-capable, add it to `TASK_TOOL_NAMES` and return `withContinuation(result, { tool, args, statusMessage })` while there is more to do. Steps must be idempotent. `api/tasks.test.js` checks the wire shapes against the official `@modelcontextprotocol/ext-tasks` schemas.
+
 ## Skills and prompts
 
-`skills/<name>/SKILL.md` holds expert playbooks (YouTube video repackage, SEO audit, GA4 performance review, Google Ads audit, Meta ads review, local business growth, Merchant Center health). `api/_skills.js` serves each one three ways, so every client gets it:
+`skills/<name>/SKILL.md` holds expert playbooks (YouTube video repackage, SEO audit, GA4 performance review, Google Ads audit, Meta ads review, local business growth, Merchant Center health). `api/_skills.js` serves each one in these ways, so every client gets it:
 
 - **Prompts** (`prompts/list`, `prompts/get`): the playbook with its optional inputs filled in. Works in nearly every MCP client.
-- **Resources** (`skill://<name>/SKILL.md`, `text/markdown`).
-- **Skills extension** (`io.modelcontextprotocol/skills`: `skills/list`, `skills/get`, declared under `capabilities.extensions`), for hosts that load skills on demand.
+- **Resources** (`skill://<name>/SKILL.md`, `text/markdown`), from the same catalog.
+- **Skills extension** (`io.modelcontextprotocol/skills`: `skills/list`, `skills/get`, `resources/directory/read`), served by the SDK's `SkillsExtension` catalog. 2026-07-28 clients find it in `server/discover`, and older clients in the `initialize` capabilities.
 
 A skill is offered only where at least half of the tools in its `metadata.tools` are on that connector, so a profile without YouTube doesn't get the YouTube skill. To add one, create `skills/<name>/SKILL.md` with `name` (matching the folder), `description` (say when to use it) and `metadata.tools`; `api/skills.test.js` fails if it names a tool or preset the server doesn't have. Tools are unchanged.
 

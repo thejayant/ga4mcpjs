@@ -18,6 +18,7 @@ import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
 import { gbpRequest } from "../MCP GBP/client.js";
 import { loadSkills, registerSkills } from "./_skills.js";
+import { enableTasks, withContinuation } from "./_tasks.js";
 
 // Every outbound call gets a deadline, so one hung upstream request fails clearly instead of
 // holding the function until the platform kills it. 50s leaves room for BigQuery's 45s wait.
@@ -5658,8 +5659,18 @@ async function toolAccounts(req, family) {
 // Loaded once per cold start; see skills/ and api/_skills.js.
 const SKILLS = loadSkills();
 
-async function createServer(req) {
+// Tools that can run as MCP tasks for clients that support them (see api/_tasks.js).
+const TASK_TOOL_NAMES = new Set(["youtube_upload_video", "youtube_continue_upload", "run_ga4_audience_export"]);
+
+// `era` is "modern" for 2026-07-28 requests and "legacy" for 2025-era ones (initialize handshake).
+async function createServer(req, era = "legacy") {
   const server = new McpServer({ name: "marketing-data-mcp", version: "2.0.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
+  // Before routeToolsByAccount, so a task step calls the tool exactly as the client did (account routing included).
+  if (era === "modern" && connectionStore) enableTasks(server, {
+    store: connectionStore,
+    taskTools: TASK_TOOL_NAMES,
+    userId: async () => (await verifyMcpAccessToken(req, []).catch(() => null))?.userId
+  });
   routeToolsByAccount(server, req);
   if (isFeatureEnabled("ENABLE_MARKETING_DASHBOARD")) registerDashboard(server, {
     req, withVerifiedToolAuth, buildToolResult,
@@ -7013,12 +7024,24 @@ async function createServer(req) {
     } catch (error) {
       return buildToolResult({ error: "invalid_audience_export_request", error_description: error.message }, true);
     }
-    return buildToolResult({
+    const toolResult = buildToolResult({
       propertyId: normalizePropertyName(params.propertyId),
       action: params.action,
       hint: params.action === "create" ? "The export builds in the background. Call again with action get until state is ACTIVE, then action query." : undefined,
       raw: toGoogleDebugPayload(response)
     }, !response.ok);
+    // As an MCP task, keep checking until the export is ready (create returns an operation whose
+    // response names the export; get returns the export itself).
+    const exportResource = response.ok ? (response.body?.response || response.body) : null;
+    const exportName = params.action === "create"
+      ? JSON.stringify(response.body || {}).match(/properties\/\d+\/audienceExports\/[A-Za-z0-9_-]+/)?.[0]
+      : params.audienceExport;
+    const building = response.ok && ["create", "get"].includes(params.action) && Boolean(exportName) && !["ACTIVE", "FAILED"].includes(exportResource?.state);
+    return building ? withContinuation(toolResult, {
+      tool: "run_ga4_audience_export",
+      args: { propertyId: params.propertyId, action: "get", audienceExport: exportName },
+      statusMessage: `Audience export ${exportResource?.state === "CREATING" ? "building" : "starting"}${exportResource?.percentageCompleted ? ` (${Math.round(exportResource.percentageCompleted)}%)` : ""}`
+    }) : toolResult;
   }));
 
   server.registerTool("run_ga4_multi_property_report", {
@@ -9625,7 +9648,7 @@ app.all(["/mcp", "/cbx", "/mcp/p/:slug"], async (req, res) => {
       await transport.handleRequest(req, res, req.body);
       return;
     }
-    const handler = createMcpHandler(() => createServer(req), {
+    const handler = createMcpHandler(() => createServer(req, "modern"), {
       legacy: "reject",
       onerror: error => console.log(JSON.stringify({ type: "mcp_handler_error", message: error?.message }))
     });
