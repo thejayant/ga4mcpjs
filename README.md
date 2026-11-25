@@ -130,6 +130,7 @@ Optional:
 - `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
 - `META_LOGIN_CONFIG_ID` to use a Facebook Login for Business configuration instead of a raw scope list (recommended)
 - `ENABLE_GBP=1` to expose Google Business Profile tools and request the `business.manage` scope
+- `CRON_SECRET` to let Vercel Cron run the daily Clarity snapshot job (`/cron/clarity-snapshots`, see Clarity notes); without it the job refuses to run
 
 You can copy `.env.example` locally and fill in your values.
 
@@ -292,7 +293,7 @@ To make another tool task-capable, add it to `TASK_TOOL_NAMES` and return `withC
 
 ## Skills and prompts
 
-`skills/<name>/SKILL.md` holds expert playbooks (YouTube video repackage, SEO audit, GA4 performance review, Google Ads audit, Meta ads review, local business growth, Merchant Center health). `api/_skills.js` serves each one in these ways, so every client gets it:
+`skills/<name>/SKILL.md` holds expert playbooks (YouTube video repackage, SEO audit, GA4 performance review, Google Ads audit, Meta ads review, local business growth, Merchant Center health, Clarity UX review). `api/_skills.js` serves each one in these ways, so every client gets it:
 
 - **Prompts** (`prompts/list`, `prompts/get`): the playbook with its optional inputs filled in. Works in nearly every MCP client.
 - **Resources** (`skill://<name>/SKILL.md`, `text/markdown`), from the same catalog.
@@ -529,6 +530,14 @@ YouTube is connected on the Connections page (Google sign-in with `youtube.force
 **Uploads** use YouTube's resumable protocol. With `videoUrl` (public https, must report its size) the server streams the file for up to `YOUTUBE_UPLOAD_BUDGET_MS` (default 50 s, safe on every Vercel plan) and returns a `sessionUrl`; `youtube_continue_upload` resumes from the byte YouTube has (the source must support Range requests). Raise the budget to about 240000 if the project uses Fluid compute (300 s functions). Without `videoUrl` the tool returns a `curl` command that uploads straight from your computer, best for large recordings. Projects that haven't passed YouTube's API audit have uploads locked to private; the tool says so when it happens.
 
 Every edit reads the current resource first and sends untouched fields back, because YouTube replaces whole parts (`snippet`, `status`, `brandingSettings`) on update. Busy responses (409 ABORTED, 5xx) are retried twice; comment replies are not retried so they can't post twice. Daily Data API quota is 10,000 units: reads 1, writes ~50, thumbnails 50, search 100.
+
+## Microsoft Clarity notes
+
+- **Several projects.** Each Clarity project has its own Data Export token, so each is added separately on the Connections page (up to 20, stored as `clarity:<hash of the token>`; a project connected earlier as plain `clarity` keeps working). Every Clarity tool takes an optional `project` (name, site or Clarity project ID); with one project it is never needed, with several the tool asks which. `clarity_list_projects` lists them with a private link to add another. A profile can be set to one project, and its connector then hides `project`.
+- **Two APIs, one token.** The Data Export API (`clarity.ms/export-data`) gives metrics for the last 1 to 3 days by up to three dimensions, **10 requests a day per project** and at most 1,000 rows. Clarity's MCP API (`clarity.microsoft.com/mcp`, the one Microsoft's own `@microsoft/clarity-mcp-server` calls) accepts the same token for session recordings and plain-language dashboard queries over any date range, with its own daily limit.
+- **Reports.** `clarity_friction_report` (product page friction by device), `clarity_funnel_report` (step reach by URL or Smart Event, default Mobile; not a strict ordered funnel, so pair it with `run_ga4_funnel_report`), `clarity_campaign_scorecard` (campaigns and campaign × page, flagged against the site average, with a ready GA4 call for key events), `clarity_period_report` (7, 14 or 28 days against the period before), `clarity_recordings` (review queue with links) and `clarity_heatmap_review`. The friction, funnel and heatmap reports share one cached URL × device pull (one hour), so together they usually cost one Data Export request. The `clarity-ux-review` skill runs them in order.
+- **No heatmap API.** Neither API returns click or scroll maps. `clarity_heatmap_review` combines the page's scroll depth and friction, a recording sample (with the share of sampled sessions that clicked a CTA's text) and a link to the heatmap. Deep links need the project ID, an optional field when adding the project.
+- **Daily snapshots.** Vercel Cron calls `/cron/clarity-snapshots` at 00:30 UTC (`vercel.json`); it spends one of each project's 10 requests on the last 24 hours by device and stores the totals encrypted for 400 days. That is what `clarity_period_report` compares, because the API can't reach back 14 days. Projects opt out by unticking the box when they are added; disconnecting a project deletes its snapshots. Set `CRON_SECRET` in Vercel (it sends it as a bearer token). Before 28 days of snapshots exist, use `clarity_dashboard_query` with explicit dates, or the dashboard's CSV export.
 
 ## CallRail notes
 

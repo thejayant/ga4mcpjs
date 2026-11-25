@@ -3,6 +3,9 @@
   "functions": {
     "api/index.js": { "includeFiles": "{dashboard/dist/**,plugin/marketer-companion-dashboard/**,skills/**}" }
   },
+  "crons": [
+    { "path": "/cron/clarity-snapshots", "schedule": "30 0 * * *" }
+  ],
   "rewrites": [
     {
       "source": "/(.*)",
