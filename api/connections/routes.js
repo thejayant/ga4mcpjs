@@ -10,14 +10,20 @@ import { PROVIDERS, publicConnection, baseProvider } from "./providers.js";
 import { oauthReady, authorizeUrl, exchangeCode, STATE_TTL_MS, CALLBACK_PATH } from "./oauth.js";
 import { PROFILE_FAMILIES, PROFILE_DEFAULTS, MAX_PROFILES, SLUG_PATTERN, buildProfile } from "./profiles.js";
 import { ANIME_PATH, accountChoices, clarityChoices, page, platformChoices, youtubeChoices } from "./_page.js";
+import { splitUserId } from "./_assistants.js";
 
 // Anime.js for the page's motion, served from this server (no third-party request from a page that
 // holds a private link). Missing file: the page still works, without animation.
-let animeScript = null;
-try {
-  const root = path.dirname(createRequire(import.meta.url).resolve("animejs/package.json"));
-  animeScript = fs.readFileSync(path.join(root, "dist/bundles/anime.umd.min.js"));
-} catch { /* served as 404 */ }
+const ANIME_FILE = "node_modules/animejs/dist/bundles/anime.umd.min.js";
+function loadAnime() {
+  const candidates = [path.join(process.cwd(), ANIME_FILE), new URL(`../../${ANIME_FILE}`, import.meta.url)];
+  try { candidates.push(path.join(path.dirname(createRequire(import.meta.url).resolve("animejs/package.json")), "dist/bundles/anime.umd.min.js")); } catch { /* not resolvable here */ }
+  for (const file of candidates) {
+    try { return fs.readFileSync(file); } catch { /* try the next place */ }
+  }
+  return null;
+}
+const animeScript = loadAnime();
 
 export const LINK_TTL_MS = 30 * 60 * 1000;
 
@@ -70,11 +76,28 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
       : saved ? `Profile “${saved}” saved. Copy its connector URL into your assistant.` : deleted ? `Profile “${deleted}” deleted. Remove its connector from your assistant too.` : null;
     const kind = req.query.error ? "error" : req.query.refreshed || req.query.main ? "info" : "success";
     const info = await store.getAccountInfo(link.userId);
+    // Connections are kept per assistant; ones made before that wait to be moved to one of them.
+    const who = splitUserId(link.userId);
+    const earlier = who ? (await store.list(who.account)).length + (await store.listProfiles(who.account)).length : 0;
+    const moved = req.query.moved !== undefined ? Number(req.query.moved) || 0 : null;
+    const message = moved !== null ? `Moved ${moved} connection${moved === 1 ? "" : "s"} to ${who?.name || "this assistant"}. Other assistants no longer see them.` : text;
     send(res, 200, page(req.query.t, await current(link.userId), {
       profiles: await store.listProfiles(link.userId), base: baseUrl(req), mainGoogle: info?.googleEmail || null,
-      linkExpiresAt: new Date(link.exp).toISOString(),
-      toast: text ? { kind, text, provider: req.query.error ? failedOn : connectedId && !req.query.main ? connectedId : null } : null
+      linkExpiresAt: new Date(link.exp).toISOString(), assistant: who?.name || null, earlier,
+      toast: message ? { kind: moved !== null ? "success" : kind, text: message, provider: req.query.error ? failedOn : connectedId && !req.query.main ? connectedId : null } : null
     }));
+  });
+
+  // Moves connections made before they were kept per assistant into this assistant's store.
+  // Registered before /connections/:provider so "claim" is never read as a platform.
+  app.post("/connections/claim", async (req, res) => {
+    if (!store) return unavailable(res);
+    const link = readLink(open, req.query.t);
+    if (!link) return expired(res);
+    const who = splitUserId(link.userId);
+    if (!who) return res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}`);
+    const moved = await store.moveUser(who.account, link.userId);
+    res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}&moved=${moved}`);
   });
 
   // Profiles. Registered before /connections/:provider so "profiles" is never read as a platform.

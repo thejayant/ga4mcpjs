@@ -10,6 +10,7 @@ import { DASHBOARD_TOOLS, registerDashboard } from "../dashboard/server.js";
 import { registerPublicPages } from "./pages.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createConnectionStore } from "./connections/store.js";
+import { assistantFor, scopedUserId, storeUserId } from "./connections/_assistants.js";
 import { PROFILE_FAMILIES, PROFILE_PREFIX, SLUG_PATTERN, findProfile, profileInstructions, profileShape, profileToolAllowed, registerRunAcrossProfiles } from "./connections/profiles.js";
 import { registerConnectionRoutes } from "./connections/routes.js";
 import { registerClaritySnapshotRoute } from "./connections/_clarity.js";
@@ -2053,8 +2054,9 @@ async function verifyMcpAccessToken(req, requiredScopes = []) {
     googleCredentials,
     metaCredentials,
     callrailToken: payload.callrail?.apiToken || null,
-    // Anonymous, stable per Google account; null for connections made before it existed.
-    userId: session.userId || payload.google?.userId || null,
+    // Anonymous, stable per Google account and assistant; null for sign-ins made before it existed
+    // or before connections were kept per assistant (those are asked to reconnect once).
+    userId: storeUserId(session.userId || payload.google?.userId || null),
     internalAccessKeyId: payload.internalAccessKeyId || null,
     sessionId,
     verifiedScopesKey: requiredScopes.join(" ")
@@ -8730,7 +8732,11 @@ app.get("/auth/google/callback", async (req, res) => {
     }
 
     const grantedScopes = normalizeGoogleAuthScopes(tokens.scope || appState.scope);
-    const { userId, email: googleEmail } = await googleIdentity(oauthClient, tokens.id_token);
+    // Connections are kept per assistant: the same Google account in Claude and in ChatGPT gets
+    // separate stores (see connections/_assistants.js).
+    const identity = await googleIdentity(oauthClient, tokens.id_token);
+    const userId = scopedUserId(identity.userId, assistantFor(appState.clientRedirectUri));
+    const googleEmail = identity.email;
     if (connectionStore && userId && googleEmail) await connectionStore.saveAccountInfo(userId, { googleEmail }).catch(() => {});
     const sessionId = crypto.randomUUID();
     saveSession(sessionId, {

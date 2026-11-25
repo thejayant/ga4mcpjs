@@ -134,6 +134,36 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
       await kv.removeFromSet(`profiles:${userId}`, slug);
       forgetProfiles(userId);
     },
+    /**
+     * Moves everything a user ID holds (connections, Clarity snapshots, profiles) to another user ID,
+     * then deletes it from the first. Used once per account when connections became per assistant.
+     * Entries the target already has are kept and the old copy is dropped. Returns how many moved.
+     */
+    async moveUser(from, to) {
+      const existing = new Set(await this.list(to));
+      const targets = new Set(await kv.members("clarity-snapshots"));
+      let moved = 0;
+      for (const id of await this.list(from)) {
+        const record = await this.get(from, id);
+        if (record && !existing.has(id)) {
+          await this.save(to, id, record);
+          if (String(id).startsWith("clarity")) {
+            for (const date of await kv.members(`snaps:${from}:${id}`)) {
+              const snapshot = await this.getSnapshot(from, id, date);
+              if (snapshot) await this.saveSnapshot(to, id, date, snapshot);
+            }
+            if (targets.has(`${from}|${id}`)) await this.addSnapshotTarget(to, id);
+          }
+          moved++;
+        }
+        await this.remove(from, id);
+      }
+      for (const profile of await this.listProfiles(from)) {
+        if (!(await this.getProfile(to, profile.slug))) { await this.saveProfile(to, profile); moved++; }
+        await this.removeProfile(from, profile.slug);
+      }
+      return moved;
+    },
     // Long-running tool calls (MCP tasks), sealed and bound to their user like every other record.
     getTask: (userId, taskId) => read(`task:${userId}:${taskId}`),
     async saveTask(userId, taskId, record, ttlSeconds) {

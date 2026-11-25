@@ -11,6 +11,7 @@ import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
 import { CLARITY_TOOL_NAMES, MAX_CLARITY_PROJECTS, clarityLinks, listClarityProjects, projectSummary, registerClarityTools } from "./_clarity.js";
 import { ANY_CHANNEL_TOOLS, MAX_YOUTUBE_CHANNELS, channelSummary, listYouTubeChannels, pickYouTubeChannel } from "./_youtube-channels.js";
+import { splitUserId } from "./_assistants.js";
 
 export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", ...CLARITY_TOOL_NAMES,
   "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video",
@@ -119,7 +120,11 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     const mainGoogle = (await store.getAccountInfo(auth.userId))?.googleEmail || null;
     const youtubeChannels = (await listYouTubeChannels(store, auth.userId)).map(channelSummary);
     const clarityProjects = (await listClarityProjects(store, auth.userId)).map(project => ({ ...projectSummary(project), links: clarityLinks(project) }));
-    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, clarity: { projects: clarityProjects, limit: MAX_CLARITY_PROJECTS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
+    // Connections are kept per assistant; ones made before that can be moved here from the page.
+    const who = splitUserId(auth.userId);
+    const earlier = who ? (await store.list(who.account)).length + (await store.listProfiles(who.account)).length : 0;
+    const scope = { assistant: who?.name || null, ...(earlier ? { earlierConnections: earlier, earlierNote: `${earlier} connection(s) from before each assistant kept its own are waiting. Open manageUrl and choose "Move them here" to use them in ${who.name}.` } : {}) };
+    return result({ ...scope, ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, clarity: { projects: clarityProjects, limit: MAX_CLARITY_PROJECTS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
   }));
 
   server.registerTool("bing_webmaster_sites", {

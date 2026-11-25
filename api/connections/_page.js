@@ -196,7 +196,7 @@ function profilesSection(q, base, profiles, connections, mainGoogle) {
 
 /* ---------------- Page ---------------- */
 // `toast` is { kind: "success" | "error" | "info", text, provider? } for the result of the last action.
-export function page(t, connections, { toast, profiles = [], base = "", mainGoogle = null, linkExpiresAt = null } = {}) {
+export function page(t, connections, { toast, profiles = [], base = "", mainGoogle = null, linkExpiresAt = null, assistant = null, earlier = 0 } = {}) {
   const q = `?t=${encodeURIComponent(t)}`;
   const ids = [...ORDER.filter(id => PROVIDERS[id]), ...Object.keys(PROVIDERS).filter(id => !ORDER.includes(id))];
   const accountCount = Object.keys(connections).length + 1;
@@ -207,9 +207,14 @@ export function page(t, connections, { toast, profiles = [], base = "", mainGoog
 <script>if (!matchMedia("(prefers-reduced-motion: reduce)").matches) { document.documentElement.classList.add("pre"); setTimeout(() => document.documentElement.classList.remove("pre"), 2500); }</script>
 <div class="cx">
   <section class="hero">
-    <div><h1>Connections</h1><p class="lead">Link the accounts your assistant can use. Keys are encrypted and never shown again.</p></div>
+    <div><h1>Connections</h1><p class="lead">Link the accounts ${assistant ? escapeHtml(assistant) : "your assistant"} can use. ${assistant ? `Only ${escapeHtml(assistant)} sees them` : "Only this assistant sees them"}; keys are encrypted and never shown again.</p>
+      <div class="who">${assistant ? `<span class="pill">${ICON.layers}<span>${escapeHtml(assistant)} only</span></span>` : ""}${mainGoogle ? `<span class="pill">${logoImg(BRAND_MARKS.google, "mini")}<span>Signed in as ${escapeHtml(mainGoogle)}</span></span>` : ""}</div></div>
     <p class="expiry" ${linkExpiresAt ? `data-expires="${linkExpiresAt}"` : ""}>${ICON.lock}<span>Private link<span class="left">, valid for 30 minutes</span></span></p>
   </section>
+  ${earlier ? `<section class="claim" aria-labelledby="claim-title"><span class="claim-icon">${ICON.layers}</span>
+    <div><h2 id="claim-title">Move your earlier connections here?</h2><p>${earlier} connection${earlier === 1 ? "" : "s"} from before each assistant kept its own. Move them to ${escapeHtml(assistant || "this assistant")} and your other assistants won’t see them.</p></div>
+    <form method="post" action="/connections/claim${q}" data-loading="Moving…" data-confirm="Move ${earlier} connection${earlier === 1 ? "" : "s"} to ${escapeHtml(assistant || "this assistant")}?" data-confirm-detail="Only ${escapeHtml(assistant || "this assistant")} will see them. Your other assistants start with their own, empty list." data-confirm-action="Move here">
+      <button type="submit" class="btn primary">${ICON.check}<span>Move them here</span></button></form></section>` : ""}
   <dl class="stats">
     <div><dt>Accounts</dt><dd data-count="${accountCount}">${accountCount}</dd></div>
     <div><dt>Platforms</dt><dd data-count="${platformCount}">${platformCount}</dd></div>
@@ -240,6 +245,15 @@ body{--ok:#1f8f53;--ok-soft:color-mix(in srgb,var(--ok) 12%,transparent);--bad:#
 .hero{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px 24px;margin:4px 0 18px}
 .hero h1{font-size:34px;margin:0 0 6px}
 .hero .lead{margin:0;max-width:560px}
+.who{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:12.5px;font-weight:600;color:var(--ink-2);overflow-wrap:anywhere}
+.pill .ico{width:14px;height:14px;color:var(--accent)}
+.claim{display:flex;flex-wrap:wrap;align-items:center;gap:14px 18px;margin:0 0 24px;padding:16px 18px;border-radius:var(--r);border:1px solid color-mix(in srgb,var(--accent) 45%,var(--border));background:color-mix(in srgb,var(--accent) 8%,var(--surface))}
+.claim>div{flex:1 1 260px}
+.claim h2{margin:0 0 2px;font-size:16.5px}
+.claim p{margin:0;font-size:13.5px}
+.claim form{margin:0}
+.claim-icon{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:var(--accent);color:#fff;flex:none}
 .expiry{display:inline-flex;align-items:center;gap:8px;margin:0;padding:7px 12px;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:13px;font-weight:600;color:var(--ink-2);font-variant-numeric:tabular-nums}
 .expiry .ico{width:15px;height:15px;color:var(--accent)}
 .expiry.soon{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
@@ -252,7 +266,8 @@ body{--ok:#1f8f53;--ok-soft:color-mix(in srgb,var(--ok) 12%,transparent);--bad:#
 .section{margin:0 0 34px}
 .section-head h2{margin:0 0 4px}
 .section-head p{margin:0 0 14px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;align-items:start}
+.grid{columns:3 300px;column-gap:14px}
+.grid>.pcard{break-inside:avoid;margin:0 0 14px;width:100%}
 .pcard{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;gap:12px;transition:border-color .25s,box-shadow .25s,transform .25s}
 .pcard:hover{box-shadow:0 10px 30px -18px rgba(0,0,0,.35);transform:translateY(-1px)}
 .pcard.is-on{border-color:color-mix(in srgb,var(--ok) 30%,var(--border))}
@@ -329,7 +344,8 @@ legend{font-size:13px;font-weight:650;padding:0 4px}
 .steps{list-style:none;padding:0;margin:0 0 16px;display:flex;flex-wrap:wrap;gap:10px}
 .steps li{display:flex;align-items:center;gap:8px;margin:0;padding:7px 14px 7px 7px;border-radius:999px;background:var(--surface);border:1px solid var(--border);font-size:13.5px;font-weight:600;color:var(--ink)}
 .steps li span{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:12.5px}
-.profiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;align-items:start}
+.profiles{columns:2 340px;column-gap:14px}
+.profiles>.profile{break-inside:avoid;margin:0 0 14px;width:100%}
 .profile{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px;display:flex;flex-direction:column;gap:12px}
 .profile.new{border-style:dashed}
 .profile-head{display:flex;align-items:center;gap:10px}
@@ -369,6 +385,6 @@ legend{font-size:13px;font-weight:650;padding:0 4px}
 .redirect p{margin:0;font-weight:650;color:var(--ink)}
 .dots{display:flex;gap:7px}
 .dots i{width:9px;height:9px;border-radius:50%;background:var(--accent)}
-@media (max-width:560px){.hero h1{font-size:28px}.stats dd{font-size:22px}.grid,.profiles{grid-template-columns:1fr}}
+@media (max-width:560px){.hero h1{font-size:28px}.stats dd{font-size:22px}.stats{gap:8px}.stats div{padding:12px}}
 @media (prefers-reduced-motion:reduce){.pcard,.btn,.icon-btn{transition:none}}
 `;
