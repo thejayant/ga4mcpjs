@@ -47,6 +47,14 @@ export async function clarityInsights(token, { numOfDays = 3, dimensions = [] } 
   return getJson(url.toString(), { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } });
 }
 
+// Microsoft's Clarity MCP API (the one behind @microsoft/clarity-mcp-server) accepts the same
+// project Data Export token: session recordings and natural-language dashboard queries over any
+// date range. It has its own daily request limit, separate from the Data Export API's 10.
+export const CLARITY_MCP_BASE = "https://clarity.microsoft.com/mcp";
+export async function clarityMcp(token, path, body) {
+  return getJson(`${CLARITY_MCP_BASE}${path}`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) });
+}
+
 /* ---------------- YouTube ---------------- */
 
 // YouTube Analytics answers in columnHeaders + rows; turn each row into an object.
@@ -147,17 +155,23 @@ export const PROVIDERS = {
   clarity: {
     name: "Microsoft Clarity",
     category: "Behaviour analytics",
+    // One connection per Clarity project (each project has its own token), up to 20.
+    multi: true,
+    maxConnections: 20,
     fields: [
       { key: "token", label: "Data Export API token", secret: true, placeholder: "eyJ…" },
-      { key: "project", label: "Project name (for your reference)", placeholder: "getcarports.com", optional: true }
+      { key: "project", label: "Project name (for your reference)", placeholder: "getcarports.com", optional: true },
+      { key: "projectId", label: "Project ID, from the address bar: clarity.microsoft.com/projects/view/<ID>/… (adds dashboard, heatmap and recording links)", placeholder: "abc123xyz", optional: true },
+      { key: "snapshots", label: "Save a daily snapshot for 14-day and 28-day reports (uses 1 of Clarity's 10 daily requests)", checkbox: true, checked: true }
     ],
-    help: "In Clarity, open your project → Settings → Data Export → Generate new API token (project admins only). Clarity allows 10 requests a day per project, so the key is checked on first use rather than now.",
+    help: "Add one Clarity project at a time: open the project → Settings → Data Export → Generate new API token (project admins only), then add the next project the same way. Clarity allows 10 data-export requests a day per project, so the key is checked on first use rather than now.",
     helpUrl: "https://clarity.microsoft.com/",
+    instance: credentials => shortHash(`clarity:${credentials.token}`),
     // Only a shape check: a live check would spend one of the project's 10 daily requests.
-    async verify({ token }) {
-      return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(token || "").trim())
-        ? { ok: true, summary: "Token saved; checked on first use" }
-        : { ok: false, message: "That doesn't look like a Clarity API token (it should have three parts separated by dots)." };
+    async verify({ token, project, projectId }) {
+      if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(token || "").trim())) return { ok: false, message: "That doesn't look like a Clarity API token (it should have three parts separated by dots)." };
+      if (projectId && !/^[A-Za-z0-9]{4,32}$/.test(projectId)) return { ok: false, message: "The project ID is the short code after /projects/view/ in Clarity's address bar, for example abc123xyz." };
+      return { ok: true, label: project || (projectId ? `Clarity ${projectId}` : "Clarity project"), summary: "Token saved; checked on first use", meta: { projectId: projectId || null } };
     }
   }
 };

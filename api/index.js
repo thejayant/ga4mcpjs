@@ -12,6 +12,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createConnectionStore } from "./connections/store.js";
 import { PROFILE_FAMILIES, PROFILE_PREFIX, SLUG_PATTERN, findProfile, profileInstructions, profileShape, profileToolAllowed, registerRunAcrossProfiles } from "./connections/profiles.js";
 import { registerConnectionRoutes } from "./connections/routes.js";
+import { registerClaritySnapshotRoute } from "./connections/_clarity.js";
 import { CONNECTION_TOOL_NAMES, registerConnectionTools } from "./connections/tools.js";
 import { PROVIDERS, configureAccountProviders } from "./connections/providers.js";
 import { freshAccessToken } from "./connections/oauth.js";
@@ -8474,6 +8475,7 @@ const accountRouter = createAccountRouter({
   }
 });
 registerConnectionRoutes(app, { store: connectionStore, seal: encryptJson, open: decryptJson, baseUrl: getBaseUrl });
+registerClaritySnapshotRoute(app, { store: connectionStore });
 
 app.get("/", (req, res) => {
   const baseUrl = getBaseUrl(req);

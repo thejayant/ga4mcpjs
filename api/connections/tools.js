@@ -2,16 +2,17 @@
 // token (an anonymous ID), loads that user's encrypted connection, and calls the platform.
 // Connections made before user IDs existed get a clear "reconnect once" message.
 import { z } from "zod";
-import { PROVIDERS, publicConnection, bingCall, clarityInsights, CLARITY_DIMENSIONS, youtubeData, youtubeDataWrite, youtubeAnalytics, youtubeRetry } from "./providers.js";
+import { PROVIDERS, publicConnection, bingCall, youtubeData, youtubeDataWrite, youtubeAnalytics, youtubeRetry } from "./providers.js";
 import { YOUTUBE_EXTRA_TOOL_NAMES, registerYouTubeExtraTools } from "./_youtube-tools.js";
 import { YOUTUBE_MEDIA_TOOL_NAMES, registerYouTubeMediaTools } from "./_youtube-media-tools.js";
 import { YOUTUBE_LIVE_TOOL_NAMES, registerYouTubeLiveTools } from "./_youtube-live-tools.js";
 import { connectionsLink } from "./routes.js";
 import { freshAccessToken } from "./oauth.js";
 import { PROFILE_FAMILIES, profileUrl } from "./profiles.js";
+import { CLARITY_TOOL_NAMES, MAX_CLARITY_PROJECTS, clarityLinks, listClarityProjects, projectSummary, registerClarityTools } from "./_clarity.js";
 import { ANY_CHANNEL_TOOLS, MAX_YOUTUBE_CHANNELS, channelSummary, listYouTubeChannels, pickYouTubeChannel } from "./_youtube-channels.js";
 
-export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", "clarity_insights",
+export const CONNECTION_TOOL_NAMES = ["manage_connections", "bing_webmaster_sites", "bing_webmaster_traffic", "bing_webmaster_queries", "bing_webmaster_pages", ...CLARITY_TOOL_NAMES,
   "youtube_channel_report", "youtube_top_videos", "youtube_analytics_report", "youtube_list_videos", "youtube_get_video", "youtube_update_video",
   "youtube_list_playlists", "youtube_create_playlist", "youtube_add_to_playlist", ...YOUTUBE_EXTRA_TOOL_NAMES, ...YOUTUBE_MEDIA_TOOL_NAMES, ...YOUTUBE_LIVE_TOOL_NAMES];
 
@@ -104,7 +105,7 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
 
   server.registerTool("manage_connections", {
     title: "Manage Connections",
-    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too, and up to ${MAX_YOUTUBE_CHANNELS} YouTube channels (YouTube tools then take \`channel\`); tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects platforms and builds profiles. Give the user the link; never ask for keys in chat.`,
+    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too, up to ${MAX_YOUTUBE_CHANNELS} YouTube channels (YouTube tools then take \`channel\`) and up to ${MAX_CLARITY_PROJECTS} Microsoft Clarity projects (Clarity tools then take \`project\`); tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects platforms and builds profiles. Give the user the link; never ask for keys in chat.`,
     inputSchema: {}, annotations: { readOnlyHint: true }
   }, forUser(null, async ({ auth }) => {
     const ids = await store.list(auth.userId);
@@ -117,7 +118,8 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     }));
     const mainGoogle = (await store.getAccountInfo(auth.userId))?.googleEmail || null;
     const youtubeChannels = (await listYouTubeChannels(store, auth.userId)).map(channelSummary);
-    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
+    const clarityProjects = (await listClarityProjects(store, auth.userId)).map(project => ({ ...projectSummary(project), links: clarityLinks(project) }));
+    return result({ ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, clarity: { projects: clarityProjects, limit: MAX_CLARITY_PROJECTS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
   }));
 
   server.registerTool("bing_webmaster_sites", {
@@ -339,19 +341,6 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
   registerYouTubeMediaTools(server, youtubeContext);
   registerYouTubeLiveTools(server, youtubeContext);
 
-  server.registerTool("clarity_insights", {
-    title: "Microsoft Clarity Insights",
-    description: `Microsoft Clarity behaviour data for the last 1–3 days: sessions, bot sessions, pages per session, scroll depth, engagement time, dead, rage, quick-back and error clicks, and JavaScript errors, broken down by up to three of: ${CLARITY_DIMENSIONS.join(", ")}. Clarity allows 10 requests a day per project, so identical requests are served from a one-hour cache.`,
-    inputSchema: {
-      numOfDays: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe("Last 24, 48 or 72 hours (default 3)"),
-      dimensions: z.array(z.enum(CLARITY_DIMENSIONS)).max(3).optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, forUser("clarity", async ({ auth, credentials, args }) => {
-    const numOfDays = args.numOfDays || 3, dimensions = args.dimensions || [];
-    const response = await store.cached(`clarity:${auth.userId}:${numOfDays}:${dimensions.join(",")}`, 3600, () => clarityInsights(credentials.token, { numOfDays, dimensions }));
-    if (response.status === 429) return result({ error: "daily_limit", error_description: "Clarity's limit of 10 requests a day for this project is used up. Try again tomorrow, or reuse an earlier answer." }, true);
-    return reply(response, metrics => ({ numOfDays, dimensions, servedFromCache: Boolean(response.cached), metrics }));
-  }));
+  registerClarityTools(server, { req, store, seal, withAuth, result, baseUrl, reply });
   server.registerTool = registerTool;
 }

@@ -36,14 +36,24 @@ function accountChoices(connections, mainGoogle) {
   return choices;
 }
 // Checkbox platforms (YouTube has its own channel choice); a platform counts if any of its connections exists.
-const platformChoices = connections => Object.keys(PROFILE_PLATFORMS).filter(id => id !== "youtube" && Object.values(connections).some(c => c.provider === id)).map(id => [id, PROVIDERS[id].name]);
+const OWN_SELECT = new Set(["youtube", "clarity"]);
+const platformChoices = connections => Object.keys(PROFILE_PLATFORMS).filter(id => !OWN_SELECT.has(id) && Object.values(connections).some(c => c.provider === id)).map(id => [id, PROVIDERS[id].name]);
 const youtubeChoices = connections => Object.values(connections).filter(c => c.provider === "youtube").map(c => [c.id, c.label || "YouTube channel"]);
+const clarityChoices = connections => Object.values(connections).filter(c => c.provider === "clarity").map(c => [c.id, c.label || "Clarity project"]);
 
-function profileForm(q, choices, platforms, profile, channels = []) {
-  const youtubeValue = profile?.youtubeChannel || (profile?.platforms?.includes("youtube") ? "any" : "");
-  const youtube = channels.length ? `<label>YouTube channel
-      <select name="youtube_channel"><option value="">None</option>${channels.length > 1 ? `<option value="any"${youtubeValue === "any" ? " selected" : ""}>Any connected channel (asks which one)</option>` : ""}${channels.map(([value, label]) =>
-        `<option value="${escapeHtml(value)}"${youtubeValue === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>` : "";
+// One platform with several connections (YouTube channels, Clarity projects): none, any, or one.
+function oneOfSelect({ name, title, anyLabel, options, value }) {
+  if (!options.length) return "";
+  return `<label>${title}
+      <select name="${name}"><option value="">None</option>${options.length > 1 ? `<option value="any"${value === "any" ? " selected" : ""}>${anyLabel}</option>` : ""}${options.map(([id, label]) =>
+        `<option value="${escapeHtml(id)}"${value === id ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>`;
+}
+
+function profileForm(q, choices, platforms, profile, channels = [], clarityProjects = []) {
+  const youtube = oneOfSelect({ name: "youtube_channel", title: "YouTube channel", anyLabel: "Any connected channel (asks which one)", options: channels,
+    value: profile?.youtubeChannel || (profile?.platforms?.includes("youtube") ? "any" : "") });
+  const clarity = oneOfSelect({ name: "clarity_project", title: "Microsoft Clarity project", anyLabel: "Any connected project (asks which one)", options: clarityProjects,
+    value: profile?.clarityProject || (profile?.platforms?.includes("clarity") ? "any" : "") });
   const select = family => `<label>${PROFILE_FAMILIES[family]} account
       <select name="account_${family}"><option value="">None</option>${choices[family].map(([value, label]) =>
         `<option value="${escapeHtml(value)}"${profile?.accounts?.[family] === value ? " selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>`;
@@ -54,6 +64,7 @@ function profileForm(q, choices, platforms, profile, channels = []) {
       <label>Name<input name="name" required maxlength="60" value="${escapeHtml(profile?.name || "")}" placeholder="Client A" autocomplete="off"></label>
       ${Object.keys(PROFILE_FAMILIES).map(select).join("")}
       ${youtube}
+      ${clarity}
       ${platforms.length ? `<fieldset><legend>Also include</legend>${platforms.map(([id, name]) => `<label class="check"><input type="checkbox" name="platform" value="${id}"${profile?.platforms?.includes(id) ? " checked" : ""}> ${escapeHtml(name)}</label>`).join("")}</fieldset>` : ""}
       <details><summary>Default IDs, used when a request leaves them out</summary><div class="connect-form">${defaults}</div></details>
       <button type="submit" class="cta">${profile ? "Save changes" : "Create profile"}</button>
@@ -61,7 +72,7 @@ function profileForm(q, choices, platforms, profile, channels = []) {
 }
 
 function profilesSection(q, base, profiles, connections, mainGoogle) {
-  const choices = accountChoices(connections, mainGoogle), platforms = platformChoices(connections), channels = youtubeChoices(connections);
+  const choices = accountChoices(connections, mainGoogle), platforms = platformChoices(connections), channels = youtubeChoices(connections), clarityProjects = clarityChoices(connections);
   const known = new Set(Object.values(choices).flat().map(([value]) => value));
   const cards = profiles.map(profile => {
     const accounts = Object.entries(PROFILE_FAMILIES).filter(([family]) => profile.accounts?.[family]).map(([family, title]) => {
@@ -71,18 +82,20 @@ function profilesSection(q, base, profiles, connections, mainGoogle) {
     });
     const extras = (profile.platforms || []).map(id => id === "youtube" && profile.youtubeChannel
       ? `<li>YouTube: ${escapeHtml(profile.accountLabels?.youtube || "channel")}${connections[profile.youtubeChannel] ? "" : ` <strong class="warn">(disconnected: pick another channel)</strong>`}</li>`
-      : `<li>${escapeHtml(PROVIDERS[id]?.name || id)}</li>`);
+      : id === "clarity" && profile.clarityProject
+        ? `<li>Clarity: ${escapeHtml(profile.accountLabels?.clarity || "project")}${connections[profile.clarityProject] ? "" : ` <strong class="warn">(disconnected: pick another project)</strong>`}</li>`
+        : `<li>${escapeHtml(PROVIDERS[id]?.name || id)}</li>`);
     return `<div class="card"><span class="tag">Profile</span><h3>${escapeHtml(profile.name)}</h3>
       <ul class="plain">${accounts.concat(extras).join("")}</ul>
       <label class="url">Connector URL<input readonly value="${escapeHtml(profileUrl(base, profile.slug))}" onclick="this.select()"></label>
-      <details><summary>Edit</summary>${profileForm(q, choices, platforms, profile, channels)}</details>
+      <details><summary>Edit</summary>${profileForm(q, choices, platforms, profile, channels, clarityProjects)}</details>
       <form method="post" action="/connections/profiles/${encodeURIComponent(profile.slug)}/delete${q}"><button type="submit" class="secondary-btn">Delete profile</button></form>
     </div>`;
   });
   return `<h2>Profiles</h2>
 <p class="lead">A profile is one client: which Google, Meta and CallRail account to use, plus default IDs. Each profile has its own connector URL. In Claude, open Settings → Connectors → Add custom connector, paste the URL, name it after the client and sign in; then turn on that client's connector in a chat. Any other assistant that takes a remote MCP server URL works the same way. On your main connector, ask for a client by profile name, or compare clients side by side.</p>
 ${cards.join("\n")}
-${profiles.length < MAX_PROFILES ? `<div class="card"><span class="tag">New</span><h3>New profile</h3>${profileForm(q, choices, platforms, null, channels)}</div>` : ""}`;
+${profiles.length < MAX_PROFILES ? `<div class="card"><span class="tag">New</span><h3>New profile</h3>${profileForm(q, choices, platforms, null, channels, clarityProjects)}</div>` : ""}`;
 }
 
 // The main sign-in is managed in the assistant (Claude, ChatGPT…), so it has no Disconnect button here.
@@ -100,7 +113,8 @@ function page(t, connections, { notice, error, profiles = [], base = "", mainGoo
     const action = `/connections/${id}${q}`;
     // A capped provider (YouTube: 5 channels) shows its count; at the cap the button only refreshes.
     const full = provider.maxConnections && mine.length >= provider.maxConnections;
-    const count = provider.maxConnections && mine.length ? `<p class="muted">${mine.length} of ${provider.maxConnections} ${id === "youtube" ? "channels" : "connections"} connected.${full ? " Disconnect one to add another; signing in again with a connected one refreshes it." : ""}</p>` : "";
+    const unit = id === "youtube" ? "channels" : id === "clarity" ? "projects" : "connections";
+    const count = provider.maxConnections && mine.length ? `<p class="muted">${mine.length} of ${provider.maxConnections} ${unit} connected.${full ? " Disconnect one to add another; signing in again with a connected one refreshes it." : ""}</p>` : "";
     const body = connected
       ? entry(connected)
       : (id === "google_account" ? mainEntry(mainGoogle) : "") + mine.map(entry).join("") + count + (provider.oauth
@@ -109,9 +123,11 @@ function page(t, connections, { notice, error, profiles = [], base = "", mainGoo
           : `<p>${escapeHtml(provider.name)} isn’t set up on this server yet.</p>`
       : `<p>${escapeHtml(provider.help)} <a href="${escapeHtml(provider.helpUrl)}" target="_blank" rel="noopener">Open ${escapeHtml(provider.name)} ↗</a></p>
          <form method="post" action="${action}" class="connect-form">
-           ${provider.fields.map(field => `<label>${escapeHtml(field.label)}${field.optional ? " <span>(optional)</span>" : ""}
+           ${provider.fields.map(field => field.checkbox
+             ? `<label class="check"><input type="checkbox" name="${field.key}" value="on"${field.checked ? " checked" : ""}> ${escapeHtml(field.label)}</label>`
+             : `<label>${escapeHtml(field.label)}${field.optional ? " <span>(optional)</span>" : ""}
              <input name="${field.key}" type="${field.secret ? "password" : "text"}" autocomplete="off" placeholder="${escapeHtml(field.placeholder || "")}" ${field.optional ? "" : "required"} maxlength="4000"></label>`).join("")}
-           <button type="submit" class="cta">${provider.multi ? "Add" : "Connect"} ${escapeHtml(provider.name)}</button>
+           ${full ? `<p class="muted">Disconnect a project to add another.</p>` : `<button type="submit" class="cta">${provider.multi ? (mine.length ? "Add another" : "Add") : "Connect"} ${escapeHtml(provider.multi && id === "clarity" ? "Clarity project" : provider.name)}</button>`}
          </form>`);
     return `<div class="card"><span class="tag">${escapeHtml(provider.category)}</span><h3>${escapeHtml(provider.name)}</h3>${body}</div>`;
   }).join("\n");
@@ -132,6 +148,7 @@ function page(t, connections, { notice, error, profiles = [], base = "", mainGoo
 .connect-form select{font:inherit;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--page);color:var(--ink)}
 .connect-form fieldset{border:1px solid var(--border);border-radius:10px;padding:8px 12px;display:grid;gap:6px}
 .connect-form label.check{display:flex;gap:8px;align-items:center;font-weight:400}
+.connect-form label.check input{width:auto}
 .card details summary{cursor:pointer;font-weight:600;margin:6px 0}
 .url{display:grid;gap:4px;font-size:13.5px;font-weight:600;margin:8px 0}
 .url input{font:13px/1.4 ui-monospace,monospace;padding:9px 11px;border-radius:10px;border:1px solid var(--border);background:var(--page);color:var(--ink);width:100%}
@@ -144,7 +161,7 @@ function page(t, connections, { notice, error, profiles = [], base = "", mainGoo
 ${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}${error ? `<p class="notice error">${escapeHtml(error)}</p>` : ""}
 ${cards}
 ${profilesSection(q, base, profiles, connections, mainGoogle)}
-<p>After connecting, go back to your chat and ask, for example, <em>“Show my Bing search queries”</em> or <em>“What do Clarity rage clicks say about my site?”</em> With extra Google, Meta or CallRail accounts, just name the property, site, ad account or company: your assistant uses whichever account can see it.</p>`);
+<p>After connecting, go back to your chat and ask, for example, <em>“Show my Bing search queries”</em> or <em>“Which product pages on getcarports.com have the most rage clicks?”</em> With several Clarity projects, name the project. With extra Google, Meta or CallRail accounts, just name the property, site, ad account or company: your assistant uses whichever account can see it.</p>`);
 }
 
 export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
@@ -170,6 +187,7 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     send(res, 200, page(req.query.t, await current(link.userId), {
       profiles: await store.listProfiles(link.userId), base: baseUrl(req), mainGoogle: info?.googleEmail || null,
       notice: req.query.refreshed && done === "YouTube" ? "This YouTube channel was already connected, so its sign-in was refreshed instead of adding another. To add a different channel, pick it in Google’s chooser (or “Use another account” for a channel on another Google account)."
+        : req.query.refreshed && done === "Microsoft Clarity" ? "This Clarity token was already connected, so its details were updated instead of adding another. To add another project, generate a token in that project."
         : req.query.refreshed && done ? `This ${done} was already connected, so its sign-in was refreshed instead of adding another. To add a different account, choose “Use another account” in Google’s account picker.`
         : req.query.main ? "That’s your main sign-in, which is already connected. To add a different account, choose “Use another account” in Google’s account picker."
         : done ? `${done} is connected.` : removed ? `${removed} was disconnected and its key deleted.`
@@ -193,7 +211,7 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     const connections = await current(link.userId);
     const choices = accountChoices(connections, (await store.getAccountInfo(link.userId))?.googleEmail);
     const input = {
-      name: body.name, platforms: body.platform, youtubeChannel: body.youtube_channel,
+      name: body.name, platforms: body.platform, youtubeChannel: body.youtube_channel, clarityProject: body.clarity_project,
       accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).map(family => [family, body[`account_${family}`]])),
       defaults: Object.fromEntries(Object.entries(PROFILE_DEFAULTS).map(([family, fields]) => [family, Object.fromEntries(Object.keys(fields).map(arg => [arg, body[`default_${family}_${arg}`]]))]))
     };
@@ -202,6 +220,7 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
       labels: Object.fromEntries(Object.entries(choices).map(([family, list]) => [family, Object.fromEntries(list.map(([value, label]) => [value, value === "main" ? "Main sign-in" : label]))])),
       platformOptions: platformChoices(connections).map(([id]) => id),
       youtubeOptions: youtubeChoices(connections),
+      clarityOptions: clarityChoices(connections),
       existing
     });
     if (built.error) return back({ error: built.error });
@@ -226,15 +245,22 @@ export function registerConnectionRoutes(app, { store, seal, open, baseUrl }) {
     const provider = PROVIDERS[req.params.provider];
     if (!provider) return res.status(404).send("Unknown platform");
     const back = params => res.redirect(303, `/connections?t=${encodeURIComponent(req.query.t)}&${new URLSearchParams(params)}`);
-    const credentials = Object.fromEntries(provider.fields.map(field => [field.key, String(req.body?.[field.key] ?? "").trim()]).filter(([, value]) => value));
+    // A checkbox is stored as "on" or "off", so an unticked box is told apart from an older record without it.
+    const credentials = Object.fromEntries(provider.fields.map(field => [field.key, field.checkbox ? (req.body?.[field.key] ? "on" : "off") : String(req.body?.[field.key] ?? "").trim()]).filter(([, value]) => value));
     const missing = provider.fields.find(field => !field.optional && !credentials[field.key]);
     if (missing) return back({ error: `${missing.label} is required.` });
     let check;
     try { check = await provider.verify(credentials); } catch { check = { ok: false, message: `${provider.name} could not be reached. Try again.` }; }
     if (!check.ok) return back({ error: check.message });
     const id = provider.multi ? `${req.params.provider}:${provider.instance(credentials)}` : req.params.provider;
+    const existed = provider.multi && Boolean(await store.get(link.userId, id));
+    if (!existed && provider.maxConnections) {
+      const count = (await store.list(link.userId)).filter(other => other === req.params.provider || other.startsWith(`${req.params.provider}:`)).length;
+      if (count >= provider.maxConnections) return back({ error: `You can connect up to ${provider.maxConnections} ${provider.name} ${req.params.provider === "clarity" ? "projects" : "accounts"}. Disconnect one to add another.` });
+    }
     await store.save(link.userId, id, { credentials, label: check.label, summary: check.summary, meta: check.meta, connectedAt: Date.now() });
-    back({ connected: req.params.provider });
+    await provider.afterSave?.({ store, userId: link.userId, id, credentials });
+    back({ connected: req.params.provider, ...(existed ? { refreshed: "1" } : {}) });
   });
 
   // Sign-in platforms: send the user to the platform's consent screen. The state carries the

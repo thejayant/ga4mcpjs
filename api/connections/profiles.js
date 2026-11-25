@@ -47,7 +47,7 @@ export const profileUrl = (baseUrl, slug) => `${baseUrl}/mcp/p/${slug}`;
  * each platform may use ("main" or a connection id), `platformOptions` the connected extra platforms,
  * `labels` the display name of each account key per platform. Returns { profile } or { error }.
  */
-export function buildProfile(input, { accountOptions, platformOptions, youtubeOptions, labels = {}, existing } = {}) {
+export function buildProfile(input, { accountOptions, platformOptions, youtubeOptions, clarityOptions, labels = {}, existing } = {}) {
   const name = String(input.name || "").trim().replace(/\s+/g, " ").slice(0, 60);
   if (!name) return { error: "Give the profile a name." };
   const accounts = {}, accountLabels = {};
@@ -69,6 +69,16 @@ export function buildProfile(input, { accountOptions, platformOptions, youtubeOp
     platforms.push("youtube");
     if (choice) { youtubeChannel = choice[0]; accountLabels.youtube = choice[1]; }
   }
+  // Clarity: the same choice between none, any connected project, or one project.
+  let clarityProject = null;
+  const clarity = String(input.clarityProject || "").trim();
+  if (clarity) {
+    const choice = (clarityOptions || []).find(([value]) => value === clarity);
+    if (clarity !== "any" && !choice) return { error: "Pick a Clarity project from the list." };
+    if (clarity === "any" && !(clarityOptions || []).length) return { error: "Connect a Clarity project first." };
+    if (!platforms.includes("clarity")) platforms.push("clarity");
+    if (choice) { clarityProject = choice[0]; accountLabels.clarity = choice[1]; }
+  }
   if (!Object.values(accounts).some(Boolean) && !platforms.length) return { error: "Choose at least one account or platform for this profile." };
   const defaults = {};
   for (const [family, fields] of Object.entries(PROFILE_DEFAULTS)) {
@@ -80,7 +90,7 @@ export function buildProfile(input, { accountOptions, platformOptions, youtubeOp
       (defaults[family] ||= {})[arg] = arg === "customerId" ? value.replace(/-/g, "") : value;
     }
   }
-  return { profile: { slug: existing?.slug || newSlug(name), name, accounts, accountLabels, platforms, youtubeChannel, defaults, createdAt: existing?.createdAt || Date.now() } };
+  return { profile: { slug: existing?.slug || newSlug(name), name, accounts, accountLabels, platforms, youtubeChannel, clarityProject, defaults, createdAt: existing?.createdAt || Date.now() } };
 }
 
 // A profile by "profile:<slug>", slug or name (case-insensitive).
@@ -117,7 +127,8 @@ export function profileShape(shape, defaults, profileName) {
 export function profileInstructions(profile) {
   const accounts = Object.entries(PROFILE_FAMILIES).filter(([family]) => profile.accounts?.[family])
     .map(([family, title]) => `${title}: ${profile.accountLabels?.[family] || profile.accounts[family]}`)
-    .concat(profile.youtubeChannel ? [`YouTube channel: ${profile.accountLabels?.youtube || "set"}`] : []);
+    .concat(profile.youtubeChannel ? [`YouTube channel: ${profile.accountLabels?.youtube || "set"}`] : [])
+    .concat(profile.clarityProject ? [`Clarity project: ${profile.accountLabels?.clarity || "set"}`] : []);
   const defaults = Object.values(profile.defaults || {}).flatMap(Object.entries).map(([arg, value]) => `${arg} ${value}`);
   return [
     `This connector is the profile "${profile.name}". Every request on it uses only this profile's accounts${accounts.length ? ` (${accounts.join("; ")})` : ""}.`,

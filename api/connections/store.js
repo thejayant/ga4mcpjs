@@ -106,6 +106,8 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
     async remove(userId, provider) {
       await kv.del(key(userId, provider));
       await kv.removeFromSet(`conns:${userId}`, provider);
+      // A Clarity project's daily snapshots go with it.
+      if (String(provider).startsWith("clarity")) await this.removeSnapshots(userId, provider);
     },
     list: userId => kv.members(`conns:${userId}`),
     // About the user's main sign-in (its Google email), shown on the Connections page.
@@ -140,6 +142,27 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
     },
     lockTask: (userId, taskId, ttlSeconds) => kv.setIfAbsent(`tasklock:${userId}:${taskId}`, "1", ttlSeconds),
     unlockTask: (userId, taskId) => kv.del(`tasklock:${userId}:${taskId}`),
+    // Daily Clarity snapshots: a set of "<user>|<connection>" the daily job visits, and one sealed
+    // record per connection and day, kept 400 days.
+    addSnapshotTarget: (userId, id) => kv.addToSet("clarity-snapshots", `${userId}|${id}`),
+    removeSnapshotTarget: (userId, id) => kv.removeFromSet("clarity-snapshots", `${userId}|${id}`),
+    async snapshotTargets() {
+      return (await kv.members("clarity-snapshots")).map(member => {
+        const at = String(member).lastIndexOf("|");
+        return at > 0 ? { userId: member.slice(0, at), id: member.slice(at + 1) } : null;
+      }).filter(Boolean);
+    },
+    getSnapshot: (userId, id, date) => read(`snap:${userId}:${id}:${date}`),
+    async saveSnapshot(userId, id, date, data) {
+      const storageKey = `snap:${userId}:${id}:${date}`;
+      await kv.set(storageKey, seal({ ...data, date, savedAt: Date.now() }, storageKey), { ttlSeconds: 400 * 86_400 });
+      await kv.addToSet(`snaps:${userId}:${id}`, date);
+    },
+    async removeSnapshots(userId, id) {
+      for (const date of await kv.members(`snaps:${userId}:${id}`)) await kv.del(`snap:${userId}:${id}:${date}`);
+      await kv.del(`snaps:${userId}:${id}`);
+      await kv.removeFromSet("clarity-snapshots", `${userId}|${id}`);
+    },
     // Short-lived cache for rate-limited providers (Clarity allows 10 requests a day).
     async cached(cacheKey, ttlSeconds, load) {
       const storageKey = `cache:${cacheKey}`;
