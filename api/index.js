@@ -5660,7 +5660,7 @@ async function toolAccounts(req, family) {
 const SKILLS = loadSkills();
 
 // Tools that can run as MCP tasks for clients that support them (see api/_tasks.js).
-const TASK_TOOL_NAMES = new Set(["youtube_upload_video", "youtube_continue_upload", "run_ga4_audience_export"]);
+const TASK_TOOL_NAMES = new Set(["youtube_upload_video", "youtube_continue_upload", "run_ga4_audience_export", "run_bigquery_ga4_query", "run_bigquery_ga4_preset", "run_across_profiles"]);
 
 // `era` is "modern" for 2026-07-28 requests and "legacy" for 2025-era ones (initialize handshake).
 async function createServer(req, era = "legacy") {
@@ -7784,7 +7784,13 @@ async function createServer(req, era = "legacy") {
       }, !lastResponse?.ok);
     }));
 
-    const bigQueryResultPayload = (result, extra) => {
+    // A query still running becomes a task step that collects its results (see api/_tasks.js).
+    const stillRunning = (toolResult, summary, billingProjectId, params) => summary.jobComplete || !summary.jobId ? toolResult : withContinuation(toolResult, {
+      tool: "run_bigquery_ga4_query",
+      args: { billingProjectId, jobId: summary.jobId, ...(summary.location || params.location ? { location: summary.location || params.location } : {}), ...(params.maxResults ? { maxResults: params.maxResults } : {}) },
+      statusMessage: "BigQuery job running"
+    });
+    const bigQueryResultPayload = (result, extra, billingProjectId, params = {}) => {
       if (result.stage === "dry_run") return buildToolResult({ ...extra, error: "query_invalid", raw: toGoogleDebugPayload(result.response) }, true);
       if (result.stage === "dry_run_only") return buildToolResult({ ...extra, dryRun: true, cost: result.cost, maxBytesBilled: result.maxBytes, wouldRun: result.cost.bytesProcessed <= result.maxBytes });
       if (result.stage === "refused") {
@@ -7797,13 +7803,13 @@ async function createServer(req, era = "legacy") {
       }
       if (!result.response.ok) return buildToolResult({ ...extra, error: "query_failed", cost: result.cost, raw: toGoogleDebugPayload(result.response) }, true);
       const summary = summariseBigQueryRun(result);
-      return buildToolResult({
+      return stillRunning(buildToolResult({
         ...extra,
         requestCount: result.requestCount,
         cost: result.cost,
         ...summary,
         next: summary.jobComplete ? undefined : "The job is still running. Call run_bigquery_ga4_query with jobId to collect the results."
-      });
+      }), summary, billingProjectId, params);
     };
 
     server.registerTool("run_bigquery_ga4_query", {
@@ -7825,7 +7831,8 @@ async function createServer(req, era = "legacy") {
       if (params.jobId) {
         const response = await getBigQueryResults(googleCredentials.accessToken, params.billingProjectId, params.jobId, { ...params, timeoutMs: 30000 });
         if (!response.ok) return buildToolResult({ error: "results_failed", raw: toGoogleDebugPayload(response) }, true);
-        return buildToolResult({ jobId: params.jobId, ...summariseBigQueryRun({ response }) });
+        const summary = summariseBigQueryRun({ response });
+        return stillRunning(buildToolResult({ jobId: params.jobId, ...summary }), { ...summary, jobId: summary.jobId || params.jobId }, params.billingProjectId, params);
       }
       if (!params.sql) return buildToolResult({ error: "missing_sql", error_description: "Provide sql, or jobId to collect earlier results." }, true);
       try {
@@ -7834,7 +7841,7 @@ async function createServer(req, era = "legacy") {
         return buildToolResult({ error: "sql_not_allowed", error_description: error.message }, true);
       }
       const result = await executeBigQuerySql(googleCredentials.accessToken, params);
-      return bigQueryResultPayload(result, { billingProjectId: params.billingProjectId });
+      return bigQueryResultPayload(result, { billingProjectId: params.billingProjectId }, params.billingProjectId, params);
     }));
 
     server.registerTool("run_bigquery_ga4_preset", {
@@ -7864,7 +7871,7 @@ async function createServer(req, era = "legacy") {
       }
       const billingProjectId = params.billingProjectId || params.projectId;
       const result = await executeBigQuerySql(googleCredentials.accessToken, { ...params, sql, billingProjectId });
-      return bigQueryResultPayload(result, { preset: params.preset, description: BIGQUERY_GA4_PRESET_DEFINITIONS[params.preset], sql });
+      return bigQueryResultPayload(result, { preset: params.preset, description: BIGQUERY_GA4_PRESET_DEFINITIONS[params.preset], sql }, billingProjectId, params);
     }));
   }
 

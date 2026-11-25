@@ -283,6 +283,10 @@ The tools that can run as tasks are:
 
 - `youtube_upload_video` with `videoUrl`, and `youtube_continue_upload`: keep streaming until YouTube has the whole file.
 - `run_ga4_audience_export` (`create` or `get`): keep checking until the export is `ACTIVE`.
+- `run_bigquery_ga4_query` and `run_bigquery_ga4_preset`: a job still running is collected on the next poll.
+- `run_across_profiles`: profiles that didn't fit in one slice run on the next poll, and the task returns every profile together. A continuation can hand rows forward with `carry`, which the next step reads with `stepCarry()`.
+
+`run_ga4_multi_property_report` and `run_google_ads_across_accounts` stay plain calls. They are capped (10 properties, 50 accounts) and run in parallel, so they finish in one request.
 
 To make another tool task-capable, add it to `TASK_TOOL_NAMES` and return `withContinuation(result, { tool, args, statusMessage })` while there is more to do. Steps must be idempotent. `api/tasks.test.js` checks the wire shapes against the official `@modelcontextprotocol/ext-tasks` schemas.
 

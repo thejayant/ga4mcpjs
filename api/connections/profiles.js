@@ -6,6 +6,7 @@
 // argument ("profile:<slug>" or the profile's name) and through run_across_profiles.
 import crypto from "node:crypto";
 import { z } from "zod";
+import { stepBudgetMs, stepCarry, withContinuation } from "../_tasks.js";
 
 export const PROFILE_FAMILIES = { google: "Google", meta: "Meta", callrail: "CallRail" };
 // Other connected platforms a profile can include, by the tool names they own.
@@ -164,11 +165,12 @@ export function registerRunAcrossProfiles(server, { registry, profilesFor, run, 
       if (!profile) return result({ error: "unknown_profile", error_description: `No profile called "${ref}". Profiles: ${all.map(p => `${p.name} (${p.slug})`).join(", ")}.` }, true);
       if (!chosen.includes(profile)) chosen.push(profile);
     }
-    const started = Date.now(), results = [];
+    // As a task step, start from the rows earlier slices already collected.
+    const started = Date.now(), results = [...(stepCarry()?.results || [])], outOfTime = [];
     for (const profile of chosen.slice(0, MAX_RUN_PROFILES)) {
       const row = { profile: profile.name, slug: profile.slug };
       if (!profile.accounts?.[entry.family]) { results.push({ ...row, skipped: `no ${PROFILE_FAMILIES[entry.family]} account in this profile` }); continue; }
-      if (Date.now() - started > TOTAL_BUDGET_MS) { results.push({ ...row, skipped: "time budget used up; ask again for this profile" }); continue; }
+      if (Date.now() - started > (stepBudgetMs() || TOTAL_BUDGET_MS)) { outOfTime.push(profile); continue; }
       const parsed = entry.schema.safeParse({ ...(profile.defaults?.[entry.family] || {}), ...args });
       if (!parsed.success) {
         results.push({ ...row, error: "invalid_arguments", details: parsed.error.issues.slice(0, 5).map(issue => `${issue.path.join(".") || "arguments"}: ${issue.message}`) });
@@ -183,6 +185,14 @@ export function registerRunAcrossProfiles(server, { registry, profilesFor, run, 
       }
     }
     const omitted = chosen.slice(MAX_RUN_PROFILES).map(profile => profile.name);
-    return result({ tool, profiles: results, ...(omitted.length ? { omitted, note: `At most ${MAX_RUN_PROFILES} profiles per call; ask again for the rest.` } : {}) });
+    const skippedForTime = outOfTime.map(profile => ({ profile: profile.name, slug: profile.slug, skipped: "time budget used up; ask again for this profile" }));
+    const outcome = result({ tool, profiles: [...results, ...skippedForTime], ...(omitted.length ? { omitted, note: `At most ${MAX_RUN_PROFILES} profiles per call; ask again for the rest.` } : {}) });
+    // For task-capable clients the profiles that ran out of time run on the next poll instead.
+    return outOfTime.length ? withContinuation(outcome, {
+      tool: "run_across_profiles",
+      args: { tool, arguments: args, profiles: outOfTime.map(profile => profile.slug) },
+      carry: { results },
+      statusMessage: `Ran ${results.length} of ${results.length + outOfTime.length} profiles`
+    }) : outcome;
   });
 }

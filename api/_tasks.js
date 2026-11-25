@@ -28,6 +28,8 @@ const ROUTING_ARGS = ["account", "channel"];
 // How long one slice may run. Tools that loop until a deadline (uploads) read it.
 const stepContext = new AsyncLocalStorage();
 export const stepBudgetMs = () => stepContext.getStore()?.budgetMs;
+// What the previous slice handed forward (`carry` on its continuation), e.g. rows already collected.
+export const stepCarry = () => stepContext.getStore()?.carry;
 const STEP_BUDGET_MS = () => Number(process.env.TASK_STEP_BUDGET_MS || 25_000);
 
 export function withContinuation(result, continuation) {
@@ -86,7 +88,7 @@ export function enableTasks(server, { store, userId, taskTools }) {
       const record = {
         taskId: crypto.randomUUID(), status: "working", statusMessage: next.statusMessage,
         createdAt: now(), lastUpdatedAt: now(),
-        step: { tool: next.tool, args: { ...routing, ...next.args } }, routing
+        step: { tool: next.tool, args: { ...routing, ...next.args }, carry: next.carry }, routing
       };
       try {
         await store.saveTask(owner, record.taskId, record, TASK_TTL_MS / 1000);
@@ -110,10 +112,10 @@ export function enableTasks(server, { store, userId, taskTools }) {
         next = { ...next, status: "failed", error: { code: -32603, message: `${record.step.tool} is not available on this connector.` } };
       } else {
         try {
-          const result = await stepContext.run({ budgetMs: STEP_BUDGET_MS() }, () => handler(record.step.args, ctx));
+          const result = await stepContext.run({ budgetMs: STEP_BUDGET_MS(), carry: record.step.carry }, () => handler(record.step.args, ctx));
           const more = continuationOf(result);
           next = more
-            ? { ...next, steps: (record.steps || 0) + 1, statusMessage: more.statusMessage, step: { tool: more.tool, args: { ...record.routing, ...more.args } } }
+            ? { ...next, steps: (record.steps || 0) + 1, statusMessage: more.statusMessage, step: { tool: more.tool, args: { ...record.routing, ...more.args }, carry: more.carry } }
             : { ...next, status: "completed", statusMessage: result?.isError ? "Finished with an error" : "Done", result: plain(result), step: undefined };
         } catch (error) {
           next = { ...next, status: "failed", error: { code: -32603, message: error?.message || String(error) }, step: undefined };

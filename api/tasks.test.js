@@ -12,6 +12,7 @@ process.env.APP_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
 process.env.GOOGLE_CLIENT_ID = "test-client.apps.googleusercontent.com";
 process.env.GOOGLE_CLIENT_SECRET = "test-secret";
 process.env.TASK_STEP_BUDGET_MS = "40";
+process.env.ENABLE_BIGQUERY = "true";
 process.env.YOUTUBE_UPLOAD_BUDGET_MS = "40";
 const { default: app, testSupport } = await import("./index.js");
 const store = testSupport.connectionStore;
@@ -31,7 +32,7 @@ after(async () => { globalThis.fetch = realFetch; await new Promise(resolve => s
 
 function tokenFor(userId) {
   const sessionId = `s-${Math.random()}`;
-  const google = { sessionId, refreshToken: "r", accessToken: "main", expiryDate: Date.now() + 3_600_000, scope: "https://www.googleapis.com/auth/analytics.readonly", tokenType: "Bearer", userId };
+  const google = { sessionId, refreshToken: "r", accessToken: "main", expiryDate: Date.now() + 3_600_000, scope: "https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/bigquery.readonly", tokenType: "Bearer", userId };
   const session = testSupport.saveSession(sessionId, google);
   return testSupport.mintAccessToken({ protocol: "http", get: () => new URL(baseUrl).host }, { sessionId, resource: `${baseUrl}/mcp`, scope: session.scope, google: session });
 }
@@ -180,4 +181,59 @@ test("a GA4 audience export runs as a task until the export is ACTIVE", async ()
   assert.equal(task.status, "completed");
   assert.equal(task.result.structuredContent.raw.state, "ACTIVE");
   assert.equal(gets, 2);
+});
+
+test("a long BigQuery query becomes a task that collects its rows when the job finishes", async () => {
+  let gets = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    url = String(url);
+    if (url.startsWith(baseUrl)) return realFetch(url, init);
+    const json = body => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    if (url.endsWith("/projects/my-proj/queries") && init.method === "POST") {
+      const body = JSON.parse(init.body);
+      return body.dryRun ? json({ totalBytesProcessed: "1000" }) : json({ jobComplete: false, jobReference: { jobId: "job-1", location: "US" } });
+    }
+    if (url.includes("/projects/my-proj/queries/job-1")) {
+      gets++;
+      assert.match(url, /location=US/);
+      return gets < 2 ? json({ jobComplete: false, jobReference: { jobId: "job-1", location: "US" } })
+        : json({ jobComplete: true, jobReference: { jobId: "job-1", location: "US" }, totalRows: "1", schema: { fields: [{ name: "events", type: "INTEGER" }] }, rows: [{ f: [{ v: "42" }] }] });
+    }
+    throw new Error(`unexpected ${init.method || "GET"} ${url}`);
+  };
+  const created = await modern("task-user", "tools/call", { name: "run_bigquery_ga4_query", arguments: { billingProjectId: "my-proj", sql: "SELECT COUNT(*) AS events FROM `p.d.events_*`" } });
+  assert.equal(created.resultType, "task");
+  assert.equal(created.statusMessage, "BigQuery job running");
+  let task = created;
+  for (let polls = 0; task.status === "working" && polls < 5; polls++) task = await modern("task-user", "tasks/get", { taskId: created.taskId });
+  assert.equal(task.status, "completed");
+  assert.deepEqual(task.result.structuredContent.rows, [{ events: 42 }]);
+});
+
+test("run_across_profiles hands profiles that ran out of time to the next poll and returns them all", async () => {
+  for (const [slug, propertyId] of [["north", "100"], ["south", "200"], ["east", "300"]]) {
+    await store.saveProfile("task-user", { slug, name: slug[0].toUpperCase() + slug.slice(1), accounts: { google: "main", meta: null, callrail: null }, accountLabels: {}, platforms: [], defaults: { google: { propertyId } }, createdAt: Date.now() });
+  }
+  const read = [];
+  globalThis.fetch = async (url, init = {}) => {
+    url = String(url);
+    if (url.startsWith(baseUrl)) return realFetch(url, init);
+    const match = /properties\/(\d+)\/metadata/.exec(url);
+    if (match) {
+      read.push(match[1]);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return new Response(JSON.stringify({ name: `properties/${match[1]}/metadata`, dimensions: [], metrics: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unexpected ${init.method || "GET"} ${url}`);
+  };
+  const created = await modern("task-user", "tools/call", { name: "run_across_profiles", arguments: { tool: "get_ga4_metadata" } });
+  assert.equal(created.resultType, "task");
+  assert.match(created.statusMessage, /Ran \d of 3 profiles/);
+  let task = created;
+  for (let polls = 0; task.status === "working" && polls < 5; polls++) task = await modern("task-user", "tasks/get", { taskId: created.taskId });
+  assert.equal(task.status, "completed");
+  const rows = task.result.structuredContent.profiles;
+  assert.deepEqual(rows.map(row => row.slug).sort(), ["east", "north", "south"]);
+  assert.ok(rows.every(row => row.ok && /properties\/\d00\/metadata/.test(row.data.name)), "every profile answered");
+  assert.deepEqual(read.sort(), ["100", "200", "300"], "each profile ran exactly once");
 });
