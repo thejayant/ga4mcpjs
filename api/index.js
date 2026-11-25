@@ -17,6 +17,7 @@ import { PROVIDERS, configureAccountProviders } from "./connections/providers.js
 import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
 import { gbpRequest } from "../MCP GBP/client.js";
+import { loadSkills, registerSkills } from "./_skills.js";
 
 // Every outbound call gets a deadline, so one hung upstream request fails clearly instead of
 // holding the function until the platform kills it. 50s leaves room for BigQuery's 45s wait.
@@ -5654,6 +5655,9 @@ async function toolAccounts(req, family) {
   return req.profile ? accounts.filter(account => account.key === req.profile.accounts?.[family]) : accounts;
 }
 
+// Loaded once per cold start; see skills/ and api/_skills.js.
+const SKILLS = loadSkills();
+
 function createServer(req) {
   const server = new McpServer({ name: "marketing-data-mcp", version: "1.3.0" }, req.profile ? { instructions: profileInstructions(req.profile) } : undefined);
   routeToolsByAccount(server, req);
@@ -8381,6 +8385,9 @@ function createServer(req) {
     });
   });
   }
+  // Skills last, so each one is offered only where at least half of the tools it uses are on this connector.
+  const registered = server._registeredTools || {};
+  registerSkills(server, { skills: SKILLS, isAvailable: skill => skill.tools.filter(name => registered[name]).length * 2 >= skill.tools.length });
   return server;
 }
 
