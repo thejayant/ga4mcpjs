@@ -142,7 +142,7 @@ test("up to five channels connect; a sixth is refused, and a connected one can s
   const page = await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
   assert.match(page, /5 of 5 channels connected\. Disconnect one to add another/);
   assert.match(page, /Refresh a connected channel/);
-  assert.match(page, /Channel 3 · 10 subscribers · via owner@example\.com/);
+  assert.match(page, /<strong>Channel 3<\/strong><span class="acct-meta">10 subscribers · via owner@example\.com/);
 
   const sixth = await connectChannel(t, "UC_6", "Channel 6");
   assert.match(sixth.get("error"), /up to 5 YouTube channels/);

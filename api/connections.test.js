@@ -152,7 +152,7 @@ test("manage_connections gives a private link; the page connects Bing with a che
   assert.equal(connect.status, 303);
   assert.match(connect.headers.get("location"), /connected=bing_webmaster/);
   const after = await (await realFetch(pageUrl)).text();
-  assert.match(after, /Connected · 1 verified site/);
+  assert.match(after, /<span class="acct-meta">1 verified site<\/span>/);
   assert.ok(!after.includes("key-123"), "the saved key is never shown");
 
   const sites = await callTool(token, "bing_webmaster_sites", {}, async url => { assert.match(url, /GetUserSites\?apikey=key-123/); return bingSites(); });
@@ -236,7 +236,7 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
   globalThis.fetch = realFetch;
   assert.equal(callback.status, 303);
   assert.match(callback.headers.get("location"), /connected=youtube/);
-  assert.match(await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text(), /Connected · Get Carports TV · 1,520 subscribers/);
+  assert.match(await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text(), /<strong>Get Carports TV<\/strong><span class="acct-meta">1,520 subscribers<\/span>/);
 
   const report = (await callTool(token, "youtube_channel_report", { startDate: "2026-10-01", endDate: "2026-10-02" }, google)).structuredContent;
   assert.equal(report.channel, "Get Carports TV");
@@ -474,7 +474,7 @@ test("the Connections page shows the main sign-in and says when a Google account
   const token = tokenFor("user-main-label");
   const t = await linkFor(token);
   const pageText = async () => (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
-  assert.match(await pageText(), /Main sign-in · Analytics[\s\S]*Reconnect there once to show its email/, "before the email is known");
+  assert.match(await pageText(), /<strong>Main sign-in<\/strong><span class="acct-meta">[^<]*Reconnect there once to show its email/, "before the email is known");
 
   await testSupport.connectionStore.saveAccountInfo("user-main-label", { googleEmail: "owner@example.com" });
   const labelled = await pageText();
@@ -539,7 +539,7 @@ test("extra Google accounts: each GA4 property is read with the login that can s
   // A second sign-in with the same Google account replaces it rather than adding a duplicate.
   await signIn(t, "google_account", async url => url.includes("token") ? json({ access_token: "g2-access", refresh_token: "g2-refresh", expires_in: 3600 }) : json({ sub: "222", email: "agency@example.com" }));
   const page = await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
-  assert.equal(page.match(/Connected · agency@example\.com/g).length, 1);
+  assert.equal(page.match(/<strong>agency@example\.com<\/strong>/g).length, 1);
 
   const used = [];
   const google = async (url, init) => {
@@ -617,4 +617,23 @@ test("extra Meta logins: a long-lived token stands in when the main sign-in has 
     delete process.env.META_APP_ID;
     delete process.env.META_APP_SECRET;
   }
+});
+
+test("the Connections page serves Anime.js itself and embeds the platform logos", async () => {
+  const script = await realFetch(`${baseUrl}/assets/anime-4.5.0.min.js`);
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get("content-type"), /javascript/);
+  assert.match(script.headers.get("cache-control"), /immutable/);
+  assert.match(await script.text(), /Anime\.js/);
+
+  const t = await linkFor(tokenFor("user-page-design"));
+  const html = await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}&error=Bing+rejected+this+API+key.&p=bing_webmaster`)).text();
+  assert.match(html, /<script src="\/assets\/anime-4\.5\.0\.min\.js" defer><\/script>/);
+  assert.ok(!/<script[^>]+src="https?:/.test(html), "no third-party scripts on a page that holds a private link");
+  for (const id of ["google_account", "youtube", "meta_account", "callrail_key", "clarity", "bing_webmaster"]) {
+    const card = html.slice(html.indexOf(`id="p-${id}"`));
+    assert.ok(card.length < html.length && card.slice(0, 800).includes('<img class="logo" src="data:image/'), `${id} shows its logo`);
+  }
+  assert.match(html, /class="toast error"[^>]*data-provider="bing_webmaster"/, "a failure names the platform it belongs to");
+  assert.match(html, /data-expires="\d{4}-\d\d-\d\dT/, "the private link counts down");
 });

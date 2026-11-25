@@ -47,8 +47,10 @@ export function loadSkills(dir = SKILLS_DIR) {
     .map(entry => entry.name)
     .sort()
     .map(name => {
-      const buffer = fs.readFileSync(path.join(dir, name, "SKILL.md"));
-      const text = buffer.toString("utf8");
+      // LF line endings whatever the checkout (Git on Windows may write CRLF), so the text and its
+      // digest are the same on every machine.
+      const text = fs.readFileSync(path.join(dir, name, "SKILL.md"), "utf8").replace(/\r\n?/g, "\n");
+      const buffer = Buffer.from(text, "utf8");
       const { frontmatter, body } = parseFrontmatter(text);
       if (frontmatter.name !== name) throw new Error(`Skill folder ${name} must match its frontmatter name (${frontmatter.name})`);
       if (!NAME_PATTERN.test(name) || name.length > 64) throw new Error(`Invalid skill name: ${name}`);

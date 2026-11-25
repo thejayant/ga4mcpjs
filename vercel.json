@@ -1,7 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/index.js": { "includeFiles": "{dashboard/dist/**,plugin/marketer-companion-dashboard/**,skills/**}" }
+    "api/index.js": { "includeFiles": "{dashboard/dist/**,plugin/marketer-companion-dashboard/**,skills/**,node_modules/animejs/dist/bundles/anime.umd.min.js}" }
   },
   "crons": [
     { "path": "/cron/clarity-snapshots", "schedule": "30 0 * * *" }

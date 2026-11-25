@@ -1,0 +1,2 @@
+# Skill playbooks are served byte for byte (with a sha256 digest), so keep them LF on every checkout.
+skills/**/*.md text eol=lf
