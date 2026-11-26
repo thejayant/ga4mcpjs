@@ -196,7 +196,7 @@ export function publicConnection(id, record) {
 
 
 const shortHash = value => createHash("sha256").update(String(value)).digest("hex").slice(0, 16);
-const platform = { googleScopes: [], metaScopes: [], metaVersion: "v21.0", metaConfigId: null, callrailBase: "https://api.callrail.com/v3" };
+const platform = { googleScopes: [], metaScopes: [], metaVersion: null, metaConfigId: null, callrailBase: "https://api.callrail.com/v3" };
 
 // Called once by the server with its own scope lists and Meta/CallRail settings.
 export function configureAccountProviders(settings) {
