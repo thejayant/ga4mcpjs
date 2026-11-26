@@ -106,12 +106,20 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
 
   server.registerTool("manage_connections", {
     title: "Manage Connections",
-    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too, up to ${MAX_YOUTUBE_CHANNELS} YouTube channels (YouTube tools then take \`channel\`) and up to ${MAX_CLARITY_PROJECTS} Microsoft Clarity projects (Clarity tools then take \`project\`); tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected and a private link, valid 30 minutes, to a page where the user connects platforms and builds profiles. Give the user the link; never ask for keys in chat.`,
-    inputSchema: {}, annotations: { readOnlyHint: true }
-  }, forUser(null, async ({ auth }) => {
+    description: `Connect or disconnect extra platforms (${Object.values(PROVIDERS).map(p => p.name).join(", ")}). Extra Google accounts, Meta logins and CallRail keys can be added too, up to ${MAX_YOUTUBE_CHANNELS} YouTube channels (YouTube tools then take \`channel\`) and up to ${MAX_CLARITY_PROJECTS} Microsoft Clarity projects (Clarity tools then take \`project\`); tools then use whichever account can see the property asked about. Also lists the user's profiles (one per client: a set of accounts with default IDs). Each profile has its own connector URL to add as a separate connector, and on this connector any tool takes account "profile:<slug>" to use that profile's account; run_across_profiles compares profiles. Returns the platforms already connected. The private link to the page where the user connects platforms and builds profiles is a tokenized URL, so it is only returned when you ask for it: pass includeManageUrl: true when the user actually needs to open the page, then give them the link. Never ask for keys in chat.`,
+    inputSchema: {
+      includeManageUrl: z.boolean().optional()
+        .describe("Include the private, tokenized management URL (valid 30 minutes). Default false: that URL grants access to this user's connections page, so it is left out unless the user needs to open it.")
+    },
+    annotations: { readOnlyHint: true }
+  }, forUser(null, async ({ auth, args }) => {
     const ids = await store.list(auth.userId);
     const connected = (await Promise.all(ids.map(async id => publicConnection(id, await store.get(auth.userId, id))))).filter(Boolean);
-    const link = connectionsLink(baseUrl(req), seal, auth.userId);
+    // The management URL carries a sealed 30-minute token granting access to this user's
+    // connections page, so it is a credential. It would land in LLM context and chat logs,
+    // so it is minted only when the caller explicitly asks for it (item 22).
+    const wantsManageUrl = args?.includeManageUrl === true;
+    const link = wantsManageUrl ? connectionsLink(baseUrl(req), seal, auth.userId) : null;
     const profiles = (await store.listProfiles(auth.userId)).map(profile => ({
       name: profile.name, slug: profile.slug, connectorUrl: profileUrl(baseUrl(req), profile.slug),
       accounts: Object.fromEntries(Object.keys(PROFILE_FAMILIES).filter(family => profile.accounts?.[family]).map(family => [family, profile.accountLabels?.[family] || profile.accounts[family]])),
@@ -124,7 +132,9 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
     const who = splitUserId(auth.userId);
     const earlier = who ? (await store.list(who.account)).length + (await store.listProfiles(who.account)).length : 0;
     const scope = { assistant: who?.name || null, ...(earlier ? { earlierConnections: earlier, earlierNote: `${earlier} connection(s) from before each assistant kept its own are waiting. Open manageUrl and choose "Move them here" to use them in ${who.name}.` } : {}) };
-    return result({ ...scope, ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, clarity: { projects: clarityProjects, limit: MAX_CLARITY_PROJECTS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), manageUrl: link.url, linkExpiresAt: link.expiresAt });
+    return result({ ...scope, ...(req.profile ? { currentProfile: { name: req.profile.name, slug: req.profile.slug } } : {}), mainSignIn: { google: mainGoogle || "connected (email shown after the next reconnect)" }, connected, youtube: { channels: youtubeChannels, limit: MAX_YOUTUBE_CHANNELS }, clarity: { projects: clarityProjects, limit: MAX_CLARITY_PROJECTS }, profiles, available: Object.entries(PROVIDERS).filter(([id, p]) => (p.multi && !(p.maxConnections && ids.filter(other => other === id || other.startsWith(`${id}:`)).length >= p.maxConnections)) || !ids.includes(id)).map(([id, p]) => ({ provider: id, name: p.name, category: p.category })), ...(link
+      ? { manageUrl: link.url, linkExpiresAt: link.expiresAt }
+      : { manageUrl: null, manageUrlNote: "Omitted on purpose: that URL is a tokenized private link. Call manage_connections again with includeManageUrl: true when the user needs to open the connections page." }) });
   }));
 
   server.registerTool("bing_webmaster_sites", {

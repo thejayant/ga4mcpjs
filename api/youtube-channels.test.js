@@ -131,7 +131,7 @@ async function connectChannel(t, channelId, title) {
     return new URL(callback.headers.get("location"), baseUrl).searchParams;
   } finally { globalThis.fetch = realFetch; }
 }
-const linkFor = async token => new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+const linkFor = async token => new URL((await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
 const youtubeIds = async userId => (await store.list(userId)).filter(id => id === "youtube" || id.startsWith("youtube:"));
 
 test("up to five channels connect; a sixth is refused, and a connected one can still refresh", async () => {

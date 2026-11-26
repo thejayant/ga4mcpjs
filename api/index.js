@@ -535,19 +535,28 @@ const PLATFORM_GUARDRAILS = {
       "Presets cover impression share, Quality Score, Shopping, Performance Max, geo, device, ad schedule, demographics, audiences, placements, conversion actions, landing pages, budgets, bidding strategies, video, calls, change history, recommendations, and experiments."
     ],
     limitations: [
-      "Requires GOOGLE_ADS_DEVELOPER_TOKEN and often a login-customer-id for MCC access.",
+      "This server is strictly read-only against Google Ads. Every request passes an allowlist of read-only RPCs, and anything that would create, edit, pause, remove or apply something is refused locally without contacting Google.",
+      "A developer token is optional. Google sunset developer tokens on 9 September 2026: the header is ignored by the API servers, and API access level now belongs to the Google Cloud project that issued the OAuth credentials. Check and raise access on that project's Google Ads API overview page in the Cloud console.",
+      "Accounts under a manager need a login-customer-id header. This is handled automatically from the cached account directory, which also drives a retry under the account itself and then each known manager.",
       "Accuracy depends on using valid GAQL fields for the selected resource.",
       "Auction Insights is not exposed by the Google Ads API at all; no tool here can return it.",
       "Quality Score is a current attribute, not a historical series; it does not vary by date.",
       "Conversion action segmentation is incompatible with cost, click, and impression metrics.",
       "change_history is limited to the last 30 days and 10000 rows; click_view is single-day and limited to the last 90 days.",
-      "Basic Access developer tokens are capped at roughly 15000 operations and 1000 requests per day. Every tool call is one request, so prefer one wide query over several narrow ones and page deliberately with pageToken."
+      "Granular reporting data (daily, hourly, weekly) is retained for 37 months; high-level data (monthly, quarterly, yearly) for 11 years. A date range beyond that is rejected locally, because Google answers it with an empty result rather than an error.",
+      "v26 search takes no pageSize: pages are a fixed 10000 rows and a row ceiling belongs in the GAQL LIMIT.",
+      "Keyword Planner methods (GenerateKeywordIdeas, GenerateKeywordHistoricalMetrics, GenerateKeywordForecastMetrics) are limited to 1 request per second per customer; exceeding that returns RESOURCE_EXHAUSTED."
     ],
     quota: {
-      accessLevel: "Set GOOGLE_ADS_ACCESS_LEVEL to basic or standard to document which tier this token holds.",
-      basicAccessDailyOperations: 15000,
-      basicAccessDailyRequests: 1000,
-      guidance: "One tool call equals one API request. Auto-pagination is deliberately not implemented so a single call cannot silently drain the daily quota."
+      note: "Daily limits are counted in API operations per Google Cloud project, not per developer token, since the 9 September 2026 token sunset.",
+      accessLevel: "Set GOOGLE_ADS_ACCESS_LEVEL to test, explorer, basic or standard to document which tier the Cloud project holds.",
+      dailyOperationsByAccessLevel: {
+        test: "15000 against test accounts only",
+        explorer: "2880 against production accounts, 15000 against test accounts",
+        basic: "15000 against both test and production accounts",
+        standard: "unlimited"
+      },
+      guidance: "One tool call equals one API request, except the account directory and the permission retry ladder, which are both cached. Auto-pagination is deliberately not implemented so a single call cannot silently drain the daily quota. Ads responses carry a quota block with usedToday and the limit, and warn past 80%."
     }
   },
   ga4: {

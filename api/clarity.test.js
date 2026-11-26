@@ -41,7 +41,7 @@ async function rpc(token, path, method, params, upstream) {
   } finally { globalThis.fetch = realFetch; }
 }
 const callTool = (token, name, args = {}, upstream, path = "/mcp") => rpc(token, path, "tools/call", { name, arguments: args }, upstream);
-const linkFor = async token => new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+const linkFor = async token => new URL((await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
 const form = (t, path, fields) => realFetch(`${baseUrl}${path}?t=${encodeURIComponent(t)}`, { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields) });
 
 // A Data Export answer by URL and device, in Clarity's shape (counts as strings, rates as numbers).
