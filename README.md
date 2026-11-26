@@ -583,7 +583,67 @@ token your MCP client uses for this server.
 - `pmax_search_terms` requires `campaignId` because Google rejects `campaign_search_term_insight` without a campaign filter. Cost is not exposed for that resource.
 - GAQL field paths are snake_case (`metrics.cost_micros`) while REST responses come back camelCase (`metrics.costMicros`); the normalizer resolves either spelling.
 
+## GA4 notes
+
+- Presets default to the `keyEvents` metric. GA4 renamed `conversions` to `keyEvents`; pass `conversionMetric: "conversions"` only if a property rejects the new name.
+- `includeDailyBreakdown` is off by default so presets return totals for the window rather than one row per day.
+- `google_ads_performance` needs a linked Google Ads account, and `site_search` needs site search configured on the property.
+- `demographics_detail` needs Google signals; without it, age and gender come back as `(not set)`.
+- GA4 applies thresholding and sampling on some properties, so small segments can be suppressed or approximate.
+- `run_ga4_funnel_report` uses the Data API **v1alpha** surface, which is the only place funnel reporting exists. Its response shape differs from `runReport`.
+- `run_ga4_cohort_report` builds a rolling cohort series from the date range, or accepts a full `cohortSpec`. GA4 rejects `dateRanges` alongside `cohortSpec`, so the cohort windows carry the dates.
+- `list_ga4_custom_definitions`, `list_ga4_key_events`, and `list_ga4_data_streams` use the Admin API and are the way to confirm what a property actually measures before writing reports.
+
+## Finding the right tool
+
+`find_marketing_data` is the entry point when you do not already know which tool answers a
+question. It searches one index built across every platform, preset, normalized field and
+tool, and returns ranked matches with a ready-to-run call:
+
+```
+find_marketing_data { "query": "how much did we spend" }
+```
+
+```json
+{ "matches": [
+  { "kind": "field", "platform": ["google_ads", "ga4", "meta"], "id": "cost",
+    "nativeFields": { "google_ads": ["metrics.cost_micros"], "ga4": ["advertiserAdCost"], "meta": ["spend"] },
+    "notAvailableOn": ["search_console", "merchant_center"] },
+  { "kind": "preset", "platform": "google_ads", "id": "campaign_budgets",
+    "call": { "tool": "run_google_ads_preset", "arguments": { "preset": "campaign_budgets", "customerId": "<customerId>" } } }
+] }
+```
+
+Three things it does that the existing dumps do not:
+
+- **Plain words work.** "phone calls" reaches the CallRail presets, "branded queries"
+  reaches Search Console, "bounce rate" reaches GA4 — a synonym layer maps everyday
+  language onto the names the APIs actually use.
+- **It says where a number does *not* exist.** A cross-platform field lists its native name
+  on each platform that has it, and names the platforms that do not.
+- **It says when something exists nowhere.** Asking for "auction insights" returns the
+  nearest alternatives *and* a `notAvailable` entry explaining that no tool here can return
+  it, so a model stops looking instead of inventing a call.
+
+Narrow with `platform` (`ga4`, `google_ads`, `search_console`, `merchant_center`, `meta`,
+`callrail`, `google_business_profile`, `youtube`, …) or `kind` (`preset`, `field`, `tool`).
+
+The index is built at startup from the same definitions the tools themselves use, so it
+cannot drift from what the server can actually do: a preset added to a platform's table
+becomes discoverable without touching the catalogue. `list_marketing_presets`,
+`get_marketing_schema` and `list_marketing_guardrails` still return the full dumps when you
+want to browse rather than search.
+
 ## Search Console notes
+
+- Search Analytics returns at most **25000 rows** per request. `rowLimit` above that is clamped and reported in `notes`; page with `startRow`.
+- `striking_distance` filters on average position **after** fetching, because the API cannot filter on position. It defaults to positions 5-20 with at least 10 impressions, tunable via `minPosition`, `maxPosition`, and `minImpressions`.
+- `search_appearance` cannot be combined with any other dimension; Google rejects that pairing.
+- `discover_performance` and `news_performance` pin `type` themselves. Discover has no query dimension.
+- Query rows are anonymised, so query totals are lower than the site total, and average position cannot be summed across rows.
+- The last two to three days are incomplete unless `dataState: "all"` is set.
+- `compare_search_console_periods` costs **two** Search Analytics requests and returns per-key deltas plus a `new` / `lost` / `both` status. Position deltas are sign-flipped so positive always means improved.
+
 
 ### Search surfaces
 
@@ -637,26 +697,6 @@ Google reports where data is still being collected, and responses now surface it
 settling, because comparing it against a complete previous period looks like a drop that is
 not real.
 
-## GA4 notes
-
-- Presets default to the `keyEvents` metric. GA4 renamed `conversions` to `keyEvents`; pass `conversionMetric: "conversions"` only if a property rejects the new name.
-- `includeDailyBreakdown` is off by default so presets return totals for the window rather than one row per day.
-- `google_ads_performance` needs a linked Google Ads account, and `site_search` needs site search configured on the property.
-- `demographics_detail` needs Google signals; without it, age and gender come back as `(not set)`.
-- GA4 applies thresholding and sampling on some properties, so small segments can be suppressed or approximate.
-- `run_ga4_funnel_report` uses the Data API **v1alpha** surface, which is the only place funnel reporting exists. Its response shape differs from `runReport`.
-- `run_ga4_cohort_report` builds a rolling cohort series from the date range, or accepts a full `cohortSpec`. GA4 rejects `dateRanges` alongside `cohortSpec`, so the cohort windows carry the dates.
-- `list_ga4_custom_definitions`, `list_ga4_key_events`, and `list_ga4_data_streams` use the Admin API and are the way to confirm what a property actually measures before writing reports.
-
-## Search Console notes
-
-- Search Analytics returns at most **25000 rows** per request. `rowLimit` above that is clamped and reported in `notes`; page with `startRow`.
-- `striking_distance` filters on average position **after** fetching, because the API cannot filter on position. It defaults to positions 5-20 with at least 10 impressions, tunable via `minPosition`, `maxPosition`, and `minImpressions`.
-- `search_appearance` cannot be combined with any other dimension; Google rejects that pairing.
-- `discover_performance` and `news_performance` pin `type` themselves. Discover has no query dimension.
-- Query rows are anonymised, so query totals are lower than the site total, and average position cannot be summed across rows.
-- The last two to three days are incomplete unless `dataState: "all"` is set.
-- `compare_search_console_periods` costs **two** Search Analytics requests and returns per-key deltas plus a `new` / `lost` / `both` status. Position deltas are sign-flipped so positive always means improved.
 
 ## Meta notes (Facebook / Instagram)
 

@@ -24,6 +24,7 @@ import {
   explainEmptySearchConsoleResult, searchConsoleFreshness
 } from "./_search-console/capabilities.js";
 import { metaGraphBaseUrl, metaVersionInfo } from "./_meta/version.js";
+import { buildMarketingCatalog, searchCatalog } from "./_catalog/catalog.js";
 import { GOOGLE_ADS_API_VERSION, googleAdsApiVersion } from "./_google-ads/version.js";
 import { assertReadOnly } from "./_google-ads/gate.js";
 import { gbpRequest } from "../MCP GBP/client.js";
@@ -5091,6 +5092,34 @@ function buildMarketingGuardrailsPayload() {
   };
 }
 
+// The searchable capability index, built once per cold start from the same definitions
+// the tools themselves use, so it cannot drift from what the server can actually do.
+let marketingCatalogCache = null;
+function marketingCatalog(toolNames = []) {
+  if (marketingCatalogCache) return marketingCatalogCache;
+  const { expertVersion: _version, ...presets } = buildMarketingPresetCatalog();
+  marketingCatalogCache = buildMarketingCatalog({
+    presets,
+    normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
+    guardrails: PLATFORM_GUARDRAILS,
+    tools: toolNames.map((name) => ({ name, platform: toolFamily(name) || platformForToolName(name) }))
+  });
+  return marketingCatalogCache;
+}
+
+// toolFamily only knows google/meta/callrail; name the rest so every tool lands on a platform.
+function platformForToolName(name) {
+  if (/^gbp_/.test(name)) return "google_business_profile";
+  if (/^youtube_/.test(name)) return "youtube";
+  if (/^clarity_/.test(name)) return "clarity";
+  if (/^bing_/.test(name)) return "bing_webmaster";
+  if (/bigquery/.test(name)) return "bigquery";
+  if (/merchant/.test(name)) return "merchant_center";
+  if (/search_console/.test(name)) return "search_console";
+  if (/ga4/.test(name)) return "ga4";
+  return "other";
+}
+
 function buildMarketingPresetCatalog() {
   return {
     expertVersion: EXPERT_VERSION,
@@ -5682,6 +5711,41 @@ async function createServer(req, era = "legacy") {
     inputSchema: {},
     annotations: { readOnlyHint: true }
   }, async () => buildToolResult(buildMarketingPresetCatalog()));
+  // One searchable index across every platform, preset, normalized field and tool, so a
+  // model can find the right call for a question without pulling three large dumps first.
+  server.registerTool("find_marketing_data", {
+    title: "Find Marketing Data",
+    description:
+      "Read-only. Search everything this server can answer and get back the exact tool and arguments to call. " +
+      "Ask in plain words (\"bounce rate\", \"phone calls\", \"branded queries\", \"how much did we spend\", \"product listing issues\") " +
+      "or by field name. Returns ranked matches across Google Ads, GA4, Search Console, Merchant Center, Meta, CallRail, " +
+      "Business Profile, YouTube, Clarity, Bing and BigQuery, each with the platform, the preset or field, the native field " +
+      "names per platform, and a ready-to-run call. Also says when something is not available anywhere, so you do not go " +
+      "looking for data no API exposes. Start here when you do not already know which tool answers a question.",
+    inputSchema: {
+      query: z.string().min(1).max(200)
+        .describe('What you are looking for, in plain words or as a field name.'),
+      platform: z.string().min(1).max(40).optional()
+        .describe("Restrict to one platform, for example ga4, google_ads, search_console, merchant_center, meta, callrail, google_business_profile, youtube."),
+      kind: z.enum(["preset", "field", "tool"]).optional()
+        .describe("Restrict to presets, normalized fields, or tools."),
+      limit: z.number().int().min(1).max(50).optional()
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      query: z.string().min(1).max(200),
+      platform: z.string().min(1).max(40).optional(),
+      kind: z.enum(["preset", "field", "tool"]).optional(),
+      limit: z.number().int().min(1).max(50).optional()
+    }).parse(params);
+    const catalog = marketingCatalog([...new Set([...Object.keys(TOOL_SCOPE_MAP), ...GOOGLE_ADS_TOOL_NAMES, ...EXPERT_TOOL_NAMES, ...CONNECTION_TOOL_NAMES, ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])])]);
+    return buildToolResult({
+      ...searchCatalog(catalog, parsed),
+      catalog: { entryCount: catalog.entryCount, platforms: catalog.platforms },
+      next: "Each match carries a `call` with the tool and arguments. Fill in the account or property id, then run it. list_marketing_guardrails explains each platform\u2019s limits."
+    });
+  });
   server.registerTool("get_marketing_schema", {
     title: "Get Marketing Schema",
     description: "Return the normalized cross-platform marketing schema and field mapping guide.",
