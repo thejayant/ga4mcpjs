@@ -206,7 +206,7 @@ test("run_across_profiles runs a read-only tool per profile with each profile's 
 
 test("profiles are created, listed and deleted on the Connections page", async () => {
   const token = tokenFor("p-user-5");
-  const managed = (await callTool(token, "/mcp", "manage_connections")).structuredContent;
+  const managed = (await callTool(token, "/mcp", "manage_connections", { includeManageUrl: true })).structuredContent;
   assert.deepEqual(managed.profiles, []);
   const t = new URL(managed.manageUrl).searchParams.get("t");
   const post = (path, body) => realFetch(`${baseUrl}${path}?t=${encodeURIComponent(t)}`, { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body) });
@@ -235,7 +235,7 @@ test("profiles are created, listed and deleted on the Connections page", async (
   assert.equal(after[0].name, "Client A2");
 
   // Another user's link can't edit or delete this profile.
-  const otherT = new URL((await callTool(tokenFor("p-user-6"), "/mcp", "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+  const otherT = new URL((await callTool(tokenFor("p-user-6"), "/mcp", "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
   const foreign = await realFetch(`${baseUrl}/connections/profiles/${listed[0].slug}/delete?t=${encodeURIComponent(otherT)}`, { method: "POST", redirect: "manual" });
   assert.match(new URL(foreign.headers.get("location"), baseUrl).searchParams.get("error"), /no longer exists/);
   assert.equal((await callTool(token, "/mcp", "manage_connections")).structuredContent.profiles.length, 1);

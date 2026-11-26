@@ -32,7 +32,7 @@ async function manage(userId) {
   const response = await realFetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { Authorization: `Bearer ${tokenFor(userId)}`, Accept: "application/json, text/event-stream", "Content-Type": "application/json", "MCP-Protocol-Version": "2025-06-18" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "manage_connections", arguments: {} } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "manage_connections", arguments: { includeManageUrl: true } } })
   });
   return (await response.json()).result;
 }

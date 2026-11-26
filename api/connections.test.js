@@ -133,9 +133,34 @@ test("connections made before user IDs keep working but are asked to reconnect o
   assert.equal(result.structuredContent.error, "reconnect_required");
 });
 
+test("the tokenized management URL is withheld unless the caller asks for it", async () => {
+  const token = tokenFor("user-manageurl");
+  // Item 22: that URL grants access to the connections page, so it must not land in LLM
+  // context or chat logs on every call.
+  const withheld = (await callTool(token, "manage_connections")).structuredContent;
+  assert.equal(withheld.manageUrl, null, "the management URL was returned without being asked for");
+  assert.match(withheld.manageUrlNote, /includeManageUrl: true/, "the model is not told how to get the link");
+  assert.ok(!("linkExpiresAt" in withheld), "no expiry is reported when no link was minted");
+  // The rest of the payload is still useful without it.
+  assert.ok(Array.isArray(withheld.connected));
+
+  const asked = (await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent;
+  assert.match(asked.manageUrl, /\/connections\?t=/);
+  // Short-lived, and the expiry is enforced server-side when the token is read.
+  const expiresInMinutes = (new Date(asked.linkExpiresAt).getTime() - Date.now()) / 60000;
+  assert.ok(expiresInMinutes > 0 && expiresInMinutes <= 30, `link TTL should be at most 30 minutes, got ${expiresInMinutes}`);
+});
+
+test("an expired management link is refused by the server, not just hidden", async () => {
+  // The token is sealed and carries its own expiry, which /connections checks on every read.
+  const forged = testSupport.encryptJson({ typ: "connections_link", userId: "user-manageurl", exp: Date.now() - 1000 });
+  const response = await fetch(`${baseUrl}/connections?t=${encodeURIComponent(forged)}`);
+  assert.equal(response.status, 401, "an expired link must be rejected server-side");
+});
+
 test("manage_connections gives a private link; the page connects Bing with a checked key and disconnects it", async () => {
   const token = tokenFor("user-a");
-  const managed = (await callTool(token, "manage_connections")).structuredContent;
+  const managed = (await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent;
   assert.deepEqual(managed.connected, []);
   assert.ok(managed.available.some(p => p.provider === "clarity"));
   const pageUrl = managed.manageUrl.replace(/^https?:\/\/[^/]+/, baseUrl);
@@ -167,7 +192,7 @@ test("manage_connections gives a private link; the page connects Bing with a che
 });
 
 test("a rejected Bing key is not saved", async () => {
-  const managed = (await callTool(tokenFor("user-c"), "manage_connections")).structuredContent;
+  const managed = (await callTool(tokenFor("user-c"), "manage_connections", { includeManageUrl: true })).structuredContent;
   const t = new URL(managed.manageUrl).searchParams.get("t");
   globalThis.fetch = (url, init) => String(url).startsWith(baseUrl) ? realFetch(url, init) : Promise.resolve(new Response("{}", { status: 401 }));
   const connect = await realFetch(`${baseUrl}/connections/bing_webmaster?t=${encodeURIComponent(t)}`, { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "apiKey=bad" });
@@ -178,7 +203,7 @@ test("a rejected Bing key is not saved", async () => {
 
 test("Clarity answers repeat questions from a one-hour cache to protect its 10-a-day limit", async () => {
   const token = tokenFor("user-d");
-  const t = new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+  const t = new URL((await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
   await realFetch(`${baseUrl}/connections/clarity?t=${encodeURIComponent(t)}`, { method: "POST", redirect: "manual", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "token=aaa.bbb.ccc" });
   let calls = 0;
   const clarity = async url => { calls++; assert.match(url, /numOfDays=2&dimension1=Device/); return new Response(JSON.stringify([{ metricName: "Traffic", information: [{ totalSessionCount: "120", Device: "Mobile" }] }]), { status: 200 }); };
@@ -201,7 +226,7 @@ test("the store is found whatever prefix Vercel's integration used", async () =>
 
 test("YouTube connects by Google sign-in, names the channel, reports, and refreshes its token", async () => {
   const token = tokenFor("user-yt");
-  const t = new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+  const t = new URL((await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
   const page = await (await realFetch(`${baseUrl}/connections?t=${encodeURIComponent(t)}`)).text();
   assert.match(page, /Add a YouTube channel/);
 
@@ -447,7 +472,7 @@ test("YouTube connects by Google sign-in, names the channel, reports, and refres
 
 test("a cancelled or forged YouTube sign-in saves nothing", async () => {
   const token = tokenFor("user-yt2");
-  const t = new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+  const t = new URL((await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
   const state = new URL((await realFetch(`${baseUrl}/connections/youtube/start?t=${encodeURIComponent(t)}`, { redirect: "manual" })).headers.get("location")).searchParams.get("state");
   const cancelled = await realFetch(`${baseUrl}/connections/oauth/callback?error=access_denied&state=${encodeURIComponent(state)}`, { redirect: "manual" });
   assert.match(new URL(cancelled.headers.get("location"), baseUrl).searchParams.get("error"), /access was not granted/);
@@ -458,7 +483,7 @@ test("a cancelled or forged YouTube sign-in saves nothing", async () => {
 /* ---------------- Extra Google, Meta and CallRail accounts ---------------- */
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
-const linkFor = async token => new URL((await callTool(token, "manage_connections")).structuredContent.manageUrl).searchParams.get("t");
+const linkFor = async token => new URL((await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent.manageUrl).searchParams.get("t");
 // Follows a sign-in from the Connections page through the callback with `upstream` answering the platform.
 async function signIn(t, provider, upstream) {
   const start = await realFetch(`${baseUrl}/connections/${provider}/start?t=${encodeURIComponent(t)}`, { redirect: "manual" });
@@ -585,7 +610,7 @@ test("extra CallRail keys: each account's calls use its own key; tools appear wi
   assert.match(JSON.stringify(await companies("ACC2")), /ACC2 via key-2/);
   assert.match(JSON.stringify(await companies("ACC1")), /ACC1 via key-1/);
 
-  const managed = (await callTool(token, "manage_connections")).structuredContent;
+  const managed = (await callTool(token, "manage_connections", { includeManageUrl: true })).structuredContent;
   const second = managed.connected.find(c => c.label === "Agency Two");
   assert.ok(managed.available.some(p => p.provider === "callrail_key"), "more keys can always be added");
   await realFetch(`${baseUrl}/connections/${encodeURIComponent(second.id)}/disconnect?t=${encodeURIComponent(t)}`, { method: "POST", redirect: "manual" });
