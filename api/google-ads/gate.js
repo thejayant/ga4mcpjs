@@ -56,9 +56,16 @@ export const ADS_ALLOWED_RPCS = Object.freeze({
 });
 
 /**
- * Deny patterns, applied to the request path AND to the serialized body. These are
- * redundant with the allowlist by design: if someone later widens the allowlist by
- * mistake, a write-shaped request still has to clear this.
+ * Deny patterns for the request PATH. These name write-capable RPC methods, so they are
+ * matched against the path, which is what selects the RPC. They are redundant with the
+ * allowlist by design: if someone later widens the allowlist by mistake, a write-shaped
+ * path still has to clear this.
+ *
+ * They are deliberately NOT matched against the request body. A GAQL read legitimately
+ * contains words like these -- `WHERE campaign.status != 'REMOVED'` and
+ * `SELECT recommendation.dismissed` are reads -- and no request body can turn
+ * GoogleAdsService.Search into a mutate. The body is scanned separately, for the one thing
+ * that genuinely matters there: a validate_only write dry-run.
  */
 export const ADS_DENY_PATTERNS = Object.freeze([
   { name: "mutate", re: /mutate/i },
@@ -72,9 +79,15 @@ export const ADS_DENY_PATTERNS = Object.freeze([
   { name: "batch-job", re: /job/i },
   // Suggest* methods that would create a resource. SuggestGeoTargetConstants only reads,
   // so the pattern is anchored to the resource-creating variants.
-  { name: "resource-creating-suggest", re: /suggest\w*(campaign|budget|asset|ad|creative)/i },
-  // Any validate_only / validateOnly "dry run write" workaround.
-  { name: "validate-only", re: /validate_?only/i }
+  { name: "resource-creating-suggest", re: /suggest\w*(campaign|budget|asset|ad|creative)/i }
+]);
+
+/**
+ * Body-level deny patterns: a validate_only / validateOnly "dry run write" workaround.
+ * Matched on the serialized body and params, where such a flag would actually be set.
+ */
+export const ADS_BODY_DENY_PATTERNS = Object.freeze([
+  { name: "validate-only", re: /"validate_?only"\s*:/i }
 ]);
 
 /**
@@ -115,8 +128,8 @@ export function adsRequestKey(path) {
   return method === null ? pattern : `${pattern}:${method}`;
 }
 
-function denyMatch(haystack) {
-  return ADS_DENY_PATTERNS.find((pattern) => pattern.re.test(haystack)) || null;
+function denyMatch(patterns, haystack) {
+  return patterns.find((pattern) => pattern.re.test(haystack)) || null;
 }
 
 /**
@@ -127,10 +140,15 @@ function denyMatch(haystack) {
  */
 export function assertReadOnly({ path, method = "POST", body, params } = {}) {
   const key = adsRequestKey(path);
-  const serialized = `${String(path || "")} ${body === undefined ? "" : JSON.stringify(body)} ${params === undefined ? "" : JSON.stringify(params)}`;
 
-  const denied = denyMatch(serialized);
-  if (denied) throw adsReadOnlyError(key, `matched the blocked pattern "${denied.name}"`);
+  // 1. The path must not name a write-capable RPC.
+  const deniedPath = denyMatch(ADS_DENY_PATTERNS, String(path || ""));
+  if (deniedPath) throw adsReadOnlyError(key, `matched the blocked pattern "${deniedPath.name}"`);
+
+  // 2. The body must not carry a validate_only write dry-run.
+  const serializedBody = `${body === undefined ? "" : JSON.stringify(body)} ${params === undefined ? "" : JSON.stringify(params)}`;
+  const deniedBody = denyMatch(ADS_BODY_DENY_PATTERNS, serializedBody);
+  if (deniedBody) throw adsReadOnlyError(key, `matched the blocked pattern "${deniedBody.name}"`);
 
   const allowed = Object.prototype.hasOwnProperty.call(ADS_ALLOWED_RPCS, key) ? ADS_ALLOWED_RPCS[key] : null;
   if (!allowed) throw adsReadOnlyError(key, "is not on the read-only allowlist");

@@ -66,6 +66,25 @@ test("read-only gate blocks every write RPC without contacting Google", () => {
   assert.equal(fetchCalls, 0, "a blocked request reached the network");
 });
 
+test("a legitimate read query is not mistaken for a write", () => {
+  // These GAQL reads contain words that name write RPCs. They are still reads: no request
+  // body can turn GoogleAdsService.Search into a mutate, so the deny patterns apply to the
+  // path, not the body.
+  const reads = [
+    "SELECT campaign.id FROM campaign WHERE campaign.status != 'REMOVED'",
+    "SELECT recommendation.type, recommendation.dismissed FROM recommendation",
+    "SELECT campaign.name FROM campaign WHERE campaign.name LIKE '%Update%'",
+    "SELECT change_event.resource_change_operation FROM change_event",
+    "SELECT customer.id FROM customer WHERE customer.descriptive_name = 'Create Leads Ltd'"
+  ];
+  for (const query of reads) {
+    assert.doesNotThrow(
+      () => assertReadOnly({ path: "customers/123/googleAds:search", method: "POST", body: { query } }),
+      `a read was blocked: ${query}`
+    );
+  }
+});
+
 test("gate blocks a validate_only write dry-run, even on an allowed path", () => {
   assert.throws(
     () => assertReadOnly({ path: "customers/123/googleAds:search", body: { query: "SELECT x", validateOnly: true } }),
