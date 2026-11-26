@@ -50,6 +50,9 @@ It exposes these MCP tools:
 - `search_google_ads_fields`
 - `run_google_ads_preset`
 - `list_google_ads_customer_clients`
+- `google_ads_benchmarks`
+- `google_ads_local_services_eligibility`
+- `google_ads_keyword_research_batch`
 - `list_callrail_accounts`
 - `list_callrail_companies`
 - `list_callrail_calls`
@@ -112,7 +115,12 @@ the token instead of forcing the user to sign in again.
 - `GOOGLE_CLIENT_SECRET`
 - `APP_BASE_URL`
 - `APP_ENCRYPTION_KEY`
-- `GOOGLE_ADS_DEVELOPER_TOKEN` for Google Ads tools
+
+`GOOGLE_ADS_DEVELOPER_TOKEN` is **no longer required**. Google sunset developer tokens on
+9 September 2026: the header is ignored by the API servers, and Google Ads API access level
+and quota now belong to the Google Cloud project that issued the OAuth credentials. Check
+and raise access on that project's **Google Ads API overview** page in the Cloud console.
+The variable is still read if present, and the header is simply omitted when it is unset.
 
 Compatibility fallback names also supported:
 
@@ -123,9 +131,11 @@ Optional:
 
 - `CALLRAIL_API_BASE_URL` to override the default CallRail API base URL (`https://api.callrail.com/v3`)
 - `CBX_INTERNAL_SECRET` and `CALLRAIL_API_TOKEN` for the internal `/cbx` connection only
-- `GOOGLE_ADS_LOGIN_CUSTOMER_ID` for manager-account access in Google Ads
-- `GOOGLE_ADS_API_VERSION` to override the default Google Ads API version (`v22`)
-- `GOOGLE_ADS_ACCESS_LEVEL` to record the developer-token tier, `basic` (default) or `standard`
+- `GOOGLE_ADS_API_VERSION` to override the pinned Google Ads API version (`v26`, serving v26.2)
+- `GOOGLE_ADS_ACCESS_LEVEL` to record the Cloud project's tier: `test`, `explorer` (default), `basic` or `standard`
+- `GOOGLE_ADS_READ_ONLY` is accepted but has no effect: Google Ads is **always** read-only here, and setting it to anything other than `true` is ignored with a warning rather than enabling writes
+- `GOOGLE_ADS_DEVELOPER_TOKEN` is optional (see above) and sent only if set
+- `GOOGLE_ADS_LOGIN_CUSTOMER_ID` is **no longer used at all**. It used to be sent as the default `login-customer-id` for every account, which made accounts that were not linked under that manager fail with `USER_PERMISSION_DENIED`. The header is now chosen per account (see Google Ads notes).
 - `META_APP_ID` and `META_APP_SECRET` for the Meta (Facebook / Instagram) tools
 - `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
 - `META_LOGIN_CONFIG_ID` to use a Facebook Login for Business configuration instead of a raw scope list (recommended)
@@ -190,7 +200,7 @@ https://YOUR-VERCEL-DOMAIN/connections/oauth/callback
 
 These tools tell you what they spend. Fan-out tools return `requestCount`.
 
-- `run_google_ads_across_accounts` costs **one request per account**. It defaults to 10 accounts, caps at 50, and has a `dryRun` that lists the accounts and the request count without querying. On a Basic Access developer token, check with `dryRun` first.
+- `run_google_ads_across_accounts` costs **one request per account**. It defaults to 10 accounts, caps at 50, and has a `dryRun` that lists the accounts and the request count without querying. Check with `dryRun` first unless the Cloud project has Standard access.
 - `query_search_console_advanced` costs one request per 25,000 rows per site.
 - `run_ga4_multi_property_report` costs one request per property. GA4 quota is per property, so this does not concentrate cost.
 
@@ -365,18 +375,203 @@ A skill is offered only where at least half of the tools in its `metadata.tools`
 
 ## Google Ads notes
 
-- Google Ads tools require both Google OAuth access and a valid `GOOGLE_ADS_DEVELOPER_TOKEN`.
-- For MCC or manager-account setups, set `GOOGLE_ADS_LOGIN_CUSTOMER_ID` if Google Ads requires `login-customer-id` headers.
-- `list_google_ads_accessible_customers` only returns accounts the OAuth user can reach directly. For a full manager-account tree use `list_google_ads_customer_clients`, which walks `customer_client` in a single request.
-- Use `search_google_ads_fields` and `get_google_ads_field` first when you need to discover valid fields, segments, metrics, and filters before writing GAQL.
+### Read-only by design
+
+This server never creates, edits, pauses, removes or applies anything in Google Ads.
+
+The Google Ads API has a single OAuth scope (`adwords`) and that scope permits writes, so
+there is no read-only scope to rely on. The guarantee is enforced in our own code, in
+`api/google-ads/gate.js`: every Ads request passes a central gate that allows only an
+explicit allowlist of read-only RPCs (`GoogleAdsService.Search`/`SearchStream`,
+`CustomerService.ListAccessibleCustomers`, the three `KeywordPlanIdeaService` methods, the
+`ReachPlanService` read/plan methods, `BenchmarksService.GenerateBenchmarksMetrics`,
+`GeoTargetConstantService.SuggestGeoTargetConstants`,
+`LocalServicesEligibilityService.CheckLocalServicesEligibility` and the two field-metadata
+reads) and refuses everything else. A refused call throws
+`ADS_READ_ONLY: write operations are disabled` **before any socket is opened**, so it never
+reaches Google. `query_google_ads` and `search_stream_google_ads` additionally reject
+anything that is not a `SELECT ... FROM ...` statement.
+
+`GOOGLE_ADS_READ_ONLY` exists as a tripwire only. There is deliberately no code path that
+turns enforcement off, so a future change cannot quietly enable writes.
+
+**The strongest guarantee is not in this code.** If you want a bug here to be incapable of
+writing to your Google Ads account, give each connected Google login **Read only** access
+in Google Ads itself: **Admin → Access and security → Users**, then set that user's access
+level to Read only. Our gate is defence in depth; the account-level permission is the real
+boundary, because it holds even if this server is wrong.
+
+### Automatic account routing
+
+Pass `customerId` and nothing else. The server keeps a per-user **account directory**,
+built across every connected Google login and cached for 12 hours, recording for each
+customer which Google account can see it and which `login-customer-id` header actually
+works. From that it resolves the header in one place, in this order:
+
+1. an explicit `loginCustomerId`, if you pass one
+2. the known manager for that customer, from the directory
+3. the `customerId` itself
+
+It never falls back to a global manager ID. Sending a manager an account is not linked
+under is what made accounts the user could genuinely read fail with
+`USER_PERMISSION_DENIED`.
+
+If Google still refuses with `USER_PERMISSION_DENIED`, the request retries once under the
+account itself and then once per known manager, and the response lists every `attempt` so
+you can see what was tried. `CUSTOMER_NOT_ENABLED` is never retried: a deactivated account
+cannot serve data in any state, so the response says so instead of burning quota.
+
+Other routing conveniences, all optional:
+
+- `customerName` accepts a loose name (`"ideal steel"`) anywhere `customerId` is accepted.
+  An ambiguous name returns the candidates rather than guessing.
+- `account` accepts the main sign-in's **email address**, `main`, a connection id or a
+  label, case-insensitively.
+- `list_google_ads_customer_clients` takes an optional `customerId`; omit it and every
+  manager in the directory is walked.
+- A profile can carry `defaults.googleAdsCustomerId` (and the GA4 property, Search Console
+  site and Merchant Center ID), so profile connectors need no IDs at all.
+- `refresh: true` rebuilds the directory before running.
 
 ### Quota
 
-- Set `GOOGLE_ADS_ACCESS_LEVEL` to `basic` or `standard` to document which developer-token tier this deployment holds. It defaults to `basic`.
-- A Basic Access developer token is capped at roughly 15000 operations and 1000 requests per day across the whole token.
-- Every tool call is exactly one Google Ads API request. Auto-pagination is deliberately not implemented so a single call can never silently drain the daily quota; page explicitly with the `nextPageToken` returned in each preset response.
-- `limit` controls the GAQL `LIMIT`, while `pageSize` is clamped to the API maximum of 10000. Asking for more than 10000 rows returns the first page plus a `nextPageToken` and a note explaining the clamp.
-- Prefer one wide preset over several narrow queries. The core performance presets already return cost, conversion, and value metrics together.
+- Daily limits are counted in **API operations per Google Cloud project**, not per developer
+  token, since the 9 September 2026 token sunset. Set `GOOGLE_ADS_ACCESS_LEVEL` to record
+  the tier: `test` (15,000/day, test accounts only), `explorer` (2,880/day against
+  production, the default), `basic` (15,000/day) or `standard` (unlimited).
+- Ads responses carry a `quota` block with `usedToday` and `limit`, and warn past 80%.
+- One tool call is one Google Ads API request. The two deliberate exceptions, the account
+  directory and the permission retry ladder, are both cached.
+- Auto-pagination is deliberately not implemented, so a single call can never silently
+  drain the daily quota; page explicitly with the `nextPageToken` in each response.
+- `limit` is expressed as a GAQL `LIMIT`. **v26 `search` takes no `pageSize`** and rejects
+  it with `PAGE_SIZE_NOT_SUPPORTED`; pages are a fixed 10,000 rows. (Keyword Planner's
+  `generateKeywordIdeas` does still accept `page_size`, and that is passed through.)
+- Keyword Planner methods are limited by Google to **1 request per second per customer**;
+  exceeding that returns `RESOURCE_EXHAUSTED`. `google_ads_keyword_research_batch` runs its
+  seed groups sequentially for this reason, and stops early with partial results on a quota
+  error. Keyword Planner results are cached for 24 hours keyed on the whole request, so
+  repeat research costs nothing.
+
+### Errors
+
+Google's failures are normalized to `{ code, message, fix, requestId }`, with Google's raw
+payload included only when you pass `debug: true`. The codes are `PERMISSION_DENIED`,
+`ACCOUNT_DEACTIVATED`, `NEEDS_MANAGER_HEADER`, `INVALID_QUERY`, `QUOTA_EXCEEDED`,
+`DEV_TOKEN_NOT_APPROVED`, `AUTH_EXPIRED`, `ADS_READ_ONLY` and `UNKNOWN`. Every error also
+reports the API version, so the next version bump is obvious in logs. The guardrails and
+quota reference text lives in `list_marketing_guardrails` only, rather than being repeated
+in every response. Credentials are stripped from all output and logs, raw error payloads
+included.
+
+### Keyword Planner
+
+- `detail` is `compact` by default: one row per keyword with `avgMonthlySearches`,
+  `competition`, `competitionIndex`, low/high top-of-page bid, `avgCpc`, `peakMonth`,
+  `lowMonth`, `trend3m` and `yoy`, money rounded to 2 decimals. `detail: "full"` adds the
+  12 monthly volumes.
+- `avgCpc` is populated because the request now sets
+  `historicalMetricsOptions.includeAverageCpc` on both `ideas` and `historical_metrics`.
+  Google documents average CPC as provided for legacy support.
+- `groupVariants` (default true) collapses keywords Google reports byte-identical metrics
+  for, which is why "metal buildings california" and "steel buildings california" used to
+  appear as separate rows with the same numbers. Keywords with no volume history are never
+  grouped.
+- Locations and languages can be given by name: `"California"`,
+  `"Sacramento, California"`, `"United States"`, `"English"`, `"en"`. Place names resolve
+  through `SuggestGeoTargetConstants`, are cached for 30 days, and the resolved IDs are
+  echoed back in `resolvedTargeting`. An unresolvable name is an error, not a silent
+  default to the United States.
+- Seeds: `keywords`, `url`, `keywords` + `url` (`KeywordAndUrlSeed`), or `site`
+  (`SiteSeed`). `site` cannot be combined with the others.
+- Filters and sorting: `minVolume`, `maxVolume`, `includeTerms`, `excludeTerms` (useful for
+  excluding competitor brands) and `sortBy` (`volume`, `bid`, `competition`).
+- `forecast` uses the current v24+ request shape. v24 simplified
+  `GenerateKeywordForecastMetrics`: it removed `CampaignToForecast.keyword_plan_network`,
+  both `negative_keywords` fields, `ForecastAdGroup.max_cpc_bid_micros`, `BiddableKeyword`
+  and `CriterionBidModifier`, and renamed `geo_modifiers` to `geo_target_constants` and
+  `biddable_keywords` to `keywords`. Negative keywords can therefore no longer be sent at
+  all. Choose `biddingStrategy`: `manual_cpc` (needs `maxCpcBid`), `maximize_clicks` or
+  `maximize_conversions` (each needs `dailyBudget`). Google returns only the metrics the
+  chosen strategy affects, and v26 does not return impressions or CTR at all, so the
+  response lists what was omitted in `fieldsNotReturned` rather than reporting zeros.
+
+### API version
+
+The version is pinned in one constant, `GOOGLE_ADS_API_VERSION` in
+`api/google-ads/version.js`, currently **v26** (serving the v26.2 release of
+11 November 2026). A bump is a one-line change there, and every error reports the version in
+use. Google now ships roughly two releases a month; v24 sunsets May 2027, v25 August 2027
+and v26 November 2027.
+
+Breaking changes handled in the v24 to v26 upgrade:
+
+- `ConversionTrackingSetting.enhanced_conversions_for_leads_enabled` was **removed** in v26.
+  The replacements are `customer.conversion_tracking_setting.enablement_setting` and
+  `.effective_enablement_setting`, which the `enhanced_conversions_audit` preset reads.
+  (Note these hang off `conversion_tracking_setting`, not off `Customer` directly.)
+- v25 removed `Targeting.plannable_location_id` and
+  `GenerateReachForecastRequest.cookie_frequency_cap`. The reach planner now sends
+  `targeting.plannable_location_ids` and `cookie_frequency_cap_setting`.
+- v25 removed `ContactDetails.email` from `LocalServicesLead`, so it is not selected.
+- v24's `GenerateKeywordForecastMetrics` changes are covered under Keyword Planner above.
+
+### New read-only presets and tools
+
+`run_google_ads_preset` adds these on top of the existing catalogue:
+
+| Preset | What it reads |
+| --- | --- |
+| `ai_max_migration` | `campaign.aca_migration_date_time` and `broad_match_migration_date_time` (v25.1): which campaigns Google will auto-migrate to AI Max, and when |
+| `recommendations_read` | Recommendations including the new types: raise target CPA, lower target ROAS (v25.2), raise budget for Search (v26) and optimize for new customers (v26.1). Read-only, with no apply or dismiss path |
+| `enhanced_conversions_audit` | Account conversion tracking plus `enablement_setting` / `effective_enablement_setting` (v26) |
+| `budget_network_settings` | `CampaignBudget.budget_network_settings` (v26.1) |
+| `customer_budget_network_settings` | The customer-level budget network defaults (v26.1) |
+| `local_services_campaigns` | Local Services campaigns and PMax campaigns running Local Services inventory (`PmaxCampaignSettings.local_services_enabled`) |
+| `local_services_leads` | Local Services leads by type, including message and `COUPON` leads |
+| `lift_studies` | Brand and Conversion Lift studies (`LiftMeasurementConfig`, v25.1) |
+| `search_lift_keyword_bundles` | Search Lift keyword bundles (v26) |
+| `unique_reach` | Unique reach at effective frequency 1+ through 10+ (v26.2) |
+| `deprecated_call_only_ads` | Call ads, which stop serving February 2027. Recommends RSAs with call assets |
+| `deprecated_language_criteria` | Manual language criteria on Search and Performance Max, unsupported since September 2026 |
+| `deprecated_smart_campaigns` | Smart campaigns, which cannot be created since 23 September 2026 |
+
+Each reports `available: false` with a readable message when the account simply has no such
+data, rather than returning a bare empty array. Date ranges are validated against Google's
+retention window (37 months for daily/hourly/weekly data, 11 years for monthly and coarser),
+because Google answers an out-of-range request with an empty result rather than an error.
+
+Two new standalone tools:
+
+- `google_ads_benchmarks` — `BenchmarksService.GenerateBenchmarksMetrics` with category
+  filters and percentile metrics (v25.2), for industry CTR/CPC/CVR in client reports. Pass a
+  client account, not a manager: a manager has no ad spend of its own to compare.
+- `google_ads_local_services_eligibility` — `LocalServicesEligibilityService` (v26.1):
+  whether an account and Google Business Profile listing are eligible, which lead types and
+  service categories qualify, and the reasons if not.
+
+The migration path for Smart campaigns is Performance Max, but that is a write operation:
+this server will not create a draft campaign, and the draft-generating method on
+`SmartCampaignSettingService` is blocked by the gate. Do that migration in the Google Ads UI.
+
+### Smoke test
+
+```bash
+node scripts/ads-smoke.mjs --self-check
+```
+
+```bash
+MCP_TOKEN=... node scripts/ads-smoke.mjs --url https://ga4mcpjs.vercel.app/mcp
+```
+
+`--self-check` runs offline and needs no credentials: it checks the pinned version, that
+write RPCs are refused without contacting Google, the header fallback, the absence of
+`pageSize`, the average-CPC option and the v26 forecast and reach request shapes.
+
+The live run lists the account directory, queries `customer` for every usable account with
+no `loginCustomerId`, runs one keyword-planner call on 9529469947 with no
+`loginCustomerId`, and confirms a non-`SELECT` query is refused. `MCP_TOKEN` is the bearer
+token your MCP client uses for this server.
 
 ### Known API limits
 
