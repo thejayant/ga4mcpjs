@@ -8437,6 +8437,13 @@ configureAccountProviders({ googleScopes: GOOGLE_SCOPES, metaScopes: META_SCOPES
 const accountRouter = createAccountRouter({
   store: connectionStore,
   labels: { main: family => ({ google: "Main Google sign-in", meta: "Main Meta login", callrail: "Main CallRail key" })[family] },
+  // The main sign-in also answers to its own email address, which is what manage_connections
+  // displays for it (item 4): `account: "someone@example.com"` used to be rejected.
+  mainAliases: async (userId, family) => {
+    if (family !== "google" || !connectionStore) return [];
+    const email = (await connectionStore.getAccountInfo(userId))?.googleEmail;
+    return email ? [email] : [];
+  },
   listers: {
     async google({ accessToken }) {
       const [ga4, gsc, ads, merchant, gbp] = await Promise.all([

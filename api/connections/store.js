@@ -206,6 +206,11 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
       await kv.del(`snaps:${userId}:${id}`);
       await kv.removeFromSet("clarity-snapshots", `${userId}|${id}`);
     },
+    // Drops a cached entry so the next `cached()` call rebuilds it (the Ads directory's
+    // refresh: true option).
+    async clearCached(cacheKey) {
+      try { await kv.del(`cache:${cacheKey}`); return true; } catch { return false; }
+    },
     // Counts API requests per day (Google Ads quota, item 20). Returns the running total,
     // or null when the backend cannot count, so quota tracking never fails a request.
     async incrementCounter(key, by = 1, ttlSeconds = 2 * 86_400) {

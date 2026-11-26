@@ -43,7 +43,7 @@ export function resourceKeys(family, args = {}) {
  * resource keys the credentials can reach; credentialsFor: (family, record, id, userId) →
  * credentials for an extra account (refreshing OAuth tokens as needed).
  */
-export function createAccountRouter({ store, listers, credentialsFor, labels }) {
+export function createAccountRouter({ store, listers, credentialsFor, labels, mainAliases }) {
   async function extras(userId, family) {
     if (!store || !userId) return [];
     const prefix = `${FAMILIES[family]}:`;
@@ -66,12 +66,39 @@ export function createAccountRouter({ store, listers, credentialsFor, labels }) 
   }
 
   // The accounts a user has for a family: the main sign-in (when it has this platform) plus extras.
+  //
+  // Each option carries `aliases`: every other name a caller may reasonably use for it. For
+  // the main sign-in that includes its own email address, which manage_connections shows as
+  // the main sign-in but which `account:` used to reject (only "main" worked).
   async function accounts(userId, family, primary) {
-    const list = primary ? [{ key: MAIN, label: labels.main(family), credentials: async () => primary }] : [];
+    const list = [];
+    if (primary) {
+      const extra = mainAliases ? await mainAliases(userId, family).catch(() => []) : [];
+      list.push({
+        key: MAIN,
+        label: labels.main(family),
+        aliases: [MAIN, ...(extra || [])].filter(Boolean),
+        credentials: async () => primary
+      });
+    }
     for (const { id, record } of await extras(userId, family)) {
-      list.push({ key: id, label: record.label || record.summary || id, credentials: () => credentialsFor(family, record, id, userId) });
+      list.push({
+        key: id,
+        label: record.label || record.summary || id,
+        // An extra Google account is labelled with its email, but accept its instance id,
+        // stored summary and any email in its metadata too.
+        aliases: [id, record.label, record.summary, record.meta?.email].filter(Boolean),
+        credentials: () => credentialsFor(family, record, id, userId)
+      });
     }
     return list;
+  }
+
+  // Every name an option answers to, lowercased.
+  function optionNames(option) {
+    return [option.key, option.label, ...(option.aliases || [])]
+      .filter(Boolean)
+      .map(name => String(name).trim().toLowerCase());
   }
 
   /**
@@ -84,9 +111,12 @@ export function createAccountRouter({ store, listers, credentialsFor, labels }) 
     // A named account must exist, even with only the main sign-in left (a profile pinned to a
     // removed account must fail rather than quietly use another login).
     if (account && options.length) {
-      const wanted = String(account).toLowerCase();
-      const match = options.find(option => option.key.toLowerCase() === wanted || String(option.label).toLowerCase() === wanted);
-      if (!match) throw new Error(`No connected ${family} account called "${account}". Connected: ${options.map(o => `${o.label} (${o.key})`).join(", ")}.`);
+      const wanted = String(account).trim().toLowerCase();
+      const match = options.find(option => optionNames(option).includes(wanted));
+      if (!match) {
+        const known = options.map(o => `${o.label} (${o.key})`).join(", ");
+        throw new Error(`No connected ${family} account called "${account}". Connected: ${known}. You can name an account by its label, its id, its email address, or "main" for the main sign-in.`);
+      }
       return use(match);
     }
     if (!options.length || (options.length === 1 && options[0].key === MAIN)) return null;
