@@ -67,11 +67,11 @@ async function callTool(name, toolArgs = {}) {
 // prove the live accounts work, but it catches the shape regressions this work was about.
 async function selfCheck() {
   console.log("Offline self-check (no credentials, no network).\n");
-  const { assertReadOnly, ADS_ALLOWED_RPCS } = await import("../api/google-ads/gate.js");
-  const { resolveLoginCustomerId, stripSearchPageSize } = await import("../api/google-ads/client.js");
-  const { buildPlannerRequest, buildForecastCampaign } = await import("../api/google-ads/keywords.js");
-  const { buildReachForecastBody } = await import("../api/google-ads/reach.js");
-  const { GOOGLE_ADS_API_VERSION } = await import("../api/google-ads/version.js");
+  const { assertReadOnly, ADS_ALLOWED_RPCS } = await import("../api/_google-ads/gate.js");
+  const { resolveLoginCustomerId, stripSearchPageSize } = await import("../api/_google-ads/client.js");
+  const { buildPlannerRequest, buildForecastCampaign } = await import("../api/_google-ads/keywords.js");
+  const { buildReachForecastBody } = await import("../api/_google-ads/reach.js");
+  const { GOOGLE_ADS_API_VERSION } = await import("../api/_google-ads/version.js");
 
   record("API version is pinned in one place", GOOGLE_ADS_API_VERSION === "v26", GOOGLE_ADS_API_VERSION);
 

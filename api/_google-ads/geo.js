@@ -9,7 +9,7 @@ import { adsRequest } from "./client.js";
 
 export const GEO_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
 
-// Google's language criterion codes (developers.google.com/google-ads/api/data/codes-formats).
+// Google's language criterion codes (developers.google.com/_google-ads/api/data/codes-formats).
 export const LANGUAGE_CODES = Object.freeze({
   arabic: 1019, bengali: 1056, bulgarian: 1020, catalan: 1038, croatian: 1039, czech: 1021,
   danish: 1009, dutch: 1010, english: 1000, estonian: 1043, filipino: 1042, finnish: 1011,

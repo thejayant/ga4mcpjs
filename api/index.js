@@ -18,9 +18,9 @@ import { CONNECTION_TOOL_NAMES, registerConnectionTools } from "./connections/to
 import { PROVIDERS, configureAccountProviders } from "./connections/providers.js";
 import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
-import { GOOGLE_ADS_TOOL_NAMES, registerGoogleAdsTools } from "./google-ads/tools.js";
-import { GOOGLE_ADS_API_VERSION, googleAdsApiVersion } from "./google-ads/version.js";
-import { assertReadOnly } from "./google-ads/gate.js";
+import { GOOGLE_ADS_TOOL_NAMES, registerGoogleAdsTools } from "./_google-ads/tools.js";
+import { GOOGLE_ADS_API_VERSION, googleAdsApiVersion } from "./_google-ads/version.js";
+import { assertReadOnly } from "./_google-ads/gate.js";
 import { gbpRequest } from "../MCP GBP/client.js";
 import { loadSkills, registerSkills } from "./_skills.js";
 import { enableTasks, withContinuation } from "./_tasks.js";
@@ -1348,7 +1348,7 @@ function buildMetaCredentials(tokenResponse, grantedScopes, userId) {
   };
 }
 
-// The version lives in api/google-ads/version.js (item 21); this wrapper stays so the
+// The version lives in api/_google-ads/version.js (item 21); this wrapper stays so the
 // legacy helpers below keep working during the migration.
 function getGoogleAdsApiVersion() {
   return googleAdsApiVersion();
@@ -1673,7 +1673,7 @@ function googleAdsDeveloperToken() {
 
 // Only an explicitly passed value. There is deliberately no fallback to a global or env
 // manager ID: sending a manager an account is not linked under is what produced
-// USER_PERMISSION_DENIED (item 1). The full rule lives in api/google-ads/client.js.
+// USER_PERMISSION_DENIED (item 1). The full rule lives in api/_google-ads/client.js.
 function getGoogleAdsLoginCustomerId(value) {
   return value ? normalizeGoogleAdsCustomerId(value) : undefined;
 }
@@ -2136,7 +2136,7 @@ async function callCallRailApi(apiToken, pathOrUrl, query = {}) {
 
 // The legacy Google Ads request helper, still used by the dashboard, the account-router
 // resource lister and the tracking audit. It goes through the same read-only gate as
-// api/google-ads/client.js, so no Ads call anywhere in this server can bypass it.
+// api/_google-ads/client.js, so no Ads call anywhere in this server can bypass it.
 async function callGoogleAdsApi(path, accessToken, options = {}) {
   const method = options.method || "POST";
   // Throws ADS_READ_ONLY before any socket is opened if this is not an allowlisted read.
@@ -6662,7 +6662,7 @@ async function createServer(req, era = "legacy") {
     });
   });
   /* ---------------- Google Ads: every tool, on the shared read-only request path ---------------- */
-  // Registered from api/google-ads/tools.js so the read-only gate, the login-customer-id
+  // Registered from api/_google-ads/tools.js so the read-only gate, the login-customer-id
   // rule, the retry ladder, the account directory and quota accounting apply uniformly.
   registerGoogleAdsTools(server, {
     req,

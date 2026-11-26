@@ -381,7 +381,7 @@ This server never creates, edits, pauses, removes or applies anything in Google 
 
 The Google Ads API has a single OAuth scope (`adwords`) and that scope permits writes, so
 there is no read-only scope to rely on. The guarantee is enforced in our own code, in
-`api/google-ads/gate.js`: every Ads request passes a central gate that allows only an
+`api/_google-ads/gate.js`: every Ads request passes a central gate that allows only an
 explicit allowlist of read-only RPCs (`GoogleAdsService.Search`/`SearchStream`,
 `CustomerService.ListAccessibleCustomers`, the three `KeywordPlanIdeaService` methods, the
 `ReachPlanService` read/plan methods, `BenchmarksService.GenerateBenchmarksMetrics`,
@@ -499,7 +499,7 @@ included.
 ### API version
 
 The version is pinned in one constant, `GOOGLE_ADS_API_VERSION` in
-`api/google-ads/version.js`, currently **v26** (serving the v26.2 release of
+`api/_google-ads/version.js`, currently **v26** (serving the v26.2 release of
 11 November 2026). A bump is a one-line change there, and every error reports the version in
 use. Google now ships roughly two releases a month; v24 sunsets May 2027, v25 August 2027
 and v26 November 2027.
