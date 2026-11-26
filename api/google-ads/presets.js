@@ -286,8 +286,9 @@ export const NEW_GOOGLE_ADS_PRESETS = Object.freeze({
     emptyMessage: "No Smart campaigns on this account.",
     guidance:
       "Performance Max is the migration path for Smart campaigns. That migration is a write operation and this server " +
-      "is strictly read-only: it will not create a draft campaign or call GeneratePMaxDraftCampaign. Do it in the " +
-      "Google Ads UI, or with a tool that is authorised to write.",
+      "is strictly read-only: it will not create a draft campaign, and the draft-generating method on " +
+      "SmartCampaignSettingService is blocked by the request gate. Do the migration in the Google Ads UI, or with a " +
+      "tool that is authorised to write.",
     query: () =>
       "SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, " +
       "campaign.advertising_channel_sub_type, campaign.start_date " +

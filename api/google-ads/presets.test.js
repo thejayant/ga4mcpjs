@@ -115,8 +115,8 @@ test("the Smart campaign guard names PMax in text only and never a draft method"
   assert.match(definition.guidance, /Performance Max is the migration path/);
   assert.match(definition.guidance, /strictly read-only/);
   // It must not instruct or attempt a draft-generating call.
-  assert.ok(!/GeneratePMaxDraftCampaign\(/.test(definition.guidance));
   assert.match(definition.guidance, /will not create a draft campaign/);
+  assert.match(definition.guidance, /blocked by the request gate/);
 });
 
 test("data retention: an out-of-range date range is rejected with a clear error", () => {

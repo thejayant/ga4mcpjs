@@ -18,6 +18,8 @@ import { CONNECTION_TOOL_NAMES, registerConnectionTools } from "./connections/to
 import { PROVIDERS, configureAccountProviders } from "./connections/providers.js";
 import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
+import { GOOGLE_ADS_TOOL_NAMES, registerGoogleAdsTools } from "./google-ads/tools.js";
+import { GOOGLE_ADS_API_VERSION, googleAdsApiVersion } from "./google-ads/version.js";
 import { gbpRequest } from "../MCP GBP/client.js";
 import { loadSkills, registerSkills } from "./_skills.js";
 import { enableTasks, withContinuation } from "./_tasks.js";
@@ -144,7 +146,10 @@ const TOOL_SCOPE_MAP = {
   run_ga4_audience_export: [GA4_SCOPE],
   run_ga4_multi_property_report: [GA4_SCOPE],
   google_ads_keyword_planner: [GOOGLE_ADS_SCOPE],
+  google_ads_keyword_research_batch: [GOOGLE_ADS_SCOPE],
   google_ads_reach_planner: [GOOGLE_ADS_SCOPE],
+  google_ads_benchmarks: [GOOGLE_ADS_SCOPE],
+  google_ads_local_services_eligibility: [GOOGLE_ADS_SCOPE],
   run_google_ads_across_accounts: [GOOGLE_ADS_SCOPE],
   query_search_console_advanced: [SEARCH_CONSOLE_SCOPE],
   describe_merchant_report_fields: [],
@@ -1333,8 +1338,10 @@ function buildMetaCredentials(tokenResponse, grantedScopes, userId) {
   };
 }
 
+// The version lives in api/google-ads/version.js (item 21); this wrapper stays so the
+// legacy helpers below keep working during the migration.
 function getGoogleAdsApiVersion() {
-  return String(process.env.GOOGLE_ADS_API_VERSION || "v22").trim();
+  return googleAdsApiVersion();
 }
 
 function parseEncryptionKey(encoded, name) {
@@ -1647,13 +1654,18 @@ function extractBearerToken(req) {
   return authHeader.slice("Bearer ".length);
 }
 
-function requireGoogleAdsDeveloperToken() {
-  return requireEnv("GOOGLE_ADS_DEVELOPER_TOKEN");
+// Optional since Google sunset developer tokens on 2026-09-09: the header is ignored by the
+// API servers and access level now belongs to the Cloud project that issued the OAuth
+// credentials (item 25). Returns "" when unset, and the header is then not sent.
+function googleAdsDeveloperToken() {
+  return String(process.env.GOOGLE_ADS_DEVELOPER_TOKEN || "").trim();
 }
 
+// Only an explicitly passed value. There is deliberately no fallback to a global or env
+// manager ID: sending a manager an account is not linked under is what produced
+// USER_PERMISSION_DENIED (item 1). The full rule lives in api/google-ads/client.js.
 function getGoogleAdsLoginCustomerId(value) {
-  const candidate = value || process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID;
-  return candidate ? normalizeGoogleAdsCustomerId(candidate) : undefined;
+  return value ? normalizeGoogleAdsCustomerId(value) : undefined;
 }
 
 function normalizeCallRailPath(path) {
@@ -2118,7 +2130,7 @@ async function callGoogleAdsApi(path, accessToken, options = {}) {
     method: options.method || "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "developer-token": requireGoogleAdsDeveloperToken(),
+      ...(googleAdsDeveloperToken() ? { "developer-token": googleAdsDeveloperToken() } : {}),
       ...(getGoogleAdsLoginCustomerId(options.loginCustomerId) ? { "login-customer-id": getGoogleAdsLoginCustomerId(options.loginCustomerId) } : {}),
       ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...options.headers
@@ -5511,6 +5523,32 @@ async function listMerchantDataSources(accessToken, params) {
   return callGoogleApi(url.toString(), accessToken, { method: "GET" });
 }
 
+// Every connected Google login with a usable access token, so the Ads account directory can
+// be built across all of them (item 5). The main sign-in comes first.
+async function googleAccountsForAds(auth) {
+  const accounts = [];
+  if (auth?.googleCredentials?.accessToken) {
+    accounts.push({ label: "main", accessToken: auth.googleCredentials.accessToken });
+  }
+  if (!connectionStore || !auth?.userId) return accounts;
+  try {
+    const options = await accountRouter.accounts(auth.userId, "google", auth.googleCredentials || null);
+    for (const option of options) {
+      if (option.key === "main") continue;
+      try {
+        const credentials = await option.credentials();
+        if (credentials?.accessToken) accounts.push({ label: option.label || option.key, accessToken: credentials.accessToken });
+      } catch {
+        // A login whose token cannot be refreshed is simply skipped; the directory reports
+        // the accounts it could reach.
+      }
+    }
+  } catch {
+    // With no store or no extra logins, the main sign-in alone is correct.
+  }
+  return accounts;
+}
+
 async function listGoogleAdsAccessibleCustomers(accessToken) {
   return callGoogleAdsApi("customers:listAccessibleCustomers", accessToken, {
     method: "GET"
@@ -5523,9 +5561,10 @@ async function queryGoogleAds(accessToken, params) {
     method: "POST",
     loginCustomerId: params.loginCustomerId,
     body: {
+      // No pageSize: v26 search rejects it with PAGE_SIZE_NOT_SUPPORTED and pages are a
+      // fixed 10,000 rows (item 2). A row ceiling belongs in the GAQL LIMIT.
       query: params.query,
-      pageSize: params.pageSize,
-      pageToken: params.pageToken
+      ...(params.pageToken ? { pageToken: params.pageToken } : {})
     }
   });
 }
@@ -6734,223 +6773,20 @@ async function createServer(req, era = "legacy") {
       }, !response.ok);
     });
   });
-  server.registerTool("list_google_ads_accessible_customers", {
-    title: "List Google Ads Accessible Customers",
-    description: "List Google Ads customer resource names available to the authenticated Google user.",
-    inputSchema: {},
-    annotations: { readOnlyHint: true }
-  }, async () => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_google_ads_accessible_customers, async ({ googleCredentials }) => {
-    const response = await listGoogleAdsAccessibleCustomers(googleCredentials.accessToken);
-    return buildToolResult(toGoogleDebugPayload(response), !response.ok);
-  }));
-  server.registerTool("query_google_ads", {
-    title: "Query Google Ads",
-    description: "Run a GAQL query against a Google Ads customer. Use this for campaigns, ad groups, ads, keywords, assets, conversions, placements, audiences, search terms, and reporting.",
-    inputSchema: {
-      customerId: z.string().min(1),
-      query: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      pageSize: z.number().int().min(1).max(10000).optional(),
-      pageToken: z.string().optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => {
-    const parsed = z.object({
-      customerId: z.string().min(1),
-      query: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      pageSize: z.number().int().min(1).max(10000).optional(),
-      pageToken: z.string().optional()
-    }).parse(params);
-    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.query_google_ads, async ({ googleCredentials }) => {
-      const response = await queryGoogleAds(googleCredentials.accessToken, parsed);
-      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
-    });
-  });
-  server.registerTool("search_stream_google_ads", {
-    title: "Search Stream Google Ads",
-    description: "Run a streamed GAQL query for large Google Ads result sets.",
-    inputSchema: {
-      customerId: z.string().min(1),
-      query: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      summaryRowSetting: z.enum(["NO_SUMMARY_ROW", "SUMMARY_ROW_WITH_RESULTS", "SUMMARY_ROW_ONLY"]).optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => {
-    const parsed = z.object({
-      customerId: z.string().min(1),
-      query: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      summaryRowSetting: z.enum(["NO_SUMMARY_ROW", "SUMMARY_ROW_WITH_RESULTS", "SUMMARY_ROW_ONLY"]).optional()
-    }).parse(params);
-    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.search_stream_google_ads, async ({ googleCredentials }) => {
-      const response = await searchStreamGoogleAds(googleCredentials.accessToken, parsed);
-      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
-    });
-  });
-  server.registerTool("get_google_ads_field", {
-    title: "Get Google Ads Field",
-    description: "Get metadata for a Google Ads field or resource, including whether it is selectable, filterable, sortable, and repeated.",
-    inputSchema: {
-      name: z.string().min(1)
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => {
-    const parsed = z.object({
-      name: z.string().min(1)
-    }).parse(params);
-    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.get_google_ads_field, async ({ googleCredentials }) => {
-      const response = await getGoogleAdsField(googleCredentials.accessToken, parsed.name);
-      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
-    });
-  });
-  server.registerTool("search_google_ads_fields", {
-    title: "Search Google Ads Fields",
-    description: "Search Google Ads field metadata so you can discover valid attributes, segments, metrics, and filters before writing GAQL.",
-    inputSchema: {
-      query: z.string().min(1),
-      pageSize: z.number().int().min(1).max(1000).optional(),
-      pageToken: z.string().optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => {
-    const parsed = z.object({
-      query: z.string().min(1),
-      pageSize: z.number().int().min(1).max(1000).optional(),
-      pageToken: z.string().optional()
-    }).parse(params);
-    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.search_google_ads_fields, async ({ googleCredentials }) => {
-      const response = await searchGoogleAdsFields(googleCredentials.accessToken, parsed);
-      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
-    });
-  });
-  server.registerTool("run_google_ads_preset", {
-    title: "Run Google Ads Preset",
-    description: "Run expert Google Ads reports via GAQL. Covers campaigns, ad groups, keywords, search terms, ads, assets, impression share, Quality Score, Shopping, Performance Max, geo, device, ad schedule, demographics, audiences, placements, conversion actions, landing pages, budgets, bidding strategies, video, calls, account overview, negative keywords, change history, recommendations, experiments, and GCLID click detail. Call list_marketing_presets for the full catalogue. Each call is exactly one Google Ads API request, which matters on a Basic Access developer token.",
-    inputSchema: {
-      preset: z.enum(GOOGLE_ADS_PRESET_NAMES),
-      customerId: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      campaignId: z.string().optional(),
-      startDate: z.string().optional(),
-      endDate: z.string().optional(),
-      limit: z.number().int().min(1).max(100000).optional(),
-      includeDailyBreakdown: z.boolean().optional(),
-      includeImpressionShare: z.boolean().optional(),
-      includeQualityScore: z.boolean().optional(),
-      orderBy: z.string().optional(),
-      extraWhereClauses: z.array(z.string()).optional(),
-      pageToken: z.string().optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => {
-    const parsed = z.object({
-      preset: z.enum(GOOGLE_ADS_PRESET_NAMES),
-      customerId: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      campaignId: z.string().optional(),
-      startDate: z.string().optional(),
-      endDate: z.string().optional(),
-      limit: z.number().int().min(1).max(100000).optional(),
-      includeDailyBreakdown: z.boolean().optional(),
-      includeImpressionShare: z.boolean().optional(),
-      includeQualityScore: z.boolean().optional(),
-      orderBy: z.string().optional(),
-      extraWhereClauses: z.array(z.string()).optional(),
-      pageToken: z.string().optional()
-    }).parse(params);
-    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_google_ads_preset, async ({ googleCredentials }) => {
-      let presetConfig;
-      try {
-        presetConfig = buildGoogleAdsPresetQuery(parsed);
-      } catch (error) {
-        return buildToolResult({
-          error: "invalid_google_ads_preset_request",
-          error_description: error instanceof Error ? error.message : String(error),
-          preset: parsed.preset,
-          presetCatalog: GOOGLE_ADS_PRESET_DEFINITIONS[parsed.preset] || null
-        }, true);
-      }
-      const response = await queryGoogleAds(googleCredentials.accessToken, {
-        customerId: parsed.customerId,
-        loginCustomerId: parsed.loginCustomerId,
-        query: presetConfig.query,
-        pageSize: presetConfig.pageSize,
-        pageToken: parsed.pageToken
-      });
-      return buildToolResult({
-        preset: parsed.preset,
-        entityType: presetConfig.entityType,
-        resource: presetConfig.resource,
-        timeSeries: presetConfig.timeSeries,
-        dateRange: presetConfig.dateRange,
-        limit: presetConfig.limit,
-        pageSize: presetConfig.pageSize,
-        nextPageToken: response.ok ? response.body?.nextPageToken || null : null,
-        notes: presetConfig.notes,
-        guardrails: PLATFORM_GUARDRAILS.google_ads,
-        gaql: presetConfig.query,
-        normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
-        normalizedRows: response.ok ? normalizeGoogleAdsPresetRows(parsed.preset, response.body) : [],
-        raw: toGoogleDebugPayload(response)
-      }, !response.ok);
-    });
-  });
-  server.registerTool("list_google_ads_customer_clients", {
-    title: "List Google Ads Customer Clients",
-    description: "Walk a Google Ads manager (MCC) account tree in a single request and return every child account with id, name, currency, time zone, level, and manager flag. Use this when listAccessibleCustomers only returns the manager account.",
-    inputSchema: {
-      customerId: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      includeDisabled: z.boolean().optional(),
-      maxLevel: z.number().int().min(0).max(10).optional(),
-      limit: z.number().int().min(1).max(10000).optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => {
-    const parsed = z.object({
-      customerId: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      includeDisabled: z.boolean().optional(),
-      maxLevel: z.number().int().min(0).max(10).optional(),
-      limit: z.number().int().min(1).max(10000).optional()
-    }).parse(params);
-    return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.list_google_ads_customer_clients, async ({ googleCredentials }) => {
-      const clauses = [];
-      if (!parsed.includeDisabled) clauses.push("customer_client.status = 'ENABLED'");
-      if (parsed.maxLevel !== undefined) clauses.push(`customer_client.level <= ${parsed.maxLevel}`);
-      const whereSql = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
-      const limit = parsed.limit || 1000;
-      const query = `SELECT customer_client.id, customer_client.client_customer, customer_client.descriptive_name, customer_client.currency_code, customer_client.time_zone, customer_client.level, customer_client.manager, customer_client.status, customer_client.test_account FROM customer_client${whereSql} ORDER BY customer_client.level ASC LIMIT ${limit}`;
-      const response = await queryGoogleAds(googleCredentials.accessToken, {
-        customerId: parsed.customerId,
-        loginCustomerId: parsed.loginCustomerId,
-        query,
-        pageSize: Math.min(limit, GOOGLE_ADS_MAX_PAGE_SIZE)
-      });
-      const accounts = response.ok
-        ? (response.body?.results || []).map((row) => ({
-            customerId: getGoogleAdsValue(row, "customer_client.id"),
-            resourceName: getGoogleAdsValue(row, "customer_client.client_customer"),
-            name: getGoogleAdsValue(row, "customer_client.descriptive_name"),
-            currency: getGoogleAdsValue(row, "customer_client.currency_code"),
-            timeZone: getGoogleAdsValue(row, "customer_client.time_zone"),
-            level: toNumber(getGoogleAdsValue(row, "customer_client.level")),
-            isManager: getGoogleAdsValue(row, "customer_client.manager") === true,
-            isTestAccount: getGoogleAdsValue(row, "customer_client.test_account") === true,
-            status: getGoogleAdsValue(row, "customer_client.status")
-          }))
-        : [];
-      return buildToolResult({
-        managerCustomerId: normalizeGoogleAdsCustomerId(parsed.customerId),
-        accountCount: accounts.length,
-        accounts,
-        gaql: query,
-        guardrails: PLATFORM_GUARDRAILS.google_ads,
-        raw: toGoogleDebugPayload(response)
-      }, !response.ok);
-    });
+  /* ---------------- Google Ads: every tool, on the shared read-only request path ---------------- */
+  // Registered from api/google-ads/tools.js so the read-only gate, the login-customer-id
+  // rule, the retry ladder, the account directory and quota accounting apply uniformly.
+  registerGoogleAdsTools(server, {
+    req,
+    withVerifiedToolAuth,
+    buildToolResult,
+    store: connectionStore,
+    scopes: TOOL_SCOPE_MAP.query_google_ads,
+    googleAccountsFor: googleAccountsForAds,
+    legacyPresets: GOOGLE_ADS_PRESET_DEFINITIONS,
+    buildLegacyPresetQuery: buildGoogleAdsPresetQuery,
+    normalizeLegacyPresetRows: normalizeGoogleAdsPresetRows,
+    normalizedSchema: NORMALIZED_MARKETING_SCHEMA
   });
   /* ---------------- GA4: admin, access, audience exports, many properties ---------------- */
   server.registerTool("get_ga4_admin_resource", {
@@ -7107,166 +6943,6 @@ async function createServer(req, era = "legacy") {
   }));
 
   /* ---------------- Google Ads: planning and every account under a manager ---------------- */
-  server.registerTool("google_ads_keyword_planner", {
-    title: "Google Ads Keyword Planner",
-    description: "Keyword research from Google Ads. ideas: new keywords from seed keywords, a URL or a whole site, with monthly search volume, competition and top-of-page bid ranges. historical_metrics: 12-month volume and bids for keywords you already have. forecast: projected clicks, impressions, cost and conversions for a keyword set at a max CPC. Language and location use Google's constant IDs (1000 English, 2840 United States).",
-    inputSchema: {
-      customerId: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      action: z.enum(["ideas", "historical_metrics", "forecast"]),
-      keywords: z.array(z.string().min(1)).max(20).optional(),
-      url: z.string().optional(),
-      site: z.string().optional(),
-      language: z.string().optional(),
-      geoTargets: z.array(z.string()).max(10).optional(),
-      network: z.enum(["GOOGLE_SEARCH", "GOOGLE_SEARCH_AND_PARTNERS"]).optional(),
-      includeAdultKeywords: z.boolean().optional(),
-      pageSize: z.number().int().min(1).max(10000).optional(),
-      pageToken: z.string().optional(),
-      maxCpcBid: z.number().positive().optional(),
-      matchType: z.enum(["EXACT", "PHRASE", "BROAD"]).optional(),
-      forecastStartDate: z.string().optional(),
-      forecastEndDate: z.string().optional(),
-      currencyCode: z.string().optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.google_ads_keyword_planner, async ({ googleCredentials }) => {
-    let request;
-    try {
-      request = buildKeywordPlannerRequest(params);
-    } catch (error) {
-      return buildToolResult({ error: "invalid_keyword_planner_request", error_description: error.message }, true);
-    }
-    const response = await callGoogleAdsApi(`customers/${normalizeGoogleAdsCustomerId(params.customerId)}:${request.path}`, googleCredentials.accessToken, {
-      method: "POST",
-      loginCustomerId: params.loginCustomerId,
-      body: request.body
-    });
-    const results = response.ok ? response.body?.results || [] : [];
-    return buildToolResult({
-      action: params.action,
-      requestCount: 1,
-      keywords: params.action === "forecast" ? undefined : results.map(mapKeywordPlannerRow),
-      forecast: params.action === "forecast" && response.ok ? mapKeywordForecast(response.body) : undefined,
-      nextPageToken: response.body?.nextPageToken || null,
-      request: request.body,
-      hint: response.ok ? undefined : (() => {
-        const error = describeGoogleError(response);
-        if (error.codes.includes("CUSTOMER_NOT_ENABLED")) {
-          return "This Google Ads account is not enabled: it is cancelled, suspended or never finished setup. Use an active account. If you manage clients through a manager account, list_google_ads_customer_clients shows which client accounts are enabled.";
-        }
-        if (error.codes.includes("USER_PERMISSION_DENIED")) {
-          return "The connected Google user cannot access this account. If it sits under a manager account, pass that manager as loginCustomerId.";
-        }
-        return `Google returned ${error.status}${error.message ? `: ${error.message}` : ""}. Keyword planning can also be limited on test accounts.`;
-      })(),
-      raw: response.ok ? undefined : toGoogleDebugPayload(response)
-    }, !response.ok);
-  }));
-
-  server.registerTool("google_ads_reach_planner", {
-    title: "Google Ads Reach Planner",
-    description: "YouTube and video reach planning: list plannable locations, list the products available in a location, or forecast reach, frequency and impressions for a budget split across products. Google has to approve an account before Reach Planner returns data.",
-    inputSchema: {
-      action: z.enum(["locations", "products", "forecast"]),
-      customerId: z.string().optional(),
-      loginCustomerId: z.string().optional(),
-      plannableLocationId: z.string().optional(),
-      currencyCode: z.string().optional(),
-      durationInDays: z.number().int().min(1).max(90).optional(),
-      products: z.array(z.object({ code: z.string().min(1), budget: z.number().positive() })).optional(),
-      targeting: z.record(z.any()).optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.google_ads_reach_planner, async ({ googleCredentials }) => {
-    let response;
-    try {
-      response = await runGoogleAdsReachPlanner(googleCredentials.accessToken, params);
-    } catch (error) {
-      return buildToolResult({ error: "invalid_reach_planner_request", error_description: error.message }, true);
-    }
-    return buildToolResult({
-      action: params.action,
-      requestCount: 1,
-      hint: response.ok ? undefined : "Reach Planner only answers for accounts Google has approved for it.",
-      raw: toGoogleDebugPayload(response)
-    }, !response.ok);
-  }));
-
-  server.registerTool("run_google_ads_across_accounts", {
-    title: "Run Google Ads Query Across Accounts",
-    description: "Run one GAQL query against every client account under a manager (MCC) and get the rows back together, each tagged with its account, plus per-account totals. Each account costs one API request, so use dryRun first to see the account list and request count, and keep maxAccounts small on a Basic Access developer token.",
-    inputSchema: {
-      managerCustomerId: z.string().min(1),
-      loginCustomerId: z.string().optional(),
-      customerIds: z.array(z.string().min(1)).max(50).optional(),
-      query: z.string().min(1),
-      maxAccounts: z.number().int().min(1).max(50).optional(),
-      dryRun: z.boolean().optional(),
-      computedMetrics: z.array(z.object({ name: z.string().min(1), formula: z.string().min(1) })).optional(),
-      having: z.array(z.object({ field: z.string().min(1), op: z.string().optional(), value: z.any().optional() })).optional(),
-      sort: z.array(z.object({ field: z.string().min(1), direction: z.enum(["asc", "desc"]).optional() })).optional(),
-      topN: z.number().int().min(1).max(10000).optional()
-    },
-    annotations: { readOnlyHint: true }
-  }, async (params) => withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_google_ads_across_accounts, async ({ googleCredentials }) => {
-    if (!/^\s*SELECT\b/i.test(params.query)) {
-      return buildToolResult({ error: "invalid_query", error_description: "query must be a GAQL SELECT statement." }, true);
-    }
-    const maxAccounts = params.maxAccounts || 10;
-    let accounts;
-    let requestCount = 0;
-    if (params.customerIds?.length) {
-      accounts = params.customerIds.map((customerId) => ({ customerId: normalizeGoogleAdsCustomerId(customerId), name: null }));
-    } else {
-      const listing = await listManagedGoogleAdsAccounts(googleCredentials.accessToken, params);
-      requestCount += 1;
-      if (!listing.response.ok) {
-        return buildToolResult({ error: "could_not_list_accounts", raw: toGoogleDebugPayload(listing.response) }, true);
-      }
-      accounts = listing.accounts;
-    }
-    const selected = accounts.slice(0, maxAccounts);
-    const skipped = accounts.length - selected.length;
-    if (params.dryRun) {
-      return buildToolResult({
-        dryRun: true,
-        accountsFound: accounts.length,
-        accountsThatWouldRun: selected,
-        accountsSkippedByMaxAccounts: skipped,
-        requestsSoFar: requestCount,
-        requestsIfRun: selected.length
-      });
-    }
-    const outcomes = await runWithConcurrency(selected, 5, async (account) => {
-      const response = await queryGoogleAds(googleCredentials.accessToken, {
-        customerId: account.customerId,
-        loginCustomerId: params.loginCustomerId || params.managerCustomerId,
-        query: params.query,
-        pageSize: GOOGLE_ADS_MAX_PAGE_SIZE
-      });
-      const rows = response.ok ? (response.body?.results || []).map((row) => googleAdsResultToRecord(row, account)) : [];
-      return { account, ok: response.ok, rows, error: response.ok ? null : toGoogleDebugPayload(response) };
-    });
-    requestCount += selected.length;
-    const shaped = shapeAdvancedRows(outcomes.flatMap((outcome) => outcome.rows), params);
-    return buildToolResult({
-      platform: "google_ads",
-      requestCount,
-      accountsRun: selected.length,
-      accountsSkippedByMaxAccounts: skipped,
-      accounts: outcomes.map((outcome) => ({
-        customerId: outcome.account.customerId,
-        name: outcome.account.name,
-        ok: outcome.ok,
-        rows: outcome.rows.length,
-        totals: summariseMetrics(outcome.rows),
-        error: outcome.error || undefined
-      })),
-      formulaErrors: shaped.formulaErrors,
-      normalizedRows: shaped.rows
-    }, outcomes.length > 0 && outcomes.every((outcome) => !outcome.ok));
-  }));
 
   /* ---------------- Search Console: many sites, every row ---------------- */
   server.registerTool("query_search_console_advanced", {
@@ -8506,7 +8182,7 @@ app.get("/", (req, res) => {
     tokenUrl: `${baseUrl}/oauth/token`,
     resource: getResourceUrl(req),
     scopes: GOOGLE_SCOPES,
-    tools: [...Object.keys(TOOL_SCOPE_MAP), ...EXPERT_TOOL_NAMES, ...CONNECTION_TOOL_NAMES, ...(isFeatureEnabled("ENABLE_MARKETING_DASHBOARD") ? DASHBOARD_TOOLS : []), ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])],
+    tools: [...new Set([...Object.keys(TOOL_SCOPE_MAP), ...GOOGLE_ADS_TOOL_NAMES]), ...EXPERT_TOOL_NAMES, ...CONNECTION_TOOL_NAMES, ...(isFeatureEnabled("ENABLE_MARKETING_DASHBOARD") ? DASHBOARD_TOOLS : []), ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])],
     optionalCallRailTools: CALLRAIL_TOOL_NAMES,
     presets: buildMarketingPresetCatalog()
   });

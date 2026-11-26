@@ -38,7 +38,11 @@ async function rpc(method, params = {}) {
 }
 
 const skills = loadSkills();
-const SOURCES = ["api/index.js", ...fs.readdirSync("api/connections").map(file => `api/connections/${file}`), "MCP GBP/tools.js"]
+const SOURCES = ["api/index.js",
+  ...fs.readdirSync("api/connections").map(file => `api/connections/${file}`),
+  // The Google Ads tools are registered from api/google-ads/tools.js.
+  ...fs.readdirSync("api/google-ads").filter(file => file.endsWith(".js") && !file.endsWith(".test.js")).map(file => `api/google-ads/${file}`),
+  "MCP GBP/tools.js"]
   .map(file => fs.readFileSync(file, "utf8")).join("\n");
 
 test("every skill is valid and only names tools this server has", () => {
