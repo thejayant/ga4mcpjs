@@ -214,3 +214,40 @@ test("a name that matches nothing returns no candidates and no guess", () => {
   assert.equal(result.match, undefined);
   assert.deepEqual(result.candidates, []);
 });
+
+/* ---------------- status assessment ---------------- */
+
+import { assessStatus } from "./directory.js";
+
+test("only a terminal status marks an account unusable", () => {
+  assert.deepEqual(assessStatus("ENABLED"), { usable: true, usableReason: null });
+  for (const dead of ["CANCELED", "SUSPENDED", "CLOSED", "NOT_ENABLED"]) {
+    const assessed = assessStatus(dead);
+    assert.equal(assessed.usable, false, `${dead} should be unusable`);
+    assert.ok(assessed.usableReason, `${dead} should carry a reason`);
+  }
+});
+
+test("an UNKNOWN status does not hide a possibly working account", () => {
+  // The reported case: EMB (4650900876) came back UNKNOWN and was marked unusable with
+  // "cannot serve reporting data", which overclaims -- UNKNOWN means Google did not
+  // populate the field for this login, not that the account is dead.
+  for (const unclear of ["UNKNOWN", "UNSPECIFIED", null, undefined, ""]) {
+    const assessed = assessStatus(unclear);
+    assert.equal(assessed.usable, true, `${unclear} should stay usable`);
+    assert.equal(assessed.usableReason, null);
+    assert.ok(assessed.statusNote, `${unclear} should carry a caveat note`);
+    assert.ok(!/cannot serve reporting data/.test(assessed.statusNote), "the note must not overclaim");
+  }
+  assert.match(assessStatus("UNKNOWN").statusNote, /not that the account is inactive/);
+});
+
+test("an account with an unclear status is counted as usable in the listing", () => {
+  const listing = directoryListing({
+    byCustomerId: {
+      "4650900876": { customerId: "4650900876", name: "EMB Metal Buildings", status: "UNKNOWN", googleAccount: "embmetalbuildings@gmail.com", loginCustomerId: "4650900876", ...assessStatus("UNKNOWN") }
+    }
+  });
+  assert.equal(listing.usableCount, 1);
+  assert.ok(listing.accounts[0].statusNote, "the caveat should reach the listing");
+});

@@ -51,8 +51,7 @@ function entryFromCustomerRow(row, { googleAccount, loginCustomerId }) {
     isTestAccount: pick(row, "customer.test_account") === true,
     googleAccount,
     loginCustomerId: normalizeCustomerId(loginCustomerId) || null,
-    usable: status === "ENABLED",
-    usableReason: status === "ENABLED" ? null : describeUnusable(status),
+    ...assessStatus(status),
     lastChecked: new Date().toISOString()
   };
 }
@@ -72,17 +71,40 @@ function entryFromClientRow(row, { googleAccount, loginCustomerId }) {
     // A client account is reached through the manager we walked it from.
     loginCustomerId: normalizeCustomerId(loginCustomerId) || null,
     managerCustomerId: normalizeCustomerId(loginCustomerId) || null,
-    usable: status === "ENABLED",
-    usableReason: status === "ENABLED" ? null : describeUnusable(status),
+    ...assessStatus(status),
     lastChecked: new Date().toISOString()
   };
 }
 
+// Statuses Google uses for an account that genuinely cannot serve data.
+const DEAD_STATUSES = new Set(["CANCELED", "SUSPENDED", "CLOSED", "NOT_ENABLED"]);
+
+/**
+ * Whether an account is worth querying, from its customer.status.
+ *
+ * Only a status Google defines as terminal marks an account unusable. UNKNOWN,
+ * UNSPECIFIED and a missing status mean Google did not populate the field for this
+ * caller -- which is not evidence the account is dead. Those stay usable, with a caveat,
+ * because wrongly hiding a working account is worse than letting a query fail with a
+ * clear error.
+ */
+export function assessStatus(status) {
+  if (status === "ENABLED") return { usable: true, usableReason: null };
+  if (DEAD_STATUSES.has(status)) return { usable: false, usableReason: describeUnusable(status) };
+  return {
+    usable: true,
+    usableReason: null,
+    statusNote: status
+      ? `Google reported this account's status as ${status} rather than ENABLED. That usually means the status was not populated for this login, not that the account is inactive. It is still queried; if it is in fact inactive, the query returns a clear error.`
+      : "Google did not report a status for this account. It is still queried; if it is inactive, the query returns a clear error."
+  };
+}
+
 function describeUnusable(status) {
-  if (!status) return "Google did not report a status for this account.";
   if (status === "CANCELED") return "The account is cancelled.";
   if (status === "SUSPENDED") return "The account is suspended.";
   if (status === "CLOSED") return "The account is closed.";
+  if (status === "NOT_ENABLED") return "The account is deactivated (cancelled, suspended, or setup never finished).";
   return `The account status is ${status}, so it cannot serve reporting data.`;
 }
 
@@ -304,6 +326,7 @@ export function directoryListing(directory) {
     loginCustomerId: entry.managerCustomerId || entry.loginCustomerId,
     usable: entry.usable,
     usableReason: entry.usableReason,
+    ...(entry.statusNote ? { statusNote: entry.statusNote } : {}),
     ...(entry.level === undefined ? {} : { level: entry.level })
   })).sort((a, b) => Number(b.usable) - Number(a.usable) || String(a.name || "").localeCompare(String(b.name || "")));
 
