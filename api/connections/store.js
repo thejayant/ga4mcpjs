@@ -40,7 +40,14 @@ function redisStore({ url, token }) {
     replaceIf: (key, expected, value) => command("EVAL", "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('SET', KEYS[1], ARGV[2]) end return nil", "1", PREFIX + key, expected, value),
     addToSet: (key, member) => command("SADD", PREFIX + key, member),
     removeFromSet: (key, member) => command("SREM", PREFIX + key, member),
-    members: async key => (await command("SMEMBERS", PREFIX + key)) || []
+    members: async key => (await command("SMEMBERS", PREFIX + key)) || [],
+    // A plain integer counter (API quota per day). Not sealed: it holds no user data, and
+    // INCRBY has to operate on the stored value.
+    increment: async (key, by = 1, ttlSeconds) => {
+      const total = await command("INCRBY", PREFIX + key, String(by));
+      if (ttlSeconds) await command("EXPIRE", PREFIX + key, String(ttlSeconds));
+      return Number(total);
+    }
   };
 }
 
@@ -57,7 +64,13 @@ export function memoryStore() {
     replaceIf: async (key, expected, value) => { if (live(key) === expected) values.set(key, value); },
     addToSet: async (key, member) => { if (!sets.has(key)) sets.set(key, new Set()); sets.get(key).add(member); },
     removeFromSet: async (key, member) => { sets.get(key)?.delete(member); },
-    members: async key => [...(sets.get(key) || [])]
+    members: async key => [...(sets.get(key) || [])],
+    increment: async (key, by = 1, ttlSeconds) => {
+      const total = Number(live(`ctr:${key}`) || 0) + Number(by);
+      values.set(`ctr:${key}`, total);
+      if (ttlSeconds) expiry.set(`ctr:${key}`, Date.now() + ttlSeconds * 1000);
+      return total;
+    }
   };
 }
 
@@ -192,6 +205,12 @@ export function createConnectionStore({ seal, open, isCurrent = () => true, back
       for (const date of await kv.members(`snaps:${userId}:${id}`)) await kv.del(`snap:${userId}:${id}:${date}`);
       await kv.del(`snaps:${userId}:${id}`);
       await kv.removeFromSet("clarity-snapshots", `${userId}|${id}`);
+    },
+    // Counts API requests per day (Google Ads quota, item 20). Returns the running total,
+    // or null when the backend cannot count, so quota tracking never fails a request.
+    async incrementCounter(key, by = 1, ttlSeconds = 2 * 86_400) {
+      if (typeof kv.increment !== "function") return null;
+      try { return await kv.increment(key, by, ttlSeconds); } catch { return null; }
     },
     // Short-lived cache for rate-limited providers (Clarity allows 10 requests a day).
     async cached(cacheKey, ttlSeconds, load) {
