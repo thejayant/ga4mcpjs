@@ -185,3 +185,59 @@ test("no Ads source file requires a developer token", () => {
     assert.ok(!/requireEnv\(\s*["']GOOGLE_ADS_DEVELOPER_TOKEN/.test(withoutComments), `${file} still requires a developer token`);
   }
 });
+
+/* ---------------- no Ads call path bypasses the gate (hard rule) ---------------- */
+
+test("the legacy Ads request helper in index.js also passes the gate", () => {
+  // The dashboard, the account-router resource lister and the tracking audit still use
+  // callGoogleAdsApi. It must assert the gate, or those paths would be an open door.
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf8");
+  const helper = source.slice(source.indexOf("async function callGoogleAdsApi"));
+  const body = helper.slice(0, helper.indexOf("\nfunction "));
+  assert.match(body, /assertReadOnly\(/, "callGoogleAdsApi does not call assertReadOnly");
+  // And the assertion has to happen before the fetch.
+  assert.ok(
+    body.indexOf("assertReadOnly(") < body.indexOf("await fetch("),
+    "assertReadOnly must run before the request is sent"
+  );
+});
+
+test("index.js no longer sends a global login-customer-id or requires a developer token", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf8");
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  // The P0 root cause: the env var must not be read as a header default anywhere.
+  assert.ok(!/process\.env\.GOOGLE_ADS_LOGIN_CUSTOMER_ID/.test(code), "a global login-customer-id is still read");
+  assert.ok(!/requireEnv\(\s*["']GOOGLE_ADS_DEVELOPER_TOKEN/.test(code), "the developer token is still required");
+});
+
+test("the dead pre-v25 reach planner is gone", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "..", "index.js"), "utf8");
+  // It sent a top-level plannableLocationId, which v26 ignores entirely.
+  assert.ok(!/runGoogleAdsReachPlanner/.test(source), "the old reach planner is still present");
+  assert.ok(!/plannableLocationId: String\(params\.plannableLocationId\)/.test(source));
+});
+
+test("no Ads tool echoes a developer token, refresh token or OAuth header", async () => {
+  const { redactSecrets } = await import("./errors.js");
+  // Whatever shape a raw payload arrives in, credentials are stripped.
+  const leaky = {
+    headers: { Authorization: "Bearer ya29.a0ARrdaM-REALTOKEN", "developer-token": "AbC-dEv_T0ken", "login-customer-id": "9529469947" },
+    request: { refresh_token: "1//0gLONGREFRESHTOKENVALUEHERE", note: "sent ya29.anotherSecret upstream" },
+    nested: [{ cookie: "session=abc" }]
+  };
+  const safe = JSON.stringify(redactSecrets(leaky));
+  for (const secret of ["ya29.a0ARrdaM-REALTOKEN", "AbC-dEv_T0ken", "1//0gLONGREFRESHTOKENVALUEHERE", "ya29.anotherSecret", "session=abc"]) {
+    assert.ok(!safe.includes(secret), `a credential survived redaction: ${secret}`);
+  }
+  // The structure is preserved so the payload is still useful for debugging.
+  assert.match(safe, /"headers"/);
+  assert.match(safe, /\[redacted\]/);
+});
+
+test("the Ads source never logs a full login-customer-id", () => {
+  for (const { file, text } of adsSources) {
+    if (!/console\.log/.test(text)) continue;
+    // client.js logs only the last four digits.
+    if (file === "client.js") assert.match(text, /slice\(-4\)/, "client.js should log only a masked login-customer-id");
+  }
+});

@@ -20,6 +20,7 @@ import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
 import { GOOGLE_ADS_TOOL_NAMES, registerGoogleAdsTools } from "./google-ads/tools.js";
 import { GOOGLE_ADS_API_VERSION, googleAdsApiVersion } from "./google-ads/version.js";
+import { assertReadOnly } from "./google-ads/gate.js";
 import { gbpRequest } from "../MCP GBP/client.js";
 import { loadSkills, registerSkills } from "./_skills.js";
 import { enableTasks, withContinuation } from "./_tasks.js";
@@ -2133,10 +2134,16 @@ async function callCallRailApi(apiToken, pathOrUrl, query = {}) {
   return { ok: response.ok, status: response.status, body: parsedBody };
 }
 
+// The legacy Google Ads request helper, still used by the dashboard, the account-router
+// resource lister and the tracking audit. It goes through the same read-only gate as
+// api/google-ads/client.js, so no Ads call anywhere in this server can bypass it.
 async function callGoogleAdsApi(path, accessToken, options = {}) {
+  const method = options.method || "POST";
+  // Throws ADS_READ_ONLY before any socket is opened if this is not an allowlisted read.
+  assertReadOnly({ path, method, body: options.body });
   const url = path.startsWith("http") ? path : `https://googleads.googleapis.com/${getGoogleAdsApiVersion()}/${path.replace(/^\/+/, "")}`;
   const response = await fetch(url, {
-    method: options.method || "POST",
+    method,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       ...(googleAdsDeveloperToken() ? { "developer-token": googleAdsDeveloperToken() } : {}),
@@ -4246,42 +4253,6 @@ function mapKeywordForecast(body) {
   };
 }
 
-async function runGoogleAdsReachPlanner(accessToken, params) {
-  const version = getGoogleAdsApiVersion();
-  const loginCustomerId = params.loginCustomerId;
-  if (params.action === "locations") {
-    return callGoogleAdsApi(`https://googleads.googleapis.com/${version}:listPlannableLocations`, accessToken, {
-      method: "POST", loginCustomerId, body: {}
-    });
-  }
-  if (params.action === "products") {
-    if (!params.plannableLocationId) throw new Error("products needs plannableLocationId (get one from action locations).");
-    return callGoogleAdsApi(`https://googleads.googleapis.com/${version}:listPlannableProducts`, accessToken, {
-      method: "POST", loginCustomerId, body: { plannableLocationId: String(params.plannableLocationId) }
-    });
-  }
-  if (params.action === "forecast") {
-    if (!params.customerId) throw new Error("forecast needs customerId.");
-    if (!params.plannableLocationId) throw new Error("forecast needs plannableLocationId.");
-    if (!params.products?.length) throw new Error("forecast needs products, each with a code and budget.");
-    return callGoogleAdsApi(`customers/${normalizeGoogleAdsCustomerId(params.customerId)}:generateReachForecast`, accessToken, {
-      method: "POST",
-      loginCustomerId,
-      body: {
-        currencyCode: params.currencyCode,
-        campaignDuration: { durationInDays: params.durationInDays || 28 },
-        plannableLocationId: String(params.plannableLocationId),
-        targeting: params.targeting,
-        plannedProducts: params.products.map((product) => ({
-          plannableProductCode: product.code,
-          budgetMicros: toMicros(product.budget)
-        }))
-      }
-    });
-  }
-  throw new Error(`Unsupported reach planner action: ${params.action}`);
-}
-
 /* ---------------- Google Ads: across every account under a manager ---------------- */
 
 function camelToSnakeSegment(segment) {
@@ -4298,82 +4269,6 @@ function flattenGoogleAdsResult(value, prefix = "", out = {}) {
     else out[path] = entry;
   }
   return out;
-}
-
-function googleAdsResultToRecord(row, account) {
-  const flat = flattenGoogleAdsResult(row);
-  const dimensions = { customer_id: account.customerId, customer_name: account.name };
-  const metrics = {};
-  for (const [path, value] of Object.entries(flat)) {
-    if (path.startsWith("metrics.")) {
-      const name = path.slice("metrics.".length);
-      if (name.endsWith("_micros")) metrics[name.replace(/_micros$/, "")] = microsToStandardCurrency(value);
-      else metrics[name] = toNumber(value) ?? value;
-    } else if (path.endsWith("_micros")) {
-      dimensions[path.replace(/_micros$/, "")] = microsToStandardCurrency(value);
-    } else {
-      dimensions[path] = Array.isArray(value) ? JSON.stringify(value) : value;
-    }
-  }
-  return toAdvancedRecord("google_ads", dimensions, metrics, { customerId: account.customerId });
-}
-
-async function listManagedGoogleAdsAccounts(accessToken, { managerCustomerId, loginCustomerId, maxLevel = 1 }) {
-  const query = "SELECT customer_client.id, customer_client.descriptive_name, customer_client.currency_code, "
-    + "customer_client.level, customer_client.manager, customer_client.status FROM customer_client "
-    + `WHERE customer_client.status = 'ENABLED' AND customer_client.manager = FALSE AND customer_client.level <= ${Number(maxLevel) || 1} `
-    + "ORDER BY customer_client.descriptive_name LIMIT 1000";
-  const response = await queryGoogleAds(accessToken, {
-    customerId: managerCustomerId,
-    loginCustomerId: loginCustomerId || managerCustomerId,
-    query,
-    pageSize: 1000
-  });
-  const accounts = response.ok
-    ? (response.body?.results || []).map((row) => ({
-        customerId: String(getGoogleAdsValue(row, "customer_client.id")),
-        name: getGoogleAdsValue(row, "customer_client.descriptive_name") || null,
-        currency: getGoogleAdsValue(row, "customer_client.currency_code") || null
-      }))
-    : [];
-  return { response, accounts };
-}
-
-/* ---------------- Search Console: paging and multiple sites ---------------- */
-
-// Pulls Google's own reason out of a failed response, so a hint reflects what Google
-// actually said rather than a guess at the likely cause.
-function describeGoogleError(response) {
-  const body = response?.body;
-  const error = body?.error || (Array.isArray(body) ? body[0]?.error : null) || {};
-  const text = JSON.stringify(body ?? "");
-  const codes = [...new Set([...text.matchAll(/"([A-Z][A-Z0-9_]{3,})"/g)].map((match) => match[1]))];
-  return { status: response?.status ?? null, message: error.message || null, codes };
-}
-
-const SEARCH_CONSOLE_PAGE_SIZE = 25000;
-
-// Keeps asking for the next 25,000 rows until the API runs dry or the caller's
-// ceiling is reached. The fetcher is injected so the paging logic can be tested.
-//
-// One row past the ceiling is requested, so "cut off" is reported only when Search
-// Console really had more. Filling the ceiling exactly is not the same thing.
-async function collectPagedRows(fetchPage, { maxRows, startRow = 0, pageSize = SEARCH_CONSOLE_PAGE_SIZE }) {
-  const target = maxRows + 1;
-  const rows = [];
-  let cursor = startRow;
-  let requests = 0;
-  while (rows.length < target) {
-    const size = Math.min(pageSize, target - rows.length);
-    const response = await fetchPage({ startRow: cursor, rowLimit: size });
-    requests += 1;
-    if (!response.ok) return { ok: false, response, rows: rows.slice(0, maxRows), requests, truncated: false };
-    const page = response.body?.rows || [];
-    rows.push(...page);
-    if (page.length < size) break;
-    cursor += page.length;
-  }
-  return { ok: true, rows: rows.slice(0, maxRows), requests, truncated: rows.length > maxRows };
 }
 
 /* ---------------- Merchant Center ---------------- */
@@ -5208,9 +5103,11 @@ function getEnvironmentPresence() {
     GOOGLE_CLIENT_SECRET: Boolean(process.env.GOOGLE_CLIENT_SECRET),
     APP_BASE_URL: Boolean(process.env.APP_BASE_URL || process.env.BASE_URL),
     APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET),
+    // Optional since Google's 2026-09-09 developer token sunset; the header is omitted when unset.
     GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
-    GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
-    GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "basic"),
+    GOOGLE_ADS_API_VERSION: googleAdsApiVersion(),
+    GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "explorer"),
+    GOOGLE_ADS_READ_ONLY: "enforced (cannot be disabled)",
     META_APP_ID: Boolean(process.env.META_APP_ID),
     META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
     META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
@@ -5587,24 +5484,6 @@ async function searchStreamGoogleAds(accessToken, params) {
       query: params.query,
       summaryRowSetting: params.summaryRowSetting
     }
-  });
-}
-
-async function getGoogleAdsField(accessToken, name) {
-  return callGoogleAdsApi(`googleAdsFields/${encodeURIComponent(String(name || "").trim())}`, accessToken, {
-    method: "GET"
-  });
-}
-
-async function searchGoogleAdsFields(accessToken, params) {
-  const url = new URL(`https://googleads.googleapis.com/${getGoogleAdsApiVersion()}/googleAdsFields:search`);
-  appendQueryParams(url, {
-    query: params.query,
-    pageSize: params.pageSize,
-    pageToken: params.pageToken
-  });
-  return callGoogleAdsApi(url.toString(), accessToken, {
-    method: "GET"
   });
 }
 
@@ -8338,8 +8217,7 @@ app.get("/auth/google/start", (req, res) => {
         SESSION_SECRET: Boolean(process.env.SESSION_SECRET),
         APP_ENCRYPTION_KEY: Boolean(process.env.APP_ENCRYPTION_KEY),
         GOOGLE_ADS_DEVELOPER_TOKEN: Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN),
-        GOOGLE_ADS_LOGIN_CUSTOMER_ID: Boolean(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
-    GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "basic"),
+    GOOGLE_ADS_ACCESS_LEVEL: String(process.env.GOOGLE_ADS_ACCESS_LEVEL || "explorer"),
     META_APP_ID: Boolean(process.env.META_APP_ID),
     META_APP_SECRET: Boolean(process.env.META_APP_SECRET),
     META_GRAPH_API_VERSION: String(process.env.META_GRAPH_API_VERSION || "v21.0"),
