@@ -198,12 +198,19 @@ export function registerConnectionTools(server, { req, store, seal, withAuth, re
       dimensions: z.string().regex(/^[A-Za-z,]+$/).max(200).optional(),
       filters: z.string().max(300).optional(),
       sort: z.string().regex(/^-?[A-Za-z,-]+$/).max(200).optional(),
-      maxResults: z.number().int().min(1).max(200).optional()
+      maxResults: z.number().int().min(1).max(200).optional(),
+      // Without startIndex there is no way past the first maxResults rows.
+      startIndex: z.number().int().min(1).optional()
+        .describe("1-based row to start from, for paging past maxResults."),
+      currency: z.string().regex(/^[A-Za-z]{3}$/).optional()
+        .describe("ISO 4217 code for earnings metrics; defaults to USD."),
+      includeHistoricalChannelData: z.boolean().optional()
+        .describe("Content owner reports: include watch time from before the channel joined the owner.")
     },
     annotations: { readOnlyHint: true }
   }, forUser("youtube", async ({ accessToken, args }) => {
     const { startDate, endDate } = period(args);
-    return reply(await youtubeAnalytics(accessToken, { startDate, endDate, metrics: args.metrics, dimensions: args.dimensions, filters: args.filters, sort: args.sort, maxResults: args.maxResults }),
+    return reply(await youtubeAnalytics(accessToken, { startDate, endDate, metrics: args.metrics, dimensions: args.dimensions, filters: args.filters, sort: args.sort, maxResults: args.maxResults, startIndex: args.startIndex, currency: args.currency, includeHistoricalChannelData: args.includeHistoricalChannelData }),
       body => ({ startDate, endDate, rows: body.rows }));
   }));
 

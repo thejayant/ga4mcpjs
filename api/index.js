@@ -19,6 +19,12 @@ import { PROVIDERS, configureAccountProviders } from "./connections/providers.js
 import { freshAccessToken } from "./connections/oauth.js";
 import { createAccountRouter, siteKey } from "./connections/routing.js";
 import { GOOGLE_ADS_TOOL_NAMES, registerGoogleAdsTools } from "./_google-ads/tools.js";
+import {
+  SEARCH_DIMENSIONS, SEARCH_TYPES, assertSearchConsoleRequest,
+  explainEmptySearchConsoleResult, searchConsoleFreshness
+} from "./_search-console/capabilities.js";
+import { metaGraphBaseUrl, metaVersionInfo } from "./_meta/version.js";
+import { buildMarketingCatalog, searchCatalog } from "./_catalog/catalog.js";
 import { GOOGLE_ADS_API_VERSION, googleAdsApiVersion } from "./_google-ads/version.js";
 import { assertReadOnly } from "./_google-ads/gate.js";
 import { gbpRequest } from "../MCP GBP/client.js";
@@ -616,7 +622,7 @@ const PLATFORM_GUARDRAILS = {
       "Meta has no refresh tokens. A long-lived user token lasts about 60 days; refreshing an MCP token re-extends it, but if the window lapses the user must re-authorize at /auth/meta/start.",
       "Every permission used here needs Meta App Review. Before approval only the app's own admins, developers and testers can grant them.",
       "Page and Instagram insights are documented against a Page access token, which costs one extra Graph request per call to resolve.",
-      "Meta rotates and deprecates insight metric names between Graph versions. Presets carry defaults for the configured version and expose a metrics override; set META_GRAPH_API_VERSION to a version Meta still supports.",
+      `Meta rotates and deprecates insight metric names between Graph versions. Presets carry defaults for the configured version and expose a metrics override. Graph API ${metaVersionInfo().version} is in use${metaVersionInfo().estimatedSunset ? `, released ${metaVersionInfo().releasedOn} with an estimated sunset of ${metaVersionInfo().estimatedSunset}` : ""}. Meta supports a version for about two years; set META_GRAPH_API_VERSION to a version Meta still supports.`,
       "Instagram follower demographics need at least 100 followers, and Instagram stories only cover the last 24 hours.",
       "Conversions are read from the actions array. Which action_type counts as a conversion depends on the pixel setup, so conversionActionType is configurable and the raw actions are always returned.",
       "Ads insights are attributed on Meta's own attribution windows, so Meta conversion counts will not tie out exactly against GA4 or Google Ads.",
@@ -978,14 +984,15 @@ function getCallRailBaseUrl() {
   return String(process.env.CALLRAIL_API_BASE_URL || "https://api.callrail.com/v3").replace(/\/+$/, "");
 }
 
+// Meta deprecates Graph versions about two years after release. The version, its
+// support window and the refusal to fall back to a sunset default all live in
+// api/_meta/version.js.
 function getMetaGraphApiVersion() {
-  // Meta deprecates Graph versions roughly two years after release, so this is
-  // deliberately env-driven rather than pinned in code.
-  return String(process.env.META_GRAPH_API_VERSION || "v21.0").trim();
+  return metaVersionInfo().version;
 }
 
 function getMetaGraphBaseUrl() {
-  return `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
+  return metaGraphBaseUrl();
 }
 
 function requireMetaAppId() {
@@ -5085,6 +5092,34 @@ function buildMarketingGuardrailsPayload() {
   };
 }
 
+// The searchable capability index, built once per cold start from the same definitions
+// the tools themselves use, so it cannot drift from what the server can actually do.
+let marketingCatalogCache = null;
+function marketingCatalog(toolNames = []) {
+  if (marketingCatalogCache) return marketingCatalogCache;
+  const { expertVersion: _version, ...presets } = buildMarketingPresetCatalog();
+  marketingCatalogCache = buildMarketingCatalog({
+    presets,
+    normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
+    guardrails: PLATFORM_GUARDRAILS,
+    tools: toolNames.map((name) => ({ name, platform: toolFamily(name) || platformForToolName(name) }))
+  });
+  return marketingCatalogCache;
+}
+
+// toolFamily only knows google/meta/callrail; name the rest so every tool lands on a platform.
+function platformForToolName(name) {
+  if (/^gbp_/.test(name)) return "google_business_profile";
+  if (/^youtube_/.test(name)) return "youtube";
+  if (/^clarity_/.test(name)) return "clarity";
+  if (/^bing_/.test(name)) return "bing_webmaster";
+  if (/bigquery/.test(name)) return "bigquery";
+  if (/merchant/.test(name)) return "merchant_center";
+  if (/search_console/.test(name)) return "search_console";
+  if (/ga4/.test(name)) return "ga4";
+  return "other";
+}
+
 function buildMarketingPresetCatalog() {
   return {
     expertVersion: EXPERT_VERSION,
@@ -5164,7 +5199,35 @@ async function listSearchConsoleSites(accessToken) {
   return callGoogleApi("https://www.googleapis.com/webmasters/v3/sites", accessToken, { method: "GET" });
 }
 
+/**
+ * Adds what the raw Search Analytics response leaves implicit: Google's freshness metadata
+ * (which rows are still being collected), the advisory notes from request validation, and
+ * why an empty result may not mean "no traffic".
+ */
+function decorateSearchConsoleResult(response, request) {
+  if (!response?.ok) return toGoogleDebugPayload(response);
+  const body = response.body || {};
+  const freshness = searchConsoleFreshness(body);
+  const rows = body.rows || [];
+  const notes = [...(request?.searchConsoleNotes || [])];
+  if (!rows.length) {
+    const why = explainEmptySearchConsoleResult(request || {});
+    if (why) notes.push(why);
+  }
+  return {
+    ...body,
+    rowCount: rows.length,
+    ...(freshness ? { freshness } : {}),
+    ...(notes.length ? { notes } : {})
+  };
+}
+
 async function querySearchConsole(accessToken, params) {
+  // Constraints Google documents as unsupported are rejected here, before the request, so
+  // an invalid combination gives a clear message instead of an opaque error or -- worse --
+  // an empty result that reads as "no traffic". Returns advisory notes for legal but
+  // surprising combinations, which callers surface.
+  params.searchConsoleNotes = assertSearchConsoleRequest(params);
   return callGoogleApi(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(params.siteUrl)}/searchAnalytics/query`, accessToken, {
     method: "POST",
     body: JSON.stringify({
@@ -5526,6 +5589,23 @@ function isToolCall(body) {
   return body?.method === "tools/call" && typeof body?.params?.name === "string";
 }
 
+// Search Analytics inputs, shared so every Search Console tool offers the same surface.
+// webMultimodal (Google Lens, Circle to Search, image uploads) was added 2026-11-16.
+const SEARCH_TYPE_INPUT = z.enum(SEARCH_TYPES).optional()
+  .describe('Which Search surface to report on. "web" (default) is the combined All tab and excludes Discover and Google News. "webMultimodal" covers Google Lens, Circle to Search on Android and image uploads.');
+
+// Google deprecated searchType in favour of type. Still accepted so existing callers keep
+// working, but models should reach for `type`.
+const SEARCH_TYPE_LEGACY_INPUT = z.enum(SEARCH_TYPES).optional()
+  .describe("Deprecated: use `type` instead. Kept for compatibility; if both are given, `type` is what Google honours.");
+
+const DIMENSION_FILTER_GROUPS_INPUT = z.array(z.record(z.any())).optional()
+  .describe(
+    'Search Analytics filter groups. Each group takes `filters` (one value per entry: {dimension, operator, expression}) and/or `filterLists` ' +
+    '(several exact values for one dimension in a single request: {dimension, expressions[]}, supported for "country" using ISO 3166-1 alpha-3 codes ' +
+    'and "device" using DESKTOP/MOBILE/TABLET). A dimension may appear in filters or filterLists, not both.'
+  );
+
 const ACCOUNT_INPUT = z.string().trim().min(1).max(200).optional()
   .describe("Only when several accounts are connected for this platform: which one to use (its label or id from manage_connections). Usually omit it: the account that can see the requested property is used automatically.");
 
@@ -5631,6 +5711,41 @@ async function createServer(req, era = "legacy") {
     inputSchema: {},
     annotations: { readOnlyHint: true }
   }, async () => buildToolResult(buildMarketingPresetCatalog()));
+  // One searchable index across every platform, preset, normalized field and tool, so a
+  // model can find the right call for a question without pulling three large dumps first.
+  server.registerTool("find_marketing_data", {
+    title: "Find Marketing Data",
+    description:
+      "Read-only. Search everything this server can answer and get back the exact tool and arguments to call. " +
+      "Ask in plain words (\"bounce rate\", \"phone calls\", \"branded queries\", \"how much did we spend\", \"product listing issues\") " +
+      "or by field name. Returns ranked matches across Google Ads, GA4, Search Console, Merchant Center, Meta, CallRail, " +
+      "Business Profile, YouTube, Clarity, Bing and BigQuery, each with the platform, the preset or field, the native field " +
+      "names per platform, and a ready-to-run call. Also says when something is not available anywhere, so you do not go " +
+      "looking for data no API exposes. Start here when you do not already know which tool answers a question.",
+    inputSchema: {
+      query: z.string().min(1).max(200)
+        .describe('What you are looking for, in plain words or as a field name.'),
+      platform: z.string().min(1).max(40).optional()
+        .describe("Restrict to one platform, for example ga4, google_ads, search_console, merchant_center, meta, callrail, google_business_profile, youtube."),
+      kind: z.enum(["preset", "field", "tool"]).optional()
+        .describe("Restrict to presets, normalized fields, or tools."),
+      limit: z.number().int().min(1).max(50).optional()
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
+  }, async (params) => {
+    const parsed = z.object({
+      query: z.string().min(1).max(200),
+      platform: z.string().min(1).max(40).optional(),
+      kind: z.enum(["preset", "field", "tool"]).optional(),
+      limit: z.number().int().min(1).max(50).optional()
+    }).parse(params);
+    const catalog = marketingCatalog([...new Set([...Object.keys(TOOL_SCOPE_MAP), ...GOOGLE_ADS_TOOL_NAMES, ...EXPERT_TOOL_NAMES, ...CONNECTION_TOOL_NAMES, ...(GBP_ENABLED ? GBP_TOOL_NAMES : [])])]);
+    return buildToolResult({
+      ...searchCatalog(catalog, parsed),
+      catalog: { entryCount: catalog.entryCount, platforms: catalog.platforms },
+      next: "Each match carries a `call` with the tool and arguments. Fill in the account or property id, then run it. list_marketing_guardrails explains each platform\u2019s limits."
+    });
+  });
   server.registerTool("get_marketing_schema", {
     title: "Get Marketing Schema",
     description: "Return the normalized cross-platform marketing schema and field mapping guide.",
@@ -5713,9 +5828,9 @@ async function createServer(req, era = "legacy") {
       startRow: z.number().int().min(0).optional(),
       aggregationType: z.enum(["auto", "byPage", "byProperty", "byNewsShowcasePanel"]).optional(),
       dataState: z.enum(["all", "final", "hourly_all"]).optional(),
-      searchType: z.enum(["web", "image", "video", "news", "discover", "googleNews"]).optional(),
-      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+      searchType: SEARCH_TYPE_LEGACY_INPUT,
+      type: SEARCH_TYPE_INPUT,
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT
     },
     annotations: { readOnlyHint: true }
   }, async (params) => {
@@ -5730,11 +5845,11 @@ async function createServer(req, era = "legacy") {
       dataState: z.string().optional(),
       searchType: z.string().optional(),
       type: z.string().optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT
     }).parse(params);
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.query_search_console, async ({ googleCredentials }) => {
       const response = await querySearchConsole(googleCredentials.accessToken, parsed);
-      return buildToolResult(toGoogleDebugPayload(response), !response.ok);
+      return buildToolResult(decorateSearchConsoleResult(response, parsed), !response.ok);
     });
   });
   server.registerTool("list_search_console_sitemaps", {
@@ -5803,15 +5918,15 @@ async function createServer(req, era = "legacy") {
       startRow: z.number().int().min(0).optional(),
       aggregationType: z.enum(["auto", "byPage", "byProperty", "byNewsShowcasePanel"]).optional(),
       dataState: z.enum(["all", "final", "hourly_all"]).optional(),
-      searchType: z.enum(["web", "image", "video", "news", "discover", "googleNews"]).optional(),
-      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
+      searchType: SEARCH_TYPE_LEGACY_INPUT,
+      type: SEARCH_TYPE_INPUT,
       secondaryDimension: z.enum(["country", "device", "page", "query"]).optional(),
       brandTerms: z.array(z.string()).optional(),
       brandMode: z.enum(["branded", "non_branded"]).optional(),
       minPosition: z.number().min(1).max(100).optional(),
       maxPosition: z.number().min(1).max(100).optional(),
       minImpressions: z.number().int().min(0).optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT
     },
     annotations: { readOnlyHint: true }
   }, async (params) => {
@@ -5824,15 +5939,15 @@ async function createServer(req, era = "legacy") {
       startRow: z.number().int().min(0).optional(),
       aggregationType: z.enum(["auto", "byPage", "byProperty", "byNewsShowcasePanel"]).optional(),
       dataState: z.enum(["all", "final", "hourly_all"]).optional(),
-      searchType: z.enum(["web", "image", "video", "news", "discover", "googleNews"]).optional(),
-      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
+      searchType: SEARCH_TYPE_LEGACY_INPUT,
+      type: SEARCH_TYPE_INPUT,
       secondaryDimension: z.enum(["country", "device", "page", "query"]).optional(),
       brandTerms: z.array(z.string()).optional(),
       brandMode: z.enum(["branded", "non_branded"]).optional(),
       minPosition: z.number().min(1).max(100).optional(),
       maxPosition: z.number().min(1).max(100).optional(),
       minImpressions: z.number().int().min(0).optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT
     }).parse(params);
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.run_search_console_preset, async ({ googleCredentials }) => {
       let presetConfig;
@@ -5854,9 +5969,16 @@ async function createServer(req, era = "legacy") {
         preset: parsed.preset,
         entityType: presetConfig.entityType,
         dateRange: presetConfig.dateRange,
-        notes: presetConfig.notes,
+        // Advisory notes from request validation, and why an empty result may not mean
+        // "no traffic", alongside the preset's own notes.
+        notes: [
+          ...presetConfig.notes,
+          ...(presetConfig.request.searchConsoleNotes || []),
+          ...(response.ok && !normalizedRows.length ? [explainEmptySearchConsoleResult(presetConfig.request)].filter(Boolean) : [])
+        ],
         postFilter: presetConfig.postFilter,
         rowCount: normalizedRows.length,
+        ...(response.ok && searchConsoleFreshness(response.body) ? { freshness: searchConsoleFreshness(response.body) } : {}),
         guardrails: PLATFORM_GUARDRAILS.search_console,
         request: presetConfig.request,
         normalizedSchema: NORMALIZED_MARKETING_SCHEMA,
@@ -5876,8 +5998,8 @@ async function createServer(req, era = "legacy") {
       previousStartDate: z.string(),
       previousEndDate: z.string(),
       rowLimit: z.number().int().min(1).max(25000).optional(),
-      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+      type: SEARCH_TYPE_INPUT,
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT
     },
     annotations: { readOnlyHint: true }
   }, async (params) => {
@@ -5889,8 +6011,8 @@ async function createServer(req, era = "legacy") {
       previousStartDate: z.string(),
       previousEndDate: z.string(),
       rowLimit: z.number().int().min(1).max(25000).optional(),
-      type: z.enum(["web", "image", "video", "discover", "googleNews", "news"]).optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional()
+      type: SEARCH_TYPE_INPUT,
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT
     }).parse(params);
     return withVerifiedToolAuth(req, TOOL_SCOPE_MAP.compare_search_console_periods, async ({ googleCredentials }) => {
       const dimension = parsed.dimension || "query";
@@ -5945,6 +6067,18 @@ async function createServer(req, era = "legacy") {
         previousRange: { startDate: parsed.previousStartDate, endDate: parsed.previousEndDate },
         rowCount: comparisons.length,
         requestCount: 2,
+        // A current period that is still being collected, compared against a complete
+        // previous one, looks like a drop that is not real. Say so rather than let the
+        // comparison imply it.
+        ...(searchConsoleFreshness(current.body)
+          ? {
+              freshness: {
+                ...searchConsoleFreshness(current.body),
+                comparisonWarning: "The current period contains data Google is still collecting, so this comparison understates it. Treat the change as provisional until that data settles."
+              }
+            }
+          : {}),
+        ...(baseRequest.searchConsoleNotes?.length ? { notes: baseRequest.searchConsoleNotes } : {}),
         guardrails: PLATFORM_GUARDRAILS.search_console,
         comparisons
       });
@@ -6838,14 +6972,16 @@ async function createServer(req, era = "legacy") {
     description: "Search Console performance across up to 10 sites at once, paging automatically past the 25,000-row limit up to maxRows, so a 16-month pull of every query and page comes back complete. Rows are tagged with their site and support derived metrics, filtering and sorting on them, and top-N.",
     inputSchema: {
       siteUrls: z.array(z.string().min(1)).min(1).max(10),
-      dimensions: z.array(z.enum(["date", "query", "page", "country", "device", "searchAppearance"])).optional(),
+      dimensions: z.array(z.enum(SEARCH_DIMENSIONS)).optional()
+        .describe('Group by any of: ' + SEARCH_DIMENSIONS.join(", ") + '. "hour" needs dataState "hourly_all"; "brandedClassification" needs a qualifying top-level property.'),
+      type: SEARCH_TYPE_INPUT,
       startDate: z.string().optional(),
       endDate: z.string().optional(),
       maxRows: z.number().int().min(1).max(250000).optional(),
-      searchType: z.enum(["web", "image", "video", "news", "discover", "googleNews"]).optional(),
+      searchType: SEARCH_TYPE_LEGACY_INPUT,
       dataState: z.enum(["all", "final", "hourly_all"]).optional(),
       aggregationType: z.enum(["auto", "byPage", "byProperty", "byNewsShowcasePanel"]).optional(),
-      dimensionFilterGroups: z.array(z.record(z.any())).optional(),
+      dimensionFilterGroups: DIMENSION_FILTER_GROUPS_INPUT,
       computedMetrics: z.array(z.object({ name: z.string().min(1), formula: z.string().min(1) })).optional(),
       having: z.array(z.object({ field: z.string().min(1), op: z.string().optional(), value: z.any().optional() })).optional(),
       sort: z.array(z.object({ field: z.string().min(1), direction: z.enum(["asc", "desc"]).optional() })).optional(),

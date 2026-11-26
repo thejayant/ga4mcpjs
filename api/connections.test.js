@@ -621,6 +621,9 @@ test("extra CallRail keys: each account's calls use its own key; tools appear wi
 test("extra Meta logins: a long-lived token stands in when the main sign-in has no Meta", async () => {
   process.env.META_APP_ID = "meta-app";
   process.env.META_APP_SECRET = "meta-secret";
+  // Meta refuses to fall back to a Graph version past its sunset, so a version has to be
+  // configured here exactly as it is in a real deployment.
+  process.env.META_GRAPH_API_VERSION = "v23.0";
   try {
     const token = tokenFor("user-meta-multi");
     const t = await linkFor(token);
@@ -641,6 +644,7 @@ test("extra Meta logins: a long-lived token stands in when the main sign-in has 
   } finally {
     delete process.env.META_APP_ID;
     delete process.env.META_APP_SECRET;
+    delete process.env.META_GRAPH_API_VERSION;
   }
 });
 

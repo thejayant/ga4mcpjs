@@ -137,7 +137,7 @@ Optional:
 - `GOOGLE_ADS_DEVELOPER_TOKEN` is optional (see above) and sent only if set
 - `GOOGLE_ADS_LOGIN_CUSTOMER_ID` is **no longer used at all**. It used to be sent as the default `login-customer-id` for every account, which made accounts that were not linked under that manager fail with `USER_PERMISSION_DENIED`. The header is now chosen per account (see Google Ads notes).
 - `META_APP_ID` and `META_APP_SECRET` for the Meta (Facebook / Instagram) tools
-- `META_GRAPH_API_VERSION` to pin the Graph API version (defaults to `v21.0`)
+- `META_GRAPH_API_VERSION` to pin the Graph API version. **Set this.** Meta supports a Graph version for about two years from release, so the built-in fallback (`v21.0`, released 2024-10-02) is past its estimated sunset of 2026-10-02. Rather than silently call a sunset version, the Meta tools refuse with an actionable error when nothing is configured. An explicitly configured version is never blocked, and one newer than this build knows about is accepted and reported as unverified.
 - `META_LOGIN_CONFIG_ID` to use a Facebook Login for Business configuration instead of a raw scope list (recommended)
 - `ENABLE_GBP=1` to expose Google Business Profile tools and request the `business.manage` scope
 - `CRON_SECRET` to let Vercel Cron run the daily Clarity snapshot job (`/cron/clarity-snapshots`, see Clarity notes); without it the job refuses to run
@@ -594,6 +594,46 @@ token your MCP client uses for this server.
 - `run_ga4_cohort_report` builds a rolling cohort series from the date range, or accepts a full `cohortSpec`. GA4 rejects `dateRanges` alongside `cohortSpec`, so the cohort windows carry the dates.
 - `list_ga4_custom_definitions`, `list_ga4_key_events`, and `list_ga4_data_streams` use the Admin API and are the way to confirm what a property actually measures before writing reports.
 
+## Finding the right tool
+
+`find_marketing_data` is the entry point when you do not already know which tool answers a
+question. It searches one index built across every platform, preset, normalized field and
+tool, and returns ranked matches with a ready-to-run call:
+
+```
+find_marketing_data { "query": "how much did we spend" }
+```
+
+```json
+{ "matches": [
+  { "kind": "field", "platform": ["google_ads", "ga4", "meta"], "id": "cost",
+    "nativeFields": { "google_ads": ["metrics.cost_micros"], "ga4": ["advertiserAdCost"], "meta": ["spend"] },
+    "notAvailableOn": ["search_console", "merchant_center"] },
+  { "kind": "preset", "platform": "google_ads", "id": "campaign_budgets",
+    "call": { "tool": "run_google_ads_preset", "arguments": { "preset": "campaign_budgets", "customerId": "<customerId>" } } }
+] }
+```
+
+Three things it does that the existing dumps do not:
+
+- **Plain words work.** "phone calls" reaches the CallRail presets, "branded queries"
+  reaches Search Console, "bounce rate" reaches GA4 — a synonym layer maps everyday
+  language onto the names the APIs actually use.
+- **It says where a number does *not* exist.** A cross-platform field lists its native name
+  on each platform that has it, and names the platforms that do not.
+- **It says when something exists nowhere.** Asking for "auction insights" returns the
+  nearest alternatives *and* a `notAvailable` entry explaining that no tool here can return
+  it, so a model stops looking instead of inventing a call.
+
+Narrow with `platform` (`ga4`, `google_ads`, `search_console`, `merchant_center`, `meta`,
+`callrail`, `google_business_profile`, `youtube`, …) or `kind` (`preset`, `field`, `tool`).
+
+The index is built at startup from the same definitions the tools themselves use, so it
+cannot drift from what the server can actually do: a preset added to a platform's table
+becomes discoverable without touching the catalogue. `list_marketing_presets`,
+`get_marketing_schema` and `list_marketing_guardrails` still return the full dumps when you
+want to browse rather than search.
+
 ## Search Console notes
 
 - Search Analytics returns at most **25000 rows** per request. `rowLimit` above that is clamped and reported in `notes`; page with `startRow`.
@@ -603,6 +643,60 @@ token your MCP client uses for this server.
 - Query rows are anonymised, so query totals are lower than the site total, and average position cannot be summed across rows.
 - The last two to three days are incomplete unless `dataState: "all"` is set.
 - `compare_search_console_periods` costs **two** Search Analytics requests and returns per-key deltas plus a `new` / `lost` / `both` status. Position deltas are sign-flipped so positive always means improved.
+
+
+### Search surfaces
+
+`type` selects the surface: `web` (default, the combined All tab, excluding Discover and
+Google News), `image`, `video`, `news`, `discover`, `googleNews`, and **`webMultimodal`**
+(Google Lens, Circle to Search on Android, and image uploads in Google Search), added by
+Google on 2026-11-16.
+
+`searchType` is Google's deprecated spelling of the same thing. It still works, but use
+`type`.
+
+### Branded queries
+
+Group or filter by `brandedClassification` (`BRANDED` / `NON_BRANDED`) to split branded
+from non-branded traffic. Google's constraints are enforced locally, so an invalid request
+fails with a clear message rather than an opaque error:
+
+- `equals` is the only supported operator
+- it cannot be combined with a `query` filter in the same request
+- data starts 2026-02-21
+- only top-level properties with enough query and impression volume qualify
+
+A property that does not qualify gets **no rows rather than an error**, so an empty branded
+result carries a note saying exactly that — it does not mean traffic was zero.
+
+### Multi-country and multi-device filters
+
+`dimensionFilterGroups[].filterLists[]` matches several exact values for one dimension in a
+single request, instead of stitching calls together:
+
+```json
+{ "dimensionFilterGroups": [ { "filterLists": [
+  { "dimension": "country", "expressions": ["USA", "GBR", "DEU"] },
+  { "dimension": "device",  "expressions": ["DESKTOP", "MOBILE"] }
+] } ] }
+```
+
+`country` takes ISO 3166-1 alpha-3 codes and `device` takes `DESKTOP`/`MOBILE`/`TABLET`. A
+dimension may appear in `filters` or `filterLists`, not both.
+
+### Hourly data
+
+Group by `hour` with `dataState: "hourly_all"`. Asking for one without the other is allowed
+but flagged in `notes`, since it quietly returns daily data instead.
+
+### Data freshness
+
+Google reports where data is still being collected, and responses now surface it as
+`freshness` with `firstIncompleteDate` or `firstIncompleteHour` (America/Los_Angeles).
+`compare_search_console_periods` additionally warns when the current period is still
+settling, because comparing it against a complete previous period looks like a drop that is
+not real.
+
 
 ## Meta notes (Facebook / Instagram)
 
